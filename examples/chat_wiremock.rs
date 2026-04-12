@@ -11,6 +11,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use superglue::chat::{ChatOptions, complete_with_tools};
+use superglue::hooks::HookRegistry;
+use superglue::guardrails::GuardrailRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
 use superglue::tools::{Tool, ToolRegistry, ToolSpec};
@@ -103,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let messages = vec![ChatMessage::text("user", "trigger tool then finish")];
 
-    let out = complete_with_tools(&http, &registry, messages, &opts).await?;
+    let out = complete_with_tools(&http, &registry, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts).await?;
     println!("rounds: {}", out.rounds);
     println!("content: {:?}", out.content);
     Ok(())

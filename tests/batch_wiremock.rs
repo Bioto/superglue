@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use serde_json::json;
 use superglue::batch::{BatchConfig, BatchError, BatchRequest, ErrorStrategy, batch_complete};
 use superglue::chat::ChatOptions;
+use superglue::hooks::HookRegistry;
+use superglue::guardrails::GuardrailRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::tools::ToolRegistry;
 use wiremock::matchers::{method, path};
@@ -102,7 +104,7 @@ async fn batch_all_succeed() {
         BatchRequest::new("q3").with_id("id-3"),
     ];
 
-    let resp = batch_complete(http, registry, requests, &opts(server.uri()), BatchConfig::default())
+    let resp = batch_complete(http, registry, Arc::new(HookRegistry::new()), Arc::new(GuardrailRegistry::new()), requests, &opts(server.uri()), BatchConfig::default())
         .await
         .unwrap();
 
@@ -150,10 +152,13 @@ async fn batch_continue_on_partial_failure() {
     let config = BatchConfig {
         max_concurrent: 1, // serial so first request always fails first
         error_strategy: ErrorStrategy::Continue,
+        ..Default::default()
     };
     let resp = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         requests,
         &opts(server.uri()),
         config,
@@ -192,6 +197,7 @@ async fn batch_skip_failures() {
     let config = BatchConfig {
         max_concurrent: 1,
         error_strategy: ErrorStrategy::Skip,
+        ..Default::default()
     };
     let requests = vec![
         BatchRequest::new("fail").with_id("fail"),
@@ -202,6 +208,8 @@ async fn batch_skip_failures() {
     let resp = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         requests,
         &opts(server.uri()),
         config,
@@ -229,6 +237,7 @@ async fn batch_fail_fast() {
     let config = BatchConfig {
         max_concurrent: 1,
         error_strategy: ErrorStrategy::FailFast,
+        ..Default::default()
     };
     let requests = vec![
         BatchRequest::new("will-fail").with_id("the-id"),
@@ -238,6 +247,8 @@ async fn batch_fail_fast() {
     let err = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         requests,
         &opts(server.uri()),
         config,
@@ -263,6 +274,8 @@ async fn batch_empty_input() {
     let resp = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         vec![],
         &opts(server.uri()),
         BatchConfig::default(),
@@ -296,6 +309,8 @@ async fn batch_assigns_ids() {
     let resp = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         requests,
         &opts(server.uri()),
         BatchConfig::default(),
@@ -364,6 +379,8 @@ async fn batch_aggregates_usage() {
     let resp = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         requests,
         &opts(server.uri()),
         config,
@@ -412,6 +429,8 @@ async fn batch_per_request_system_prompt() {
     let resp = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         requests,
         &options,
         config,
@@ -480,6 +499,8 @@ async fn batch_respects_max_concurrent() {
     let resp = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         requests,
         &opts(server.uri()),
         config,
@@ -510,6 +531,8 @@ async fn batch_result_metadata() {
     let resp = batch_complete(
         Arc::new(http()),
         Arc::new(ToolRegistry::new()),
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
         vec![BatchRequest::new("hi")],
         &opts(server.uri()),
         BatchConfig::default(),

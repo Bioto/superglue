@@ -1555,6 +1555,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

@@ -18,6 +18,8 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use superglue::chat::{ChatOptions, complete_with_tools};
+use superglue::hooks::HookRegistry;
+use superglue::guardrails::GuardrailRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
 use superglue::tools::{Tool, ToolRegistry, ToolSpec};
@@ -87,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          After you get the tool result, reply with one short sentence.",
     )];
 
-    let outcome = complete_with_tools(&http, &registry, messages, &opts).await?;
+    let outcome = complete_with_tools(&http, &registry, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts).await?;
     println!("rounds:  {}", outcome.rounds);
     println!("content: {:?}", outcome.content);
     println!("finish:  {:?}", outcome.finish_reason);

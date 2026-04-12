@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use superglue::chat::{ChatOptions, stream_complete};
+use superglue::hooks::HookRegistry;
+use superglue::guardrails::GuardrailRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
 use wiremock::matchers::{method, path};
@@ -70,6 +72,8 @@ async fn stream_delivers_all_tokens_in_order() {
     let mut received = Vec::new();
     let out = stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts(server.uri()),
         |d| received.push(d),
@@ -101,6 +105,8 @@ async fn usage_extracted_from_final_chunk() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let out = stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts(server.uri()),
         |_| {},
@@ -141,6 +147,8 @@ async fn finish_reason_length_in_stream() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let out = stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "long")],
         &opts(server.uri()),
         |_| {},
@@ -185,6 +193,8 @@ async fn empty_delta_content_not_forwarded_to_callback() {
     let mut tokens: Vec<String> = Vec::new();
     let out = stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts(server.uri()),
         |d| tokens.push(d),
@@ -237,6 +247,8 @@ async fn null_content_delta_not_forwarded() {
     let mut tokens = Vec::new();
     let out = stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts(server.uri()),
         |d| tokens.push(d),
@@ -264,6 +276,8 @@ async fn stream_non_200_returns_error() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let err = stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts(server.uri()),
         |_| {},
@@ -288,6 +302,8 @@ async fn stream_403_returns_error() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let err = stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts(server.uri()),
         |_| {},
@@ -317,6 +333,8 @@ async fn stream_with_no_content_tokens_returns_empty_string() {
     let mut tokens = Vec::<String>::new();
     let out = stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts(server.uri()),
         |d| tokens.push(d),
@@ -366,6 +384,8 @@ async fn stream_system_prompt_prepended() {
     };
     stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts,
         |_| {},
@@ -409,6 +429,8 @@ async fn stream_request_always_sets_stream_true() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     stream_complete(
         &http,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts(server.uri()),
         |_| {},
@@ -452,6 +474,8 @@ async fn concurrent_streams_all_succeed() {
             tokio::spawn(async move {
                 stream_complete(
                     &http,
+                    &HookRegistry::new(),
+        &GuardrailRegistry::new(),
                     vec![ChatMessage::text("user", "hi")],
                     &opts,
                     |_| {},

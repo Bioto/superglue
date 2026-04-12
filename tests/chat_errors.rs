@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use superglue::chat::{ChatError, ChatOptions, complete_with_tools};
+use superglue::hooks::HookRegistry;
+use superglue::guardrails::GuardrailRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
 use superglue::tools::{Tool, ToolInvokeError, ToolRegistry, ToolSpec};
@@ -114,6 +116,8 @@ async fn http_401_returns_error() {
     let err = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &default_opts(server.uri()),
     )
@@ -141,6 +145,8 @@ async fn http_403_returns_error_not_retried() {
     let err = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &default_opts(server.uri()),
     )
@@ -169,6 +175,8 @@ async fn http_500_returns_error_not_retried() {
     complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &default_opts(server.uri()),
     )
@@ -200,6 +208,8 @@ async fn http_429_is_retried_and_eventually_succeeds() {
     let out = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &default_opts(server.uri()),
     )
@@ -231,6 +241,8 @@ async fn empty_choices_returns_no_choice_error() {
     let err = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &default_opts(server.uri()),
     )
@@ -260,6 +272,8 @@ async fn malformed_tool_args_returns_serde_error() {
     let err = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "call echo")],
         &default_opts(server.uri()),
     )
@@ -292,6 +306,8 @@ async fn unknown_tool_returns_tool_error() {
     let err = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "call missing")],
         &default_opts(server.uri()),
     )
@@ -324,6 +340,8 @@ async fn tool_handler_error_propagates() {
     let err = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "trigger error")],
         &default_opts(server.uri()),
     )
@@ -373,6 +391,8 @@ async fn temperature_forwarded_to_request() {
     complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &opts,
     )
@@ -410,6 +430,8 @@ async fn no_tools_means_tools_field_absent() {
     complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hi")],
         &default_opts(server.uri()),
     )
@@ -455,6 +477,8 @@ async fn system_prompt_prepended_as_first_message() {
     complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "hello")],
         &opts,
     )
@@ -496,6 +520,8 @@ async fn usage_and_finish_reason_extracted() {
     let out = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "ping")],
         &default_opts(server.uri()),
     )
@@ -531,6 +557,8 @@ async fn finish_reason_length_surfaced() {
     let out = complete_with_tools(
         &http,
         &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
         vec![ChatMessage::text("user", "long")],
         &default_opts(server.uri()),
     )
@@ -570,6 +598,8 @@ async fn concurrent_completions_all_succeed() {
                 complete_with_tools(
                     &http,
                     &reg,
+                    &HookRegistry::new(),
+        &GuardrailRegistry::new(),
                     vec![ChatMessage::text("user", "hi")],
                     &opts,
                 )

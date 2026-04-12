@@ -7,12 +7,16 @@
 //! use std::sync::Arc;
 //! use superglue::batch::{BatchConfig, BatchRequest, batch_complete};
 //! use superglue::chat::ChatOptions;
+//! use superglue::guardrails::GuardrailRegistry;
+//! use superglue::hooks::HookRegistry;
 //! use superglue::http::{ClientConfig, HttpClient};
 //! use superglue::tools::ToolRegistry;
 //!
 //! async fn example() {
 //!     let http = Arc::new(HttpClient::new(ClientConfig::default()).unwrap());
 //!     let registry = Arc::new(ToolRegistry::new());
+//!     let hooks = Arc::new(HookRegistry::new());
+//!     let guardrails = Arc::new(GuardrailRegistry::new());
 //!     let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-4o-mini");
 //!
 //!     let requests = vec![
@@ -20,7 +24,7 @@
 //!         BatchRequest::new("What is 2 + 2?"),
 //!     ];
 //!
-//!     let response = batch_complete(http, registry, requests, &options, BatchConfig::default())
+//!     let response = batch_complete(http, registry, hooks, guardrails, requests, &options, BatchConfig::default())
 //!         .await
 //!         .unwrap();
 //!
@@ -38,6 +42,8 @@ use tokio::task::JoinSet;
 use std::time::Duration;
 
 use crate::chat::{ChatOptions, complete_with_tools};
+use crate::guardrails::GuardrailRegistry;
+use crate::hooks::{HookContext, HookRegistry, HookStage};
 use crate::http::HttpClient;
 use crate::openai::ChatMessage;
 use crate::proto;
@@ -233,6 +239,8 @@ struct TaskOutcome {
 pub async fn batch_complete(
     http: Arc<HttpClient>,
     registry: Arc<ToolRegistry>,
+    hooks: Arc<HookRegistry>,
+    guardrails: Arc<GuardrailRegistry>,
     mut requests: Vec<BatchRequest>,
     options: &ChatOptions,
     config: BatchConfig,
@@ -282,6 +290,8 @@ pub async fn batch_complete(
         let sem = Arc::clone(&sem);
         let http = Arc::clone(&http);
         let registry = Arc::clone(&registry);
+        let hooks = Arc::clone(&hooks);
+        let guardrails = Arc::clone(&guardrails);
         let mut opts = (*base_options).clone();
 
         // Per-request system prompt override.
@@ -297,32 +307,76 @@ pub async fn batch_complete(
             let _permit = sem.acquire_owned().await.expect("semaphore closed");
             let item_start = Instant::now();
 
+            // --- PreBatchItem hook (observation only) ---
+            let _ = hooks
+                .run(
+                    HookStage::PreBatchItem,
+                    HookContext::with_meta(
+                        HookStage::PreBatchItem,
+                        &prompt,
+                        "id",
+                        id.as_str(),
+                    ),
+                )
+                .await;
+
             let messages = vec![ChatMessage::text("user", prompt)];
-            let outcome = complete_with_tools(&http, &registry, messages, &opts).await;
+            let outcome =
+                complete_with_tools(&http, &registry, &hooks, &guardrails, messages, &opts).await;
 
             let elapsed_secs = item_start.elapsed().as_secs_f64();
 
             let result = match outcome {
-                Ok(out) => BatchResult {
-                    id,
-                    success: true,
-                    content: out.content,
-                    error: None,
-                    rounds: out.rounds,
-                    usage: out.usage,
-                    elapsed_secs,
-                    metadata,
-                },
-                Err(e) => BatchResult {
-                    id,
-                    success: false,
-                    content: None,
-                    error: Some(e.to_string()),
-                    rounds: 0,
-                    usage: None,
-                    elapsed_secs,
-                    metadata,
-                },
+                Ok(out) => {
+                    let content_str = out.content.clone().unwrap_or_default();
+                    // --- PostBatchItem hook (observation only) ---
+                    let _ = hooks
+                        .run(
+                            HookStage::PostBatchItem,
+                            HookContext::with_meta(
+                                HookStage::PostBatchItem,
+                                &content_str,
+                                "id",
+                                id.as_str(),
+                            ),
+                        )
+                        .await;
+                    BatchResult {
+                        id,
+                        success: true,
+                        content: out.content,
+                        error: None,
+                        rounds: out.rounds,
+                        usage: out.usage,
+                        elapsed_secs,
+                        metadata,
+                    }
+                }
+                Err(e) => {
+                    let err_str = e.to_string();
+                    // --- PostBatchItem hook (observation only, error case) ---
+                    let _ = hooks
+                        .run(
+                            HookStage::PostBatchItem,
+                            HookContext::with_meta(
+                                HookStage::PostBatchItem,
+                                &err_str,
+                                "id",
+                                id.as_str(),
+                            ),
+                        )
+                        .await;
+                    BatchResult {
+                        id,
+                        success: false,
+                        content: None,
+                        error: Some(err_str),
+                        rounds: 0,
+                        usage: None,
+                        elapsed_secs,
+                        metadata,
+                    }
+                }
             };
 
             TaskOutcome { idx, result }

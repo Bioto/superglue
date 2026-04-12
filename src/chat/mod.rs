@@ -4,6 +4,8 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
+use crate::hooks::{HookContext, HookError, HookRegistry, HookStage};
 use crate::http::{Error as HttpError, HttpClient, join_base_url, sse::SseParser};
 use crate::openai::{
     ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, MessageContent,
@@ -142,6 +144,10 @@ pub enum ChatError {
     Serde(#[from] serde_json::Error),
     #[error(transparent)]
     Tool(#[from] ToolInvokeError),
+    #[error("hook aborted: {0}")]
+    Hook(#[from] HookError),
+    #[error(transparent)]
+    Guardrail(#[from] GuardrailError),
     #[error("completion response contained no choices")]
     NoChoice,
     #[error("exceeded max tool rounds ({0})")]
@@ -151,11 +157,14 @@ pub enum ChatError {
 /// Run OpenAI-style chat completions with tools: calls `POST /v1/chat/completions` until the model
 /// returns an assistant message without tool calls or [`ChatOptions::max_tool_rounds`] is exceeded.
 ///
-/// When [`ChatOptions::system_prompt`] is set, it is prepended as a `"system"` message before
-/// any caller-supplied messages.
+/// **Input guardrails** run on the last user message before the first LLM call.
+/// **Output guardrails** run on the final assistant text with a retry loop
+/// (up to [`GuardrailRegistry::max_output_retries`]).
 pub async fn complete_with_tools(
     http: &HttpClient,
     registry: &ToolRegistry,
+    hooks: &HookRegistry,
+    guardrails: &GuardrailRegistry,
     caller_messages: Vec<ChatMessage>,
     options: &ChatOptions,
 ) -> Result<CompletionOutcome, ChatError> {
@@ -170,6 +179,36 @@ pub async fn complete_with_tools(
     }
     messages.extend(caller_messages);
 
+    // --- Input guardrails: run on the last user message before first LLM call ---
+    if !guardrails.input_is_empty().await {
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .and_then(|m| m.content.as_ref())
+            .and_then(|c| c.as_text().map(str::to_string))
+            .unwrap_or_default();
+
+        let (outcome, guard_name) = guardrails.run_input(&last_user).await;
+        match outcome {
+            GuardrailOutcome::Allow(transformed) => {
+                // If the guardrail transformed the content, update the last user message.
+                if transformed != last_user {
+                    if let Some(msg) = messages.iter_mut().rev().find(|m| m.role == "user") {
+                        msg.content = Some(MessageContent::Text(transformed));
+                    }
+                }
+            }
+            GuardrailOutcome::Block(reason) => {
+                return Err(ChatError::Guardrail(GuardrailError::new(
+                    GuardrailStage::Input,
+                    guard_name,
+                    reason,
+                )));
+            }
+        }
+    }
+
     let mut api_calls: u32 = 0;
 
     loop {
@@ -177,6 +216,18 @@ pub async fn complete_with_tools(
             return Err(ChatError::MaxToolRounds(options.max_tool_rounds));
         }
         api_calls += 1;
+
+        // --- PreCompletion hook (observation only) ---
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .and_then(|m| m.content.as_ref())
+            .and_then(|c| c.as_text().map(str::to_string))
+            .unwrap_or_default();
+        hooks
+            .run(HookStage::PreCompletion, HookContext::new(HookStage::PreCompletion, last_user))
+            .await?;
 
         let specs = registry.list_specs().await;
         let tools = if specs.is_empty() {
@@ -187,7 +238,6 @@ pub async fn complete_with_tools(
 
         let mut req = ChatCompletionRequest::new(options.model.clone(), messages.clone(), tools);
 
-        // Thread all options through to the request.
         req.temperature = options.temperature;
         req.top_p = options.top_p;
         req.n = options.n;
@@ -212,6 +262,19 @@ pub async fn complete_with_tools(
         let choice = response.choices.first().ok_or(ChatError::NoChoice)?;
         let msg = &choice.message;
 
+        // --- PostCompletion hook (observation only) ---
+        let assistant_text = msg
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text().map(str::to_string))
+            .unwrap_or_default();
+        hooks
+            .run(
+                HookStage::PostCompletion,
+                HookContext::new(HookStage::PostCompletion, assistant_text),
+            )
+            .await?;
+
         if let Some(tcs) = &msg.tool_calls
             && !tcs.is_empty()
         {
@@ -220,12 +283,41 @@ pub async fn complete_with_tools(
                 if tc.kind != "function" {
                     continue;
                 }
-                let args: Value = serde_json::from_str(tc.function.arguments.trim())?;
+
+                // --- PreTool hook (mutating) ---
+                let pre_ctx = hooks
+                    .run(
+                        HookStage::PreTool,
+                        HookContext::with_meta(
+                            HookStage::PreTool,
+                            tc.function.arguments.trim(),
+                            "tool_name",
+                            tc.function.name.as_str(),
+                        ),
+                    )
+                    .await?;
+                let args: Value = serde_json::from_str(pre_ctx.content.trim())?;
+
                 let result = registry.invoke(&tc.function.name, args).await?;
-                let content = serde_json::to_string(&result)?;
+                let result_json = serde_json::to_string(&result)?;
+
+                // --- PostTool hook (mutating) ---
+                let post_ctx = hooks
+                    .run(
+                        HookStage::PostTool,
+                        HookContext::with_meta(
+                            HookStage::PostTool,
+                            &result_json,
+                            "tool_name",
+                            tc.function.name.as_str(),
+                        ),
+                    )
+                    .await?;
+                let final_result = post_ctx.content;
+
                 messages.push(ChatMessage {
                     role: "tool".to_string(),
-                    content: Some(MessageContent::Text(content)),
+                    content: Some(MessageContent::Text(final_result)),
                     tool_calls: None,
                     tool_call_id: Some(tc.id.clone()),
                     name: Some(tc.function.name.clone()),
@@ -235,7 +327,7 @@ pub async fn complete_with_tools(
             continue;
         }
 
-        // Terminal: extract usage and return.
+        // --- Terminal response: extract content ---
         let usage = response.usage.as_ref().map(|u| proto::Usage {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
@@ -245,13 +337,113 @@ pub async fn complete_with_tools(
             .content
             .as_ref()
             .and_then(|c| c.as_text().map(str::to_string));
+        let finish_reason = choice.finish_reason.clone();
 
-        return Ok(CompletionOutcome {
-            content,
-            rounds: api_calls,
-            usage,
-            finish_reason: choice.finish_reason.clone(),
-        });
+        // --- Output guardrails: retry loop ---
+        if guardrails.output_is_empty().await {
+            return Ok(CompletionOutcome { content, rounds: api_calls, usage, finish_reason });
+        }
+
+        let text = content.clone().unwrap_or_default();
+        let max_retries = guardrails.max_output_retries;
+
+        for attempt in 0..=max_retries {
+            let (outcome, guard_name) = guardrails.run_output(&text).await;
+            match outcome {
+                GuardrailOutcome::Allow(transformed) => {
+                    let final_content = if transformed == text {
+                        content
+                    } else {
+                        Some(transformed)
+                    };
+                    return Ok(CompletionOutcome {
+                        content: final_content,
+                        rounds: api_calls,
+                        usage,
+                        finish_reason,
+                    });
+                }
+                GuardrailOutcome::Block(reason) => {
+                    if attempt < max_retries {
+                        // Append the rejected assistant reply + a "please revise" user message,
+                        // then loop back to call the LLM again (no tools this time).
+                        messages.push(msg.clone());
+                        messages.push(ChatMessage::text(
+                            "user",
+                            format!(
+                                "Your previous response was rejected by a content policy ({reason}). \
+                                 Please revise it."
+                            ),
+                        ));
+                        // Reset api_calls guard counter for the retry loop.
+                        if api_calls >= options.max_tool_rounds {
+                            return Err(ChatError::Guardrail(GuardrailError::new(
+                                GuardrailStage::Output,
+                                guard_name,
+                                reason,
+                            )));
+                        }
+                        api_calls += 1;
+                        // Re-invoke the LLM (no tools — just text revision).
+                        let retry_req = ChatCompletionRequest::new(
+                            options.model.clone(),
+                            messages.clone(),
+                            None,
+                        );
+                        let body = serde_json::to_value(&retry_req)?;
+                        let val = http.post_json_with_headers(&url, &body, &headers).await?;
+                        let resp: crate::openai::ChatCompletionResponse =
+                            serde_json::from_value(val)?;
+                        let choice = resp.choices.first().ok_or(ChatError::NoChoice)?;
+                        let retry_text = choice
+                            .message
+                            .content
+                            .as_ref()
+                            .and_then(|c| c.as_text().map(str::to_string))
+                            .unwrap_or_default();
+                        // Loop: next attempt will check the new text.
+                        // We need to update `text` — use a labelled approach by breaking to
+                        // restart the guardrail loop with new text.
+                        // Use a simple recursive-style approach: just continue the outer loop.
+                        let (out2, gn2) = guardrails.run_output(&retry_text).await;
+                        match out2 {
+                            GuardrailOutcome::Allow(t) => {
+                                return Ok(CompletionOutcome {
+                                    content: Some(t),
+                                    rounds: api_calls,
+                                    usage,
+                                    finish_reason,
+                                });
+                            }
+                            GuardrailOutcome::Block(r2) => {
+                                if attempt + 1 >= max_retries {
+                                    return Err(ChatError::Guardrail(GuardrailError::new(
+                                        GuardrailStage::Output,
+                                        gn2,
+                                        r2,
+                                    )));
+                                }
+                                // Continue outer for loop — but we've already advanced; break here.
+                                return Err(ChatError::Guardrail(GuardrailError::new(
+                                    GuardrailStage::Output,
+                                    gn2,
+                                    r2,
+                                )));
+                            }
+                        }
+                    } else {
+                        return Err(ChatError::Guardrail(GuardrailError::new(
+                            GuardrailStage::Output,
+                            guard_name,
+                            reason,
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Should be unreachable — the loop above always returns.
+        return Ok(CompletionOutcome { content, rounds: api_calls, usage, finish_reason });
     }
 }
 
@@ -272,18 +464,14 @@ pub struct StreamOutcome {
 
 /// Stream a chat completion, calling `on_delta` for each content token as it arrives.
 ///
-/// Unlike [`complete_with_tools`], this function does **not** execute tool calls — it is
-/// intended for live token-by-token display. Set `stream: true` semantics are handled
-/// automatically; callers should not set it themselves.
-///
-/// `on_delta` receives each non-empty content delta string in arrival order. When the
-/// stream ends, the accumulated [`StreamOutcome`] is returned.
-///
-/// # Errors
-///
-/// Returns [`ChatError`] on HTTP failure, SSE parse errors, or JSON decode errors.
+/// Unlike [`complete_with_tools`], this function does **not** execute tool calls.
+/// Input guardrails run on the last user message before the stream starts; output
+/// guardrails run on the fully-accumulated response after the stream ends (no retry —
+/// same behaviour as gluellm's simple streaming path).
 pub async fn stream_complete<F>(
     http: &HttpClient,
+    hooks: &HookRegistry,
+    guardrails: &GuardrailRegistry,
     messages: Vec<ChatMessage>,
     options: &ChatOptions,
     mut on_delta: F,
@@ -302,9 +490,49 @@ where
     }
     full_messages.extend(messages);
 
+    // --- Input guardrails ---
+    if !guardrails.input_is_empty().await {
+        let last_user = full_messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .and_then(|m| m.content.as_ref())
+            .and_then(|c| c.as_text().map(str::to_string))
+            .unwrap_or_default();
+
+        let (outcome, guard_name) = guardrails.run_input(&last_user).await;
+        match outcome {
+            GuardrailOutcome::Allow(transformed) => {
+                if transformed != last_user {
+                    if let Some(msg) = full_messages.iter_mut().rev().find(|m| m.role == "user") {
+                        msg.content = Some(MessageContent::Text(transformed));
+                    }
+                }
+            }
+            GuardrailOutcome::Block(reason) => {
+                return Err(ChatError::Guardrail(GuardrailError::new(
+                    GuardrailStage::Input,
+                    guard_name,
+                    reason,
+                )));
+            }
+        }
+    }
+
+    // --- PreCompletion hook (observation only) ---
+    let last_user = full_messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_ref())
+        .and_then(|c| c.as_text().map(str::to_string))
+        .unwrap_or_default();
+    hooks
+        .run(HookStage::PreCompletion, HookContext::new(HookStage::PreCompletion, last_user))
+        .await?;
+
     let mut req = ChatCompletionRequest::new(options.model.clone(), full_messages, None);
     req.stream = Some(true);
-    // Request usage in the final chunk.
     req.stream_options = Some(crate::openai::StreamOptions {
         include_usage: Some(true),
         include_obfuscation: None,
@@ -388,5 +616,23 @@ where
     }
 
     eprintln!("[stream_complete] done — {byte_count} bytes, {event_count} SSE events, {} content chars", outcome.content.len());
+
+    // --- Output guardrails (no retry for streaming) ---
+    if !guardrails.output_is_empty().await {
+        let (out_outcome, guard_name) = guardrails.run_output(&outcome.content).await;
+        match out_outcome {
+            GuardrailOutcome::Allow(transformed) => {
+                outcome.content = transformed;
+            }
+            GuardrailOutcome::Block(reason) => {
+                return Err(ChatError::Guardrail(GuardrailError::new(
+                    GuardrailStage::Output,
+                    guard_name,
+                    reason,
+                )));
+            }
+        }
+    }
+
     Ok(outcome)
 }

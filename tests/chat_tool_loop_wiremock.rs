@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use async_trait::async_trait;
 use serde_json::json;
 use superglue::chat::{ChatError, ChatOptions, complete_with_tools};
+use superglue::hooks::HookRegistry;
+use superglue::guardrails::GuardrailRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::{ChatMessage, MessageContent};
 use superglue::tools::{Tool, ToolRegistry, ToolSpec};
@@ -87,7 +89,7 @@ async fn completion_text_only_no_tools() {
         ..Default::default()
     };
     let messages = vec![ChatMessage::text("user", "hi")];
-    let out = complete_with_tools(&http, &reg, messages, &opts)
+    let out = complete_with_tools(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts)
         .await
         .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
@@ -124,7 +126,7 @@ async fn completion_tool_then_assistant_text() {
         ..Default::default()
     };
     let messages = vec![ChatMessage::text("user", "use echo")];
-    let out = complete_with_tools(&http, &reg, messages, &opts)
+    let out = complete_with_tools(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts)
         .await
         .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
@@ -151,7 +153,7 @@ async fn max_tool_rounds_returns_error() {
         ..Default::default()
     };
     let messages = vec![ChatMessage::text("user", "loop")];
-    let err = complete_with_tools(&http, &reg, messages, &opts)
+    let err = complete_with_tools(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts)
         .await
         .unwrap_err();
     assert!(matches!(err, ChatError::MaxToolRounds(2)));
@@ -177,7 +179,7 @@ async fn system_prompt_is_prepended() {
         ..Default::default()
     };
     let messages = vec![ChatMessage::text("user", "hi")];
-    let out = complete_with_tools(&http, &reg, messages, &opts)
+    let out = complete_with_tools(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts)
         .await
         .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
@@ -268,6 +270,8 @@ async fn stream_complete_delivers_tokens() {
     let mut received = Vec::new();
     let outcome = superglue::chat::stream_complete(
         &http,
+        &superglue::hooks::HookRegistry::new(),
+        &GuardrailRegistry::new(),
         messages,
         &options,
         |delta| received.push(delta),

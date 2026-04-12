@@ -9,6 +9,8 @@
 
 pub mod batch;
 pub mod chat;
+pub mod guardrails;
+pub mod hooks;
 pub mod http;
 pub mod openai;
 pub mod proto;
