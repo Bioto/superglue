@@ -303,6 +303,9 @@ pub async fn batch_complete(
         let prompt = request.prompt.clone();
         let metadata = request.metadata.clone();
 
+        // Wire the batch item's id as the request_id for correlation.
+        opts.request_id = Some(id.clone());
+
         join_set.spawn(async move {
             let _permit = sem.acquire_owned().await.expect("semaphore closed");
             let item_start = Instant::now();

@@ -65,6 +65,11 @@ pub struct ChatOptions {
 
     // --- Reasoning models (o1/o3/o4) ---
     pub reasoning_effort: Option<String>,
+
+    // --- Correlation ---
+    /// Caller-supplied request identifier used for tracing and correlation.
+    /// Auto-generated as a UUID v4 if `None` when the request is executed.
+    pub request_id: Option<String>,
 }
 
 impl ChatOptions {
@@ -119,6 +124,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             store: p.store,
             service_tier: p.service_tier,
             reasoning_effort: p.reasoning_effort,
+            request_id: None,
         }
     }
 }
@@ -133,6 +139,8 @@ pub struct CompletionOutcome {
     pub usage: Option<proto::Usage>,
     /// The `finish_reason` from the last choice.
     pub finish_reason: Option<String>,
+    /// Correlation ID for this request (UUID v4 auto-generated if not supplied by caller).
+    pub request_id: String,
 }
 
 /// Errors from the chat + tool pipeline.
@@ -168,6 +176,16 @@ pub async fn complete_with_tools(
     caller_messages: Vec<ChatMessage>,
     options: &ChatOptions,
 ) -> Result<CompletionOutcome, ChatError> {
+    let request_id = options
+        .request_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    tracing::info!(
+        request_id = %request_id,
+        model = %options.model,
+        "complete_with_tools started"
+    );
+
     let url = join_base_url(&options.base_url, "/v1/chat/completions");
     let auth = format!("Bearer {}", options.api_key);
     let headers = [("Authorization", auth.as_str())];
@@ -341,7 +359,13 @@ pub async fn complete_with_tools(
 
         // --- Output guardrails: retry loop ---
         if guardrails.output_is_empty().await {
-            return Ok(CompletionOutcome { content, rounds: api_calls, usage, finish_reason });
+            return Ok(CompletionOutcome {
+                content,
+                rounds: api_calls,
+                usage,
+                finish_reason,
+                request_id: request_id.clone(),
+            });
         }
 
         let text = content.clone().unwrap_or_default();
@@ -361,6 +385,7 @@ pub async fn complete_with_tools(
                         rounds: api_calls,
                         usage,
                         finish_reason,
+                        request_id: request_id.clone(),
                     });
                 }
                 GuardrailOutcome::Block(reason) => {
@@ -413,6 +438,7 @@ pub async fn complete_with_tools(
                                     rounds: api_calls,
                                     usage,
                                     finish_reason,
+                                    request_id: request_id.clone(),
                                 });
                             }
                             GuardrailOutcome::Block(r2) => {
@@ -443,7 +469,13 @@ pub async fn complete_with_tools(
         }
 
         // Should be unreachable — the loop above always returns.
-        return Ok(CompletionOutcome { content, rounds: api_calls, usage, finish_reason });
+        return Ok(CompletionOutcome {
+            content,
+            rounds: api_calls,
+            usage,
+            finish_reason,
+            request_id: request_id.clone(),
+        });
     }
 }
 
@@ -452,7 +484,7 @@ pub async fn complete_with_tools(
 // ---------------------------------------------------------------------------
 
 /// Outcome of a streaming completion (no tool-call loop).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct StreamOutcome {
     /// Full accumulated assistant content.
     pub content: String,
@@ -460,6 +492,8 @@ pub struct StreamOutcome {
     pub finish_reason: Option<String>,
     /// Usage reported by the final chunk (only when `stream_options.include_usage = true`).
     pub usage: Option<proto::Usage>,
+    /// Correlation ID for this request (UUID v4 auto-generated if not supplied by caller).
+    pub request_id: String,
 }
 
 /// Stream a chat completion, calling `on_delta` for each content token as it arrives.
@@ -479,6 +513,16 @@ pub async fn stream_complete<F>(
 where
     F: FnMut(String) + Send,
 {
+    let request_id = options
+        .request_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    tracing::info!(
+        request_id = %request_id,
+        model = %options.model,
+        "stream_complete started"
+    );
+
     let url = join_base_url(&options.base_url, "/v1/chat/completions");
     let auth = format!("Bearer {}", options.api_key);
     let headers = [("Authorization", auth.as_str())];
@@ -561,7 +605,12 @@ where
     eprintln!("[stream_complete] connection established, reading SSE chunks…");
 
     let mut parser = SseParser::new();
-    let mut outcome = StreamOutcome::default();
+    let mut outcome = StreamOutcome {
+        content: String::new(),
+        finish_reason: None,
+        usage: None,
+        request_id: request_id.clone(),
+    };
     let mut byte_count = 0usize;
     let mut event_count = 0usize;
 
