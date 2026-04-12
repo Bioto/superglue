@@ -7,6 +7,7 @@
 //! Phase 4: Streaming completions via [`chat::stream_complete`] (SSE / `stream: true`).
 //! Phase 5: Concurrent [`batch`] completions with configurable error strategies.
 
+pub mod agents;
 pub mod batch;
 pub mod chat;
 pub mod guardrails;

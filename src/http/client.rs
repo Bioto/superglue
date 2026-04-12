@@ -21,11 +21,20 @@ use crate::http::retry::RetryPolicy;
 pub struct ClientConfig {
     /// Total timeout per attempt (connect + response body for non-streaming).
     pub timeout: Duration,
+    /// TCP connection timeout.
     pub connect_timeout: Duration,
     pub user_agent: String,
     pub retry: RetryPolicy,
     /// When set, every request waits for this per-second quota first.
     pub quota_per_second: Option<std::num::NonZeroU32>,
+    /// Maximum number of idle keep-alive connections per host retained in the
+    /// pool. Maps directly to `reqwest::ClientBuilder::pool_max_idle_per_host`.
+    /// Default: 8 (reqwest default).
+    pub pool_max_idle_per_host: usize,
+    /// How long an idle connection is kept alive before being evicted from the
+    /// pool. `None` uses reqwest's default (90 s). Maps to
+    /// `reqwest::ClientBuilder::pool_idle_timeout`.
+    pub pool_idle_timeout: Option<Duration>,
 }
 
 impl Default for ClientConfig {
@@ -36,6 +45,8 @@ impl Default for ClientConfig {
             user_agent: format!("superglue/{}", env!("CARGO_PKG_VERSION")),
             retry: RetryPolicy::default(),
             quota_per_second: None,
+            pool_max_idle_per_host: 8,
+            pool_idle_timeout: None,
         }
     }
 }
@@ -57,11 +68,15 @@ impl HttpClient {
     ///
     /// Returns `Error::Reqwest` if the underlying `reqwest::Client` fails to construct.
     pub fn new(config: ClientConfig) -> Result<Self, Error> {
-        let inner = Client::builder()
+        let mut builder = Client::builder()
             .timeout(config.timeout)
             .connect_timeout(config.connect_timeout)
             .user_agent(config.user_agent.clone())
-            .build()?;
+            .pool_max_idle_per_host(config.pool_max_idle_per_host);
+        if let Some(idle_timeout) = config.pool_idle_timeout {
+            builder = builder.pool_idle_timeout(idle_timeout);
+        }
+        let inner = builder.build()?;
         let limiter = config.quota_per_second.map(direct_per_second);
         Ok(Self {
             inner,
