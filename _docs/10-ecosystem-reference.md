@@ -1,54 +1,90 @@
 # Ecosystem reference
 
-This is a **reading list and crate map**, not a dependency manifest. Versions belong in `Cargo.toml` when implementation starts.
+Crates that are **in use** are marked ✅. Planned or studied crates are marked 🔲.
 
 ## HTTP and streaming
 
-- **`reqwest`**: async HTTP client on Tokio; common baseline for provider APIs.
-- **`tower`**: middleware abstraction; composes retries, timeouts, and rate limits; aligns with `tonic` stacks.
-- **`eventsource` / stream utilities**: ecosystem crates for SSE vary; study **`async-openai`** (read the source) for streaming patterns even if you do not depend on it directly.
+| Crate | Status | Role |
+|-------|--------|------|
+| `reqwest` (rustls-tls, stream, json) | ✅ | Async HTTP client; GET + POST + streaming POST |
+| `bytes` | ✅ | Byte buffer type for streaming chunks |
+| `futures-util` | ✅ | `StreamExt` for consuming byte streams |
+| `tower` | 🔲 | Middleware abstraction; aligns with `tonic` stacks |
+
+SSE parsing is implemented in-house (`src/http/sse.rs`) rather than a crate dependency, to keep the dependency footprint small and the parser fully tested.
 
 ## Serialization
 
-- **`serde`**, **`serde_json`**: JSON tool payloads and provider JSON.
-- **`prost`**, **`prost-build`**: protobuf code generation in Rust.
-- **`tonic`**: gRPC on Tokio with `prost` messages.
+| Crate | Status | Role |
+|-------|--------|------|
+| `serde` + `serde_json` | ✅ | JSON tool payloads and provider JSON |
+| `prost` | ✅ | Protobuf runtime for generated types |
+| `prost-build` | ✅ | Build-time code generation from `.proto` files |
+| `protoc-bin-vendored` | ✅ | Bundles `protoc` so no system install is required |
+| `tonic` | 🔲 | gRPC on Tokio; pairs with `prost` messages |
 
 ## Async and control flow
 
-- **`tokio`**: runtime, timers, async I/O.
-- **`tokio-util`**: helpers such as cancellation tokens (`CancellationToken`) for cooperative shutdown.
-- **`backoff`** or **`tower::retry`**: policy for retries depending on stack choice.
+| Crate | Status | Role |
+|-------|--------|------|
+| `tokio` (rt-multi-thread, macros, sync, time, io-util) | ✅ | Runtime, timers, `mpsc` channels, `spawn_blocking` |
+| `async-trait` | ✅ | `async fn` in the `Tool` trait object |
+| `tokio-util` | 🔲 | `CancellationToken` for cooperative shutdown |
 
 ## Rate limiting
 
-- **`governor`**: token bucket rate limiting; conceptually reusable for downloads (see [Operations: throttled downloads](08-operations-throttled-downloads.md)) and API quotas.
+| Crate | Status | Role |
+|-------|--------|------|
+| `governor` | ✅ | Token-bucket rate limiter; optional per-client QPS cap |
 
 ## Observability
 
-- **`tracing`**, **`tracing-subscriber`**: structured logs and spans.
-- **`tracing-opentelemetry`**: bridge spans to OTLP and other exporters.
-- **`metrics`**: metrics facade; pick an exporter that matches deployment.
+| Crate | Status | Role |
+|-------|--------|------|
+| `tracing` | ✅ | Structured spans and events throughout the core |
+| `tracing-subscriber` | 🔲 | Subscriber wiring for production deployments |
+| `tracing-opentelemetry` | 🔲 | Bridge spans to OTLP exporters |
+| `metrics` | 🔲 | Metrics facade |
 
-## Security utilities (when needed)
+## Error handling
 
-- **`rustls`**: TLS without linking OpenSSL; pairs with `tonic` transports that support it.
-- **`zeroize`**, **`secrecy`**: sensitive memory handling (see [Security and threat model](06-security-and-threat-model.md)).
-- **`ring`**: cryptographic primitives when implementing integrity checks or custom crypto (review carefully; prefer high-level patterns where possible).
+| Crate | Status | Role |
+|-------|--------|------|
+| `thiserror` | ✅ | Derives `Error` for `http::Error`, `ChatError`, `ToolInvokeError` |
 
-## Language bindings (study, not immediate deps of `superglue` crate)
+## Security utilities
 
-- **`pyo3`**, **`maturin`**: Python extension modules.
-- **`pyo3-async-runtimes`** (or successors): bridge asyncio and Tokio.
-- **`napi-rs`**: Node.js native addons if FFI to Node is required.
+| Crate | Status | Role |
+|-------|--------|------|
+| `rustls` | ✅ | TLS (via `reqwest`'s `rustls-tls` feature; no OpenSSL) |
+| `zeroize` / `secrecy` | 🔲 | Sensitive memory handling for API keys |
+| `ring` | 🔲 | Cryptographic primitives for integrity checks |
 
-Prior art for **how** to structure native cores with Python wrappers: inspect **`ruff`** and **`uv`** repositories for packaging and PyO3 layout lessons.
+## Language bindings
 
-## Testing CLI and processes
+| Crate | Status | Role |
+|-------|--------|------|
+| `pyo3` 0.28 | ✅ | Python extension module; `#[pyclass]`, `#[pymethods]` |
+| `maturin` | ✅ | Build and packaging tool for the Python wheel |
+| `pyo3-async-runtimes` | 🔲 | asyncio ↔ Tokio bridge (not needed for sync callback pattern) |
+| `napi-rs` | 🔲 | Node.js native addons |
 
-- **`assert_cmd`**, **`predicates`**: integration tests invoking compiled binaries (already used in the `superglue` scaffold tests).
+**Packaging note**: builds target CPython 3.14t (free-threaded, `Py_GIL_DISABLED`). The `dev.sh` script always points maturin at the `.venv/bin/python` interpreter to ensure the correct ABI tag (`cp314t`) is used, then installs the resulting wheel via `uv pip install` so that subsequent `uv run` invocations do not reinstall the package.
+
+## Testing
+
+| Crate | Status | Role |
+|-------|--------|------|
+| `wiremock` | ✅ | Mock HTTP server for integration tests |
+| `assert_cmd` | ✅ | Integration tests invoking compiled binaries (CLI) |
+| `predicates` | ✅ | Assertion helpers for `assert_cmd` |
+
+## Prior art studied
+
+- **`async-openai`**: reference for streaming patterns and OpenAI type structures.
+- **`ruff`** and **`uv`**: packaging and PyO3 layout lessons for Rust-based Python tooling.
 
 ## See also
 
-- [Roadmap and phasing](09-roadmap-and-phasing.md) for when to introduce each layer.
+- [Roadmap and phasing](09-roadmap-and-phasing.md) for when to introduce remaining layers.
 - [Architecture](02-architecture.md) for how these pieces fit together.

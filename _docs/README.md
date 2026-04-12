@@ -1,8 +1,8 @@
 # Superglue design documentation
 
-This directory holds **maintainer-facing design notes** for a future polyglot orchestration layer related to the ideas behind [GlueLLM](https://gluellm.dev). The experimental Rust crate in this repository is [`superglue`](../); the current Python reference implementation lives in [`../../gluellm/`](../../gluellm/).
+This directory holds **maintainer-facing design notes** for the `superglue` polyglot LLM orchestration core. The Rust crate lives at [`../`](../); the Python binding lives at [`../../superglue-py/`](../../superglue-py/).
 
-These documents describe **intent and tradeoffs**, not a shipped API. They are versioned with the repo and should be updated as decisions change.
+These documents describe **intent, tradeoffs, and current implementation status**. They are versioned with the repo and updated as decisions change.
 
 ## Reading order
 
@@ -11,21 +11,38 @@ These documents describe **intent and tradeoffs**, not a shipped API. They are v
 3. [Tool boundary and async](03-tool-boundary-and-async.md) — JSON tool payloads, Tokio ownership, bridging async hosts.
 4. [Protobuf, gRPC, and workflows](04-protobuf-grpc-and-workflows.md) — internal schema, RPC surface, deployment modes.
 5. [Observability](05-observability.md) — tracing, metrics, and safe export of telemetry.
-6. [Security and threat model](06-security-and-threat-model.md) — tiered posture from commercial packaging to high-assurance patterns (with honest limits).
+6. [Security and threat model](06-security-and-threat-model.md) — tiered posture from commercial packaging to high-assurance patterns.
 7. [Network privacy and telemetry shaping](07-network-privacy-and-telemetry-shaping.md) — optional traffic-shaping ideas; legal and ethical caveats.
-8. [Operations: throttled downloads](08-operations-throttled-downloads.md) — rate-limited artifact fetch (for example model files).
-9. [Roadmap and phasing](09-roadmap-and-phasing.md) — incremental delivery plan.
-10. [Ecosystem reference](10-ecosystem-reference.md) — Rust crates and prior art to study.
+8. [Operations: throttled downloads](08-operations-throttled-downloads.md) — rate-limited artifact fetch.
+9. [Roadmap and phasing](09-roadmap-and-phasing.md) — incremental delivery plan with current status.
+10. [Ecosystem reference](10-ecosystem-reference.md) — Rust crates in use and prior art.
 
-## How to use this corpus
+## Current implementation status
 
-- **Decided direction** is stated explicitly where the group has converged (for example: orchestration and I/O in Rust, JSON across the tool boundary).
-- **Open decisions** are called out as questions or options rather than pretending they are settled.
-- **Exploratory or adversarial** topics (for example obfuscation or self-destruct flows) are isolated in dedicated sections so they do not read as default product requirements.
+| Component | Status |
+|-----------|--------|
+| HTTP client (`reqwest`, rustls-tls) | ✅ shipped |
+| Retry policy (GET + POST with distinct rules) | ✅ shipped |
+| Rate limiting (`governor` token bucket) | ✅ shipped |
+| SSE parser (`SseParser`) | ✅ shipped |
+| Tool registry + `Tool` trait | ✅ shipped |
+| Tool harness (offline scripted plans) | ✅ shipped |
+| OpenAI chat types (full spec) | ✅ shipped |
+| Chat completion tool loop (`complete_with_tools`) | ✅ shipped |
+| Streaming completions (`stream_complete`, SSE) | ✅ shipped |
+| Protobuf schema (`prost`, `proto/superglue.proto`) | ✅ shipped |
+| Python binding (`superglue-py`, PyO3, CPython 3.14t) | ✅ shipped |
+| Python `Client.complete()` with tool callbacks | ✅ shipped |
+| Python `Client.stream()` with token callback | ✅ shipped (GIL-free 3.14t) |
+| gRPC server (`tonic`) | 🔲 planned (Phase 3+) |
+| Node.js binding (`napi-rs`) | 🔲 planned |
+| Workflow / hook engine | 🔲 planned |
 
-## Related code in this repository
+## Related code
 
 | Area | Location |
 |------|----------|
+| Rust core | [`../`](../) |
+| Python binding | [`../../superglue-py/`](../../superglue-py/) |
+| Python examples | [`../../superglue-py/examples/`](../../superglue-py/examples/) |
 | Python GlueLLM (behavioral reference) | [`../../gluellm/`](../../gluellm/) |
-| Rust crate scaffold | [`../`](../) |

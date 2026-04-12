@@ -2,47 +2,56 @@
 
 ## Principles
 
-- **Avoid a top-down rewrite** of Python GlueLLM before the Rust core proves value.
-- Ship **narrow vertical slices** that are testable and usable, then expand.
-- Keep **behavioral parity** with [`../../gluellm/`](../../gluellm/) as a guiding star, documented where divergence is intentional.
+- **Avoid a top-down rewrite**: ship narrow vertical slices that are testable and usable, then expand.
+- **Behavioral parity** with [`../../gluellm/`](../../gluellm/) as a guiding star; divergence is intentional and documented.
+- **Real usage drives priorities**: the Python binding is the first external-facing surface.
 
-## Phase 1: HTTP, retries, streaming
+---
 
-Deliver a Rust module that can:
+## Phase 1: HTTP, retries, streaming ✅ complete
 
-- Perform authenticated HTTP requests to at least one provider style used today.
-- Handle **streaming** responses (including SSE-style framing where applicable).
-- Apply **timeouts**, **retries**, and **rate limits** with deterministic tests.
+- ✅ `HttpClient` — authenticated HTTP requests (`reqwest`, `rustls-tls`).
+- ✅ Streaming responses via SSE framing (`SseParser`).
+- ✅ Timeouts, retries (GET and POST with distinct policies), and rate limits (`governor`).
+- ✅ Deterministic wiremock integration tests.
 
-Outcome: foundation for all higher-level features; no requirement for tools or workflows yet.
+## Phase 2: Tool boundary and Python binding ✅ complete
 
-## Phase 2: Tool callback interface and one binding
+- ✅ `Tool` trait + `ToolRegistry` — async dispatch by name with JSON arguments/results.
+- ✅ `chat::complete_with_tools` — multi-turn tool loop against any OpenAI-compatible provider.
+- ✅ `tools::harness` — offline scripted execution plans for unit testing tool flows.
+- ✅ `superglue-py` Python binding (PyO3, maturin, CPython 3.14t free-threaded).
+- ✅ `Client.complete()` with Python dict tool callbacks delivered via `spawn_blocking`.
+- ✅ `Client.stream()` with per-token callback delivered via `mpsc` channel + `spawn_blocking`.
+- ✅ 14 Python example scripts covering: basic completion, system prompts, single/multiple tools, usage tracking, error handling, max rounds, custom base URL, concurrent completions, structured tool data, and streaming variants.
 
-Introduce the **JSON tool boundary** (see [Tool boundary and async](03-tool-boundary-and-async.md)) with in-memory tests in Rust.
+## Phase 3: Full OpenAI spec + protobuf schema ✅ complete
 
-Add **one** host binding (likely Python via PyO3 **or** a thin gRPC client, depending on packaging choices) that proves:
+- ✅ Full `ChatCompletionRequest` — all OpenAI parameters (sampling, penalties, stop, response format, tool choice, logprobs, seed, store, service tier, reasoning effort, stream options).
+- ✅ Multipart message content (`MessageContent`: text, image_url, input_audio, file).
+- ✅ Complete response types — `Usage` with token details, `ChoiceLogprobs`, `Annotation`, `ChatCompletionChunk` for streaming.
+- ✅ `ChatOptions` exposes all key parameters; `From<proto::ChatOptions>` bridge.
+- ✅ `proto/superglue.proto` schema covering `ChatOptions`, `ChatMessage`, `Usage`, `ToolSpec`, `CompletionOutcome`.
+- ✅ `prost` + `protoc-bin-vendored` code generation via `build.rs`.
+- ✅ `stream_complete` — SSE streaming with usage in final chunk (`stream_options.include_usage`).
 
-- Tool registration from the host.
-- Async tool execution bridged to Tokio.
-- End-to-end completion with at least one tool round-trip.
+## Phase 4: gRPC and additional bindings 🔲 next
 
-Outcome: validates FFI or RPC ergonomics before multiplying languages.
+- 🔲 `tonic` gRPC server exposing `complete` and `stream` as RPCs.
+- 🔲 Proto-generated client stubs for Python (replacing PyO3 for the gRPC deployment mode).
+- 🔲 Node.js binding via `napi-rs`.
+- 🔲 Workflow engine and hook dispatch with protobuf event streams.
 
-## Phase 3: Protobuf schemas and gRPC services
+## Phase 5: Hardening and ecosystem 🔲 future
 
-Define `.proto` files for workflows, hooks, and internal events; generate Rust with `prost` and expose servers or bidi streams with `tonic` as needed (see [Protobuf, gRPC, and workflows](04-protobuf-grpc-and-workflows.md)).
-
-Outcome: stable internal contracts and optional **sidecar** deployments.
-
-## Phase 4: Additional language clients and polish
-
-Generate or hand-write clients for more languages, improve packaging, and harden observability and security tiers per product requirements.
+- 🔲 Structured redaction and observability tiers (see [Observability](05-observability.md)).
+- 🔲 Security hardening (see [Security and threat model](06-security-and-threat-model.md)).
+- 🔲 Batch scheduling and parallel tool execution within a single turn.
+- 🔲 Per-tool error policies (retry vs. fail-fast).
+- 🔲 Migration guide from Python GlueLLM.
 
 ## Continuous cross-cutting work
 
-- **Observability** and **redaction** should land early enough that early adopters never rely on unsafe logging defaults (see [Observability](05-observability.md)).
-- **Documentation** and migration guides from Python GlueLLM should track Phase 2 and beyond.
-
-## Open sequencing
-
-Exact ordering between **Phase 2** and **Phase 3** may shift if gRPC-first deployment wins for a major customer; the phases are **logical** rather than calendar promises.
+- **Observability**: `tracing` spans are present throughout; exporter wiring (`tracing-subscriber`, OTLP) can land any time.
+- **Testing**: wiremock integration tests gate streaming, tool loops, system prompts, and multipart content.
+- **Docs**: this directory tracks implementation status and is updated with each phase.

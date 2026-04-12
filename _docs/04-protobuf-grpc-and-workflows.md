@@ -1,65 +1,123 @@
 # Protobuf, gRPC, and workflows
 
+## Current status
+
+**Protobuf schema is implemented**. gRPC services are planned but not yet built.
+
 ## Why protobuf internally
 
-Workflows, hooks, and internal events are richer than ad hoc JSON blobs. A **canonical binary schema** helps with:
+Workflows, hooks, configuration, and internal events are richer than ad hoc JSON blobs. A **canonical binary schema** provides:
 
-- Stable, versioned contracts between components.
+- Stable, versioned contracts between components and across language bindings.
 - Efficient serialization for high-volume event streams.
-- Generated types in multiple languages when bindings consume the same definitions.
+- Generated types in multiple languages from the same `.proto` definitions.
 
-**Decided direction (from design discussion)**: treat **protobuf** as the internal source of truth for workflow state, hook payloads, tool invocation records, and related envelopes. Use **`prost`** (and typically `prost-build` in `build.rs`) for Rust. If gRPC services are exposed, **`tonic`** pairs naturally with `prost`.
+**Decided direction**: protobuf is the internal source of truth for `ChatOptions`, `ChatMessage`, `Usage`, `ToolSpec`, `CompletionOutcome`, and related types. `prost` generates Rust; future language clients can generate from the same `.proto`.
 
-JSON remains appropriate for **tool arguments and results** at the host boundary (see [Tool boundary and async](03-tool-boundary-and-async.md)). Mixing concerns is acceptable: protobuf for orchestration metadata, JSON for opaque tool payloads.
+JSON remains appropriate for **tool arguments and results** at the host boundary (see [Tool boundary and async](03-tool-boundary-and-async.md)).
 
-## gRPC from day one
+## Implemented schema (`proto/superglue.proto`)
 
-**Decided direction (from design discussion)**: ship **gRPC** as a first-class interface. Benefits include:
+```protobuf
+message ChatOptions {
+  string base_url         = 1;
+  string api_key          = 2;
+  string model            = 3;
+  uint32 max_tool_rounds  = 4;
+  optional string system_prompt = 5;
 
-- Streaming RPCs align with LLM streaming and event delivery.
-- Language clients can be generated from the same `.proto` files.
-- Operational tooling (`grpcurl`, custom CLIs) can talk to a running core without bespoke FFI.
+  // Sampling
+  optional float  temperature         = 6;
+  optional float  top_p               = 7;
+  optional uint32 max_completion_tokens = 8;
 
-`tonic` builds on **Tower**, which matches the earlier note that retry, timeout, and rate-limit middleware can share conceptual models with HTTP client stacks.
+  // Penalties
+  optional float  presence_penalty    = 9;
+  optional float  frequency_penalty   = 10;
+
+  // Tool control
+  optional bool   parallel_tool_calls = 11;
+
+  // Logprobs
+  optional bool   logprobs            = 12;
+  optional uint32 top_logprobs        = 13;
+
+  // Determinism / storage
+  optional int64  seed                = 14;
+  optional bool   store               = 15;
+
+  // Service / reasoning
+  optional string service_tier        = 16;
+  optional string reasoning_effort    = 17;
+  optional string stop                = 18;
+  optional string extra_json          = 19;  // generic passthrough
+}
+
+message ChatMessage {
+  string role             = 1;
+  optional string content = 2;
+  optional string name    = 3;
+  optional string tool_call_id = 4;
+  optional string refusal = 6;
+}
+
+message Usage {
+  uint32 prompt_tokens     = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens      = 3;
+}
+
+message ToolSpec {
+  string name              = 1;
+  string parameters_schema = 2;  // JSON Schema as string
+  optional string description = 3;
+}
+
+message CompletionOutcome {
+  optional string content       = 1;
+  uint32          rounds        = 2;
+  optional Usage  usage         = 3;
+  optional string finish_reason = 4;
+}
+```
+
+## How proto types are used today
+
+The generated `proto::` types serve two roles:
+
+1. **Data representation**: `CompletionOutcome` carries `usage: Option<proto::Usage>` through the chat pipeline and out to language bindings.
+2. **Configuration bridge**: `From<proto::ChatOptions> for ChatOptions` allows configuration to be deserialized from protobuf and handed to the Rust chat functions — the path a gRPC server would use.
+
+## gRPC — planned
+
+`tonic` is not yet wired. The intended deployment when it lands:
+
+```
+Host language  →  gRPC client (generated)  →  tonic server  →  Rust core
+```
+
+This allows any language with a gRPC library to use the core without a native FFI binding. Streaming RPCs map naturally to LLM streaming and event delivery.
+
+`tonic` pairs with Tower middleware which shares conceptual models with the existing HTTP retry/rate-limit stack.
 
 ## Deployment modes
 
-The design conversation considered two binding styles; they are **complementary deployment options**, not a single mandated approach.
+| Mode | Status | Notes |
+|------|--------|-------|
+| **In-process FFI (PyO3)** | ✅ shipped | `superglue-py` |
+| **gRPC / tonic sidecar** | 🔲 planned | Enables polyglot without per-language FFI |
+| **Embedded library** | ✅ shipped | `superglue` crate consumed directly by Rust callers |
 
-| Mode | Pros | Cons |
-|------|------|------|
-| **gRPC client binding** | No FFI complexity; easy polyglot; clear process boundary | Extra latency; requires managing a daemon or sidecar |
-| **In-process FFI** (PyO3, napi-rs, and so on) | Lower overhead; simpler single-process UX | Async bridging, object lifetimes, and debugging are harder |
+## Workflows and hooks — planned
 
-**Open decision**: which mode is default for each language and how to package the daemon (if any) for desktop versus server.
+Hook and workflow transitions will be representable in the protobuf model so that:
 
-## Optional sequence: tool round-trip
+- A run can be **serialized** for resume or audit.
+- **Replay** and debugging can operate on recorded protobuf streams.
 
-At a high level, the tool loop can be viewed as:
-
-```mermaid
-sequenceDiagram
-  participant Core as Rust_core
-  participant Host as Language_binding
-  Core->>Core: LLM_response_includes_tool_call
-  Core->>Host: invoke_tool_json_args
-  Host->>Host: map_to_native_and_run
-  Host->>Core: tool_result_json
-  Core->>Core: append_to_messages_and_continue
-```
-
-Internal event buses may wrap these steps in protobuf messages for logging, hooks, or persistence. The exact message types are **not specified here**.
-
-## Workflows and hooks
-
-Hooks and workflow transitions should be representable in the same protobuf model so that:
-
-- A run can be **serialized** for resume or audit (subject to security policy).
-- **Replay** and debugging can operate on recorded protobuf streams where allowed.
-
-Persistence is a **policy** matter: see [Security and threat model](06-security-and-threat-model.md) for “minimal disk footprint” versus ordinary logging.
+Persistence policy (in-memory only vs. disk vs. external store) will be a configuration matter, consistent with the security tier decisions in [Security and threat model](06-security-and-threat-model.md).
 
 ## See also
 
 - [Observability](05-observability.md) for exporting traces that span gRPC and tool calls.
-- [Roadmap and phasing](09-roadmap-and-phasing.md) for when to land proto and gRPC relative to the HTTP streaming MVP.
+- [Roadmap and phasing](09-roadmap-and-phasing.md) for when to land gRPC relative to current state.
