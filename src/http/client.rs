@@ -44,7 +44,9 @@ impl Default for ClientConfig {
 #[derive(Clone)]
 pub struct HttpClient {
     inner: Client,
-    retry: RetryPolicy,
+    /// Retained so callers can inspect current timeout values and create
+    /// derived clients via [`clone_with_timeouts`](Self::clone_with_timeouts).
+    pub config: ClientConfig,
     limiter: Option<Arc<DirectRateLimiter>>,
 }
 
@@ -58,14 +60,30 @@ impl HttpClient {
         let inner = Client::builder()
             .timeout(config.timeout)
             .connect_timeout(config.connect_timeout)
-            .user_agent(config.user_agent)
+            .user_agent(config.user_agent.clone())
             .build()?;
         let limiter = config.quota_per_second.map(direct_per_second);
         Ok(Self {
             inner,
-            retry: config.retry,
+            config,
             limiter,
         })
+    }
+
+    /// Return a new `HttpClient` with overridden timeouts, inheriting retry policy and QPS limiter.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Reqwest` if the underlying `reqwest::Client` fails to construct.
+    pub fn clone_with_timeouts(
+        &self,
+        timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let mut new_cfg = self.config.clone();
+        new_cfg.timeout = timeout;
+        new_cfg.connect_timeout = connect_timeout;
+        HttpClient::new(new_cfg)
     }
 
     async fn acquire_limiter(&self) {
@@ -101,8 +119,8 @@ impl HttpClient {
             match Self::send_buffered(req).await {
                 Ok(b) => return Ok(b),
                 Err(e) => {
-                    if e.is_retryable() && attempt < self.retry.max_retries {
-                        let delay = self.retry.delay_ms_for_attempt(attempt);
+                    if e.is_retryable() && attempt < self.config.retry.max_retries {
+                        let delay = self.config.retry.delay_ms_for_attempt(attempt);
                         warn!(attempt, delay_ms = delay, error = %e, "retrying HTTP GET");
                         sleep(Duration::from_millis(delay)).await;
                         attempt += 1;
@@ -187,8 +205,8 @@ impl HttpClient {
             match Self::send_json_body(req).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
-                    if e.is_retryable_post() && attempt < self.retry.max_retries {
-                        let delay = self.retry.delay_ms_for_attempt(attempt);
+                    if e.is_retryable_post() && attempt < self.config.retry.max_retries {
+                        let delay = self.config.retry.delay_ms_for_attempt(attempt);
                         warn!(attempt, delay_ms = delay, error = %e, "retrying HTTP POST JSON");
                         sleep(Duration::from_millis(delay)).await;
                         attempt += 1;

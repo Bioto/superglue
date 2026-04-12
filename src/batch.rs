@@ -10,22 +10,22 @@
 //! use superglue::http::{ClientConfig, HttpClient};
 //! use superglue::tools::ToolRegistry;
 //!
-//! # tokio_test::block_on(async {
-//! let http = Arc::new(HttpClient::new(ClientConfig::default()).unwrap());
-//! let registry = Arc::new(ToolRegistry::new());
-//! let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-4o-mini");
+//! async fn example() {
+//!     let http = Arc::new(HttpClient::new(ClientConfig::default()).unwrap());
+//!     let registry = Arc::new(ToolRegistry::new());
+//!     let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-4o-mini");
 //!
-//! let requests = vec![
-//!     BatchRequest::new("What is the capital of France?"),
-//!     BatchRequest::new("What is 2 + 2?"),
-//! ];
+//!     let requests = vec![
+//!         BatchRequest::new("What is the capital of France?"),
+//!         BatchRequest::new("What is 2 + 2?"),
+//!     ];
 //!
-//! let response = batch_complete(http, registry, requests, &options, BatchConfig::default())
-//!     .await
-//!     .unwrap();
+//!     let response = batch_complete(http, registry, requests, &options, BatchConfig::default())
+//!         .await
+//!         .unwrap();
 //!
-//! println!("{}/{} succeeded", response.successful, response.total_requests);
-//! # });
+//!     println!("{}/{} succeeded", response.successful, response.total_requests);
+//! }
 //! ```
 
 use std::collections::HashMap;
@@ -34,6 +34,8 @@ use std::time::Instant;
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+
+use std::time::Duration;
 
 use crate::chat::{ChatOptions, complete_with_tools};
 use crate::http::HttpClient;
@@ -117,6 +119,12 @@ pub struct BatchConfig {
     pub max_concurrent: usize,
     /// How to handle per-request failures (default [`ErrorStrategy::Continue`]).
     pub error_strategy: ErrorStrategy,
+    /// Per-request total timeout (connect + response body). Overrides the
+    /// `HttpClient`'s configured timeout when set.
+    pub timeout: Option<Duration>,
+    /// Per-request connect timeout. Overrides the `HttpClient`'s configured
+    /// connect timeout when set.
+    pub connect_timeout: Option<Duration>,
 }
 
 impl Default for BatchConfig {
@@ -124,6 +132,8 @@ impl Default for BatchConfig {
         BatchConfig {
             max_concurrent: 5,
             error_strategy: ErrorStrategy::Continue,
+            timeout: None,
+            connect_timeout: None,
         }
     }
 }
@@ -247,6 +257,19 @@ pub async fn batch_complete(
             req.id = Some(format!("batch-{i}"));
         }
     }
+
+    // If per-batch timeout overrides are set, derive a new HttpClient for this batch.
+    // The derived client inherits retry policy and QPS limiter from the parent.
+    let http: Arc<HttpClient> = if config.timeout.is_some() || config.connect_timeout.is_some() {
+        let t = config.timeout.unwrap_or(http.config.timeout);
+        let ct = config.connect_timeout.unwrap_or(http.config.connect_timeout);
+        Arc::new(
+            http.clone_with_timeouts(t, ct)
+                .map_err(|e| BatchError::Internal(e.to_string()))?,
+        )
+    } else {
+        Arc::clone(&http)
+    };
 
     let sem = Arc::new(Semaphore::new(config.max_concurrent));
     let base_options = Arc::new(options.clone());
