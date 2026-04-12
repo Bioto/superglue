@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package superglue;
+
+// ---------------------------------------------------------------------------
+// Tool layer
+// ---------------------------------------------------------------------------
+
+/// A registered tool definition passed from bindings to the core.
+message ToolSpec {
+  string name = 1;
+  /// Opaque JSON Schema string (the core does not parse the schema itself).
+  string parameters_schema_json = 2;
+  /// Optional human-readable description shown to the model.
+  optional string description = 3;
+}
+
+/// A tool call emitted by the model (function-call style).
+message FunctionCall {
+  string name = 1;
+  /// JSON object string (per tool-boundary contract).
+  string arguments = 2;
+}
+
+message ToolCall {
+  string id = 1;
+  /// Always "function" for the OpenAI-compatible subset.
+  string kind = 2;
+  FunctionCall function = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Chat messages
+// ---------------------------------------------------------------------------
+
+message ChatMessage {
+  string role = 1;
+  optional string content = 2;
+  repeated ToolCall tool_calls = 3;
+  optional string tool_call_id = 4;
+  optional string name = 5;
+  optional string refusal = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Request / options
+// ---------------------------------------------------------------------------
+
+/// Provider and run configuration supplied by callers (bindings or direct Rust).
+message ChatOptions {
+  // Connection
+  string base_url = 1;
+  string api_key = 2;
+  string model = 3;
+  uint32 max_tool_rounds = 4;
+  optional string system_prompt = 5;
+
+  // Sampling
+  optional float temperature = 6;
+  optional float top_p = 7;
+
+  // Token limits
+  optional uint32 max_completion_tokens = 8;
+
+  // Penalties
+  optional float presence_penalty = 9;
+  optional float frequency_penalty = 10;
+
+  // Stop sequence (single string; use extra_json for array form)
+  optional string stop = 11;
+
+  // Tool control
+  optional bool parallel_tool_calls = 12;
+
+  // Logprobs
+  optional bool logprobs = 13;
+  optional uint32 top_logprobs = 14;
+
+  // Determinism / storage
+  optional int64 seed = 15;
+  optional bool store = 16;
+
+  // Service
+  optional string service_tier = 17;
+
+  // Reasoning models (o1/o3/o4): "low" | "medium" | "high"
+  optional string reasoning_effort = 18;
+
+  /// JSON-encoded overrides for any field not covered above (merged into the request body).
+  optional string extra_json = 19;
+}
+
+message CompletionRequest {
+  repeated ChatMessage messages = 1;
+  ChatOptions options = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Outcome
+// ---------------------------------------------------------------------------
+
+message Usage {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens = 3;
+}
+
+message CompletionOutcome {
+  /// Final assistant text, if present.
+  optional string content = 1;
+  /// Number of HTTP completion calls performed.
+  uint32 rounds = 2;
+  optional Usage usage = 3;
+  /// finish_reason from the last choice ("stop" | "length" | "tool_calls" | ...).
+  optional string finish_reason = 4;
+}
