@@ -1,6 +1,10 @@
 //! Chat completions: non-streaming tool-loop and streaming (SSE) variants.
 
+mod conversation;
+
 use std::time::Instant;
+
+pub use conversation::Conversation;
 
 use futures_util::StreamExt;
 use secrecy::ExposeSecret;
@@ -182,6 +186,44 @@ pub struct CompletionOutcome {
     pub finish_reason: Option<String>,
     /// Correlation ID for this request (UUID v4 auto-generated if not supplied by caller).
     pub request_id: String,
+    /// Full caller-visible chat history after this turn (user / assistant / tool roles).
+    ///
+    /// Excludes the synthetic leading `system` row derived from [`ChatOptions::system_prompt`]
+    /// when that option is set, so this slice can be passed back into [`complete_with_tools`]
+    /// on the next turn.
+    pub messages: Vec<ChatMessage>,
+}
+
+/// Strips the leading `system` message when it was injected from [`ChatOptions::system_prompt`].
+#[must_use]
+pub fn conversation_messages_for_client(
+    messages: &[ChatMessage],
+    had_system_prompt: bool,
+) -> Vec<ChatMessage> {
+    if had_system_prompt
+        && messages
+            .first()
+            .is_some_and(|m| m.role == "system")
+    {
+        messages[1..].to_vec()
+    } else {
+        messages.to_vec()
+    }
+}
+
+fn terminal_assistant_for_history(model_msg: &ChatMessage, final_content: &Option<String>) -> ChatMessage {
+    let model_text = model_msg
+        .content
+        .as_ref()
+        .and_then(MessageContent::as_text);
+    match final_content {
+        Some(t) if model_text != Some(t.as_str()) => {
+            let mut m = model_msg.clone();
+            m.content = Some(MessageContent::Text(t.clone()));
+            m
+        }
+        _ => model_msg.clone(),
+    }
 }
 
 /// Errors from the chat + tool pipeline.
@@ -383,6 +425,7 @@ pub async fn complete_with_tools(
         messages.push(ChatMessage::text("system", sp));
     }
     messages.extend(caller_messages);
+    let had_system_prompt = options.system_prompt.is_some();
 
     // --- Input guardrails: run on the last user message before first LLM call ---
     if !guardrails.input_is_empty().await {
@@ -510,12 +553,15 @@ pub async fn complete_with_tools(
 
         // --- Output guardrails: retry loop ---
         if guardrails.output_is_empty().await {
+            messages.push(msg.clone());
+            let client_messages = conversation_messages_for_client(&messages, had_system_prompt);
             break CompletionOutcome {
                 content,
                 rounds: api_calls,
                 usage,
                 finish_reason,
                 request_id: request_id.clone(),
+                messages: client_messages,
             };
         }
 
@@ -534,12 +580,15 @@ pub async fn complete_with_tools(
                     } else {
                         Some(transformed)
                     };
+                    messages.push(terminal_assistant_for_history(msg, &final_content));
+                    let client_messages = conversation_messages_for_client(&messages, had_system_prompt);
                     final_outcome = Some(CompletionOutcome {
                         content: final_content,
                         rounds: api_calls,
                         usage,
                         finish_reason: saved_finish.clone(),
                         request_id: request_id.clone(),
+                        messages: client_messages,
                     });
                     break;
                 }
@@ -581,12 +630,19 @@ pub async fn complete_with_tools(
                         let (out2, gn2) = guardrails.run_output(&retry_text).await;
                         match out2 {
                             GuardrailOutcome::Allow(t) => {
+                                messages.push(terminal_assistant_for_history(
+                                    &retry_choice.message,
+                                    &Some(t.clone()),
+                                ));
+                                let client_messages =
+                                    conversation_messages_for_client(&messages, had_system_prompt);
                                 final_outcome = Some(CompletionOutcome {
                                     content: Some(t),
                                     rounds: api_calls,
                                     usage,
                                     finish_reason: saved_finish.clone(),
                                     request_id: request_id.clone(),
+                                    messages: client_messages,
                                 });
                                 break;
                             }
@@ -611,12 +667,19 @@ pub async fn complete_with_tools(
             }
         }
 
+        let default_messages = {
+            if final_outcome.is_none() {
+                messages.push(msg.clone());
+            }
+            conversation_messages_for_client(&messages, had_system_prompt)
+        };
         break final_outcome.unwrap_or(CompletionOutcome {
             content: saved_content,
             rounds: api_calls,
             usage,
             finish_reason: saved_finish,
             request_id: request_id.clone(),
+            messages: default_messages,
         });
     };
 

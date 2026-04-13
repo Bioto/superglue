@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use serde_json::json;
-use superglue::chat::{ChatError, ChatOptions, complete_with_tools};
+use superglue::chat::{ChatError, ChatOptions, Conversation, complete_with_tools};
 use superglue::hooks::HookRegistry;
 use superglue::guardrails::GuardrailRegistry;
 use superglue::http::{ClientConfig, HttpClient};
@@ -94,6 +94,9 @@ async fn completion_text_only_no_tools() {
         .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
     assert_eq!(out.rounds, 1);
+    assert_eq!(out.messages.len(), 2);
+    assert_eq!(out.messages[0].role, "user");
+    assert_eq!(out.messages[1].role, "assistant");
 }
 
 #[tokio::test]
@@ -131,6 +134,11 @@ async fn completion_tool_then_assistant_text() {
         .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
     assert_eq!(out.rounds, 2);
+    assert_eq!(out.messages.len(), 4);
+    assert_eq!(out.messages[0].role, "user");
+    assert_eq!(out.messages[1].role, "assistant");
+    assert_eq!(out.messages[2].role, "tool");
+    assert_eq!(out.messages[3].role, "assistant");
 }
 
 #[tokio::test]
@@ -183,6 +191,48 @@ async fn system_prompt_is_prepended() {
         .await
         .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
+    assert_eq!(out.messages.len(), 2);
+    assert!(!out.messages.iter().any(|m| m.role == "system"));
+}
+
+#[tokio::test]
+async fn conversation_accumulates_two_user_turns() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(text_only_response()))
+        .mount(&server)
+        .await;
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    let reg = ToolRegistry::new();
+    let opts = ChatOptions {
+        base_url: server.uri(),
+        api_key: secrecy::Secret::new("sk-test".to_string()),
+        model: "mock".into(),
+        max_tool_rounds: 4,
+        ..Default::default()
+    };
+    let mut conv = Conversation::new();
+    conv.push_user("first");
+    let o1 = conv
+        .complete(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), &opts)
+        .await
+        .unwrap();
+    assert_eq!(o1.content.as_deref(), Some("hello"));
+    assert_eq!(conv.messages.len(), 2);
+
+    conv.push_user("second");
+    let o2 = conv
+        .complete(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), &opts)
+        .await
+        .unwrap();
+    assert_eq!(o2.content.as_deref(), Some("hello"));
+    assert_eq!(conv.messages.len(), 4);
+    assert_eq!(conv.messages[0].role, "user");
+    assert_eq!(conv.messages[1].role, "assistant");
+    assert_eq!(conv.messages[2].role, "user");
+    assert_eq!(conv.messages[3].role, "assistant");
 }
 
 #[tokio::test]
