@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use serde_json::json;
 use superglue::batch::{BatchConfig, BatchError, BatchRequest, ErrorStrategy, batch_complete};
 use superglue::chat::ChatOptions;
-use superglue::hooks::HookRegistry;
 use superglue::guardrails::GuardrailRegistry;
+use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::tools::ToolRegistry;
 use wiremock::matchers::{method, path};
@@ -104,9 +104,17 @@ async fn batch_all_succeed() {
         BatchRequest::new("q3").with_id("id-3"),
     ];
 
-    let resp = batch_complete(http, registry, Arc::new(HookRegistry::new()), Arc::new(GuardrailRegistry::new()), requests, &opts(server.uri()), BatchConfig::default())
-        .await
-        .unwrap();
+    let resp = batch_complete(
+        http,
+        registry,
+        Arc::new(HookRegistry::new()),
+        Arc::new(GuardrailRegistry::new()),
+        requests,
+        &opts(server.uri()),
+        BatchConfig::default(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(resp.total_requests, 3);
     assert_eq!(resp.successful, 3);
@@ -328,8 +336,7 @@ async fn batch_assigns_ids() {
     assert!(!resp.results[1].id.is_empty());
 
     // All ids are distinct.
-    let ids: std::collections::HashSet<&str> =
-        resp.results.iter().map(|r| r.id.as_str()).collect();
+    let ids: std::collections::HashSet<&str> = resp.results.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(ids.len(), 3);
 }
 
@@ -341,28 +348,19 @@ async fn batch_aggregates_usage() {
     // Requests respond with distinct usage values so we can verify the sum.
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(text_response_usage("r1", 10, 5)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(text_response_usage("r1", 10, 5)))
         .up_to_n_times(1)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(text_response_usage("r2", 20, 10)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(text_response_usage("r2", 20, 10)))
         .up_to_n_times(1)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(text_response_usage("r3", 30, 15)),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(text_response_usage("r3", 30, 15)))
         .mount(&server)
         .await;
 
@@ -472,12 +470,8 @@ async fn batch_respects_max_concurrent() {
             // Update peak.
             let mut old_peak = peak_clone.load(Ordering::SeqCst);
             while cur > old_peak {
-                match peak_clone.compare_exchange(
-                    old_peak,
-                    cur,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
+                match peak_clone.compare_exchange(old_peak, cur, Ordering::SeqCst, Ordering::SeqCst)
+                {
                     Ok(_) => break,
                     Err(actual) => old_peak = actual,
                 }
@@ -490,7 +484,9 @@ async fn batch_respects_max_concurrent() {
         .mount(&server)
         .await;
 
-    let requests: Vec<BatchRequest> = (0..10).map(|i| BatchRequest::new(format!("q{i}"))).collect();
+    let requests: Vec<BatchRequest> = (0..10)
+        .map(|i| BatchRequest::new(format!("q{i}")))
+        .collect();
 
     let config = BatchConfig {
         max_concurrent: 3,

@@ -177,7 +177,9 @@ async fn skip_policy_continues_after_tool_error() {
     let reg = ToolRegistry::new();
     reg.register_with_policy(
         Arc::new(AlwaysFailTool),
-        ToolRetryPolicy { on_error: OnToolError::Skip },
+        ToolRetryPolicy {
+            on_error: OnToolError::Skip,
+        },
     )
     .await
     .unwrap();
@@ -226,7 +228,10 @@ async fn retry_policy_succeeds_on_second_attempt() {
             fail_count: 1,
         }),
         ToolRetryPolicy {
-            on_error: OnToolError::Retry { max: 3, initial_delay_ms: 0 },
+            on_error: OnToolError::Retry {
+                max: 3,
+                initial_delay_ms: 0,
+            },
         },
     )
     .await
@@ -245,7 +250,11 @@ async fn retry_policy_succeeds_on_second_attempt() {
 
     assert_eq!(out.content.as_deref(), Some("done"));
     // The flakey tool should have been called twice (1 fail + 1 success).
-    assert_eq!(calls.load(Ordering::SeqCst), 2, "expected 2 tool invocations");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "expected 2 tool invocations"
+    );
 }
 
 /// Retry policy exhausts all retries and then propagates the error (FailFast fallback).
@@ -263,7 +272,10 @@ async fn retry_policy_exhausted_propagates_error() {
     reg.register_with_policy(
         Arc::new(AlwaysFailTool),
         ToolRetryPolicy {
-            on_error: OnToolError::Retry { max: 2, initial_delay_ms: 0 },
+            on_error: OnToolError::Retry {
+                max: 2,
+                initial_delay_ms: 0,
+            },
         },
     )
     .await
@@ -290,12 +302,9 @@ async fn retry_policy_exhausted_propagates_error() {
 #[tokio::test]
 async fn register_with_policy_rejects_duplicates() {
     let reg = ToolRegistry::new();
-    reg.register_with_policy(
-        Arc::new(AlwaysFailTool),
-        ToolRetryPolicy::default(),
-    )
-    .await
-    .unwrap();
+    reg.register_with_policy(Arc::new(AlwaysFailTool), ToolRetryPolicy::default())
+        .await
+        .unwrap();
 
     let err = reg
         .register_with_policy(Arc::new(AlwaysFailTool), ToolRetryPolicy::default())
@@ -303,7 +312,10 @@ async fn register_with_policy_rejects_duplicates() {
         .unwrap_err();
 
     assert!(
-        matches!(err, superglue::tools::ToolInvokeError::DuplicateRegistration { .. }),
+        matches!(
+            err,
+            superglue::tools::ToolInvokeError::DuplicateRegistration { .. }
+        ),
         "expected DuplicateRegistration"
     );
 }

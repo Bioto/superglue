@@ -31,6 +31,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
+use tracing::{error, info};
 
 use crate::chat::{ChatOptions, complete_with_tools, stream_complete};
 use crate::guardrails::GuardrailRegistry;
@@ -60,7 +61,12 @@ impl SuperglueGrpcService {
         hooks: Arc<HookRegistry>,
         guardrails: Arc<GuardrailRegistry>,
     ) -> Self {
-        SuperglueGrpcService { http, tools, hooks, guardrails }
+        SuperglueGrpcService {
+            http,
+            tools,
+            hooks,
+            guardrails,
+        }
     }
 }
 
@@ -81,6 +87,9 @@ impl SuperglueService for SuperglueGrpcService {
             .map(ChatOptions::from)
             .unwrap_or_else(|| ChatOptions::default());
 
+        let request_id = opts.request_id.clone().unwrap_or_else(|| "-".to_string());
+        info!(%request_id, rpc = "Complete", "gRPC completion request");
+
         let messages: Vec<ChatMessage> = req
             .messages
             .into_iter()
@@ -96,7 +105,10 @@ impl SuperglueService for SuperglueGrpcService {
             &opts,
         )
         .await
-        .map_err(|e| Status::internal(e.to_string()))?;
+        .map_err(|e| {
+            error!(error = %e, %request_id, rpc = "Complete", "complete_with_tools failed");
+            Status::internal(e.to_string())
+        })?;
 
         Ok(Response::new(proto::CompletionOutcome {
             content: outcome.content,
@@ -119,6 +131,9 @@ impl SuperglueService for SuperglueGrpcService {
             .options
             .map(ChatOptions::from)
             .unwrap_or_else(|| ChatOptions::default());
+
+        let request_id = opts.request_id.clone().unwrap_or_else(|| "-".to_string());
+        info!(%request_id, rpc = "Stream", "gRPC streaming completion request");
 
         let messages: Vec<ChatMessage> = req
             .messages
@@ -154,6 +169,12 @@ impl SuperglueService for SuperglueGrpcService {
                         .await;
                 }
                 Err(e) => {
+                    error!(
+                        error = %e,
+                        %request_id,
+                        rpc = "Stream",
+                        "stream_complete failed"
+                    );
                     let _ = tx.send(Err(Status::internal(e.to_string()))).await;
                 }
             }

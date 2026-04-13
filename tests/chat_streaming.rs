@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use superglue::chat::{ChatOptions, stream_complete};
-use superglue::hooks::HookRegistry;
 use superglue::guardrails::GuardrailRegistry;
+use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
 use wiremock::matchers::{method, path};
@@ -62,8 +62,7 @@ async fn stream_delivers_all_tokens_in_order() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(sse_body(&tokens), "text/event-stream"),
+            ResponseTemplate::new(200).set_body_raw(sse_body(&tokens), "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -96,8 +95,7 @@ async fn usage_extracted_from_final_chunk() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(sse_body(&["hello"]), "text/event-stream"),
+            ResponseTemplate::new(200).set_body_raw(sse_body(&["hello"]), "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -138,9 +136,7 @@ async fn finish_reason_length_in_stream() {
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -183,9 +179,7 @@ async fn empty_delta_content_not_forwarded_to_callback() {
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -237,9 +231,7 @@ async fn null_content_delta_not_forwarded() {
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -323,9 +315,7 @@ async fn stream_with_no_content_tokens_returns_empty_string() {
     let body = "data: [DONE]\n\n";
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -363,13 +353,9 @@ async fn stream_system_prompt_prepended() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(move |req: &Request| {
-            let body: serde_json::Value =
-                serde_json::from_slice(&req.body).unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
             *cap.lock().unwrap() = Some(body);
-            ResponseTemplate::new(200).set_body_raw(
-                "data: [DONE]\n\n",
-                "text/event-stream",
-            )
+            ResponseTemplate::new(200).set_body_raw("data: [DONE]\n\n", "text/event-stream")
         })
         .mount(&server)
         .await;
@@ -415,13 +401,9 @@ async fn stream_request_always_sets_stream_true() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(move |req: &Request| {
-            let body: serde_json::Value =
-                serde_json::from_slice(&req.body).unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
             *cap.lock().unwrap() = Some(body);
-            ResponseTemplate::new(200).set_body_raw(
-                "data: [DONE]\n\n",
-                "text/event-stream",
-            )
+            ResponseTemplate::new(200).set_body_raw("data: [DONE]\n\n", "text/event-stream")
         })
         .mount(&server)
         .await;
@@ -456,10 +438,7 @@ async fn concurrent_streams_all_succeed() {
         .and(path("/v1/chat/completions"))
         .respond_with(move |_: &wiremock::Request| {
             c.fetch_add(1, Ordering::SeqCst);
-            ResponseTemplate::new(200).set_body_raw(
-                sse_body(&["hello"]),
-                "text/event-stream",
-            )
+            ResponseTemplate::new(200).set_body_raw(sse_body(&["hello"]), "text/event-stream")
         })
         .mount(&server)
         .await;
@@ -475,7 +454,7 @@ async fn concurrent_streams_all_succeed() {
                 stream_complete(
                     &http,
                     &HookRegistry::new(),
-        &GuardrailRegistry::new(),
+                    &GuardrailRegistry::new(),
                     vec![ChatMessage::text("user", "hi")],
                     &opts,
                     |_| {},

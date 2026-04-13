@@ -38,6 +38,7 @@ use std::time::Instant;
 
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use tracing::info;
 
 use std::time::Duration;
 
@@ -278,7 +279,9 @@ pub async fn batch_complete(
     // The derived client inherits retry policy and QPS limiter from the parent.
     let http: Arc<HttpClient> = if config.timeout.is_some() || config.connect_timeout.is_some() {
         let t = config.timeout.unwrap_or(http.config.timeout);
-        let ct = config.connect_timeout.unwrap_or(http.config.connect_timeout);
+        let ct = config
+            .connect_timeout
+            .unwrap_or(http.config.connect_timeout);
         Arc::new(
             http.clone_with_timeouts(t, ct)
                 .map_err(|e| BatchError::Internal(e.to_string()))?,
@@ -292,6 +295,14 @@ pub async fn batch_complete(
     let sem = Arc::new(Semaphore::new(config.max_concurrent));
     let base_options = Arc::new(options.clone());
     let error_strategy = config.error_strategy.clone();
+
+    info!(
+        total_requests,
+        model = %options.model,
+        error_strategy = ?error_strategy,
+        max_concurrent = config.max_concurrent,
+        "batch_complete started"
+    );
     let cancel_token = config.cancel.clone();
 
     // Spawn one task per request.
@@ -329,12 +340,7 @@ pub async fn batch_complete(
             let _ = hooks
                 .run(
                     HookStage::PreBatchItem,
-                    HookContext::with_meta(
-                        HookStage::PreBatchItem,
-                        &prompt,
-                        "id",
-                        id.as_str(),
-                    ),
+                    HookContext::with_meta(HookStage::PreBatchItem, &prompt, "id", id.as_str()),
                 )
                 .await;
 
@@ -452,6 +458,15 @@ pub async fn batch_complete(
 
     let elapsed_secs = batch_start.elapsed().as_secs_f64();
     metrics::histogram!(crate::telemetry::metrics::BATCH_DURATION_MS).record(elapsed_secs * 1000.0);
+
+    info!(
+        total_requests,
+        successful,
+        failed,
+        elapsed_secs,
+        model = %options.model,
+        "batch_complete finished"
+    );
 
     Ok(BatchResponse {
         results: all_results,

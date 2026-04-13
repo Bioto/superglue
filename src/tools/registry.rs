@@ -37,7 +37,8 @@ impl ToolRegistry {
     ///
     /// Returns an error if the tool name is already registered.
     pub async fn register(&self, tool: Arc<dyn Tool>) -> Result<(), ToolInvokeError> {
-        self.register_with_policy(tool, ToolRetryPolicy::default()).await
+        self.register_with_policy(tool, ToolRetryPolicy::default())
+            .await
     }
 
     /// Register a tool with an explicit per-tool error policy.
@@ -66,9 +67,7 @@ impl ToolRegistry {
     /// Return the error policy registered for `name`, or `ToolRetryPolicy::default()`.
     pub async fn policy_for(&self, name: &str) -> ToolRetryPolicy {
         let map = self.tools.read().await;
-        map.get(name)
-            .map(|(_, p)| p.clone())
-            .unwrap_or_default()
+        map.get(name).map(|(_, p)| p.clone()).unwrap_or_default()
     }
 
     /// Invoke a tool by name.

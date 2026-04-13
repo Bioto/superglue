@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 
-use superglue::telemetry::{ScrubMode, TelemetryConfig, init_tracing};
+use superglue::telemetry::{LogFormat, ScrubMode, TelemetryConfig, init_tracing};
 
 #[derive(Parser)]
 #[command(name = "superglue", version, about = "Superglue CLI")]
@@ -22,8 +22,28 @@ struct Cli {
     #[arg(long, global = true, default_value = "redact")]
     scrub_mode: String,
 
+    /// Log output format: pretty (human-readable) or json (one JSON object per line).
+    #[arg(long, global = true, value_enum, default_value_t = LogFormatArg::Pretty)]
+    log_format: LogFormatArg,
+
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+enum LogFormatArg {
+    #[default]
+    Pretty,
+    Json,
+}
+
+impl From<LogFormatArg> for LogFormat {
+    fn from(a: LogFormatArg) -> Self {
+        match a {
+            LogFormatArg::Pretty => LogFormat::Pretty,
+            LogFormatArg::Json => LogFormat::Json,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -61,19 +81,23 @@ enum Command {
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    let scrub_mode = ScrubMode::from_str(&cli.scrub_mode).unwrap_or_else(|| {
-        eprintln!(
-            "warning: unknown --scrub-mode {:?}; defaulting to 'redact'",
-            cli.scrub_mode
-        );
-        ScrubMode::Redact
-    });
+    let scrub_mode_parsed = ScrubMode::from_str(&cli.scrub_mode);
+    let scrub_unknown = scrub_mode_parsed.is_none();
+    let scrub_mode = scrub_mode_parsed.unwrap_or(ScrubMode::Redact);
 
     init_tracing(TelemetryConfig {
         otlp_endpoint: cli.otlp_endpoint.clone(),
         log_level: cli.log_level.clone(),
         scrub_mode,
+        log_format: cli.log_format.into(),
     });
+
+    if scrub_unknown {
+        tracing::warn!(
+            scrub_mode = %cli.scrub_mode,
+            "unknown --scrub-mode; defaulted to redact"
+        );
+    }
 
     superglue::telemetry::metrics::init_metrics();
 
@@ -85,7 +109,12 @@ async fn main() -> std::process::ExitCode {
             println!("{}", superglue::greet(&name));
         }
         #[cfg(feature = "grpc")]
-        Command::Serve { addr, api_key, base_url, model } => {
+        Command::Serve {
+            addr,
+            api_key,
+            base_url,
+            model,
+        } => {
             use std::sync::Arc;
             use superglue::chat::ChatOptions;
             use superglue::guardrails::GuardrailRegistry;
@@ -94,8 +123,7 @@ async fn main() -> std::process::ExitCode {
             use superglue::tools::ToolRegistry;
 
             let http = Arc::new(
-                HttpClient::new(ClientConfig::default())
-                    .expect("failed to build HttpClient"),
+                HttpClient::new(ClientConfig::default()).expect("failed to build HttpClient"),
             );
             let tools = Arc::new(ToolRegistry::new());
             let hooks = Arc::new(HookRegistry::new());
@@ -104,10 +132,8 @@ async fn main() -> std::process::ExitCode {
             // Validate that base_url + api_key + model are parseable.
             let _opts = ChatOptions::new(&base_url, &api_key, &model);
 
-            if let Err(e) =
-                superglue::grpc::serve(&addr, http, tools, hooks, guardrails).await
-            {
-                eprintln!("gRPC server error: {e}");
+            if let Err(e) = superglue::grpc::serve(&addr, http, tools, hooks, guardrails).await {
+                tracing::error!(error = %e, "gRPC server error");
                 return std::process::ExitCode::FAILURE;
             }
         }

@@ -173,14 +173,20 @@ mod tests {
     #[test]
     fn sensitive_fields_cover_required_names() {
         for name in &["api_key", "authorization", "content", "arguments", "result"] {
-            assert!(SENSITIVE_FIELDS.contains(name), "{name} should be in SENSITIVE_FIELDS");
+            assert!(
+                SENSITIVE_FIELDS.contains(name),
+                "{name} should be in SENSITIVE_FIELDS"
+            );
         }
     }
 
     #[test]
     fn safe_fields_not_in_deny_list() {
         for name in &["model", "request_id", "rounds", "tool_name", "elapsed_ms"] {
-            assert!(!SENSITIVE_FIELDS.contains(name), "{name} should NOT be in SENSITIVE_FIELDS");
+            assert!(
+                !SENSITIVE_FIELDS.contains(name),
+                "{name} should NOT be in SENSITIVE_FIELDS"
+            );
         }
     }
 
@@ -193,9 +199,19 @@ mod tests {
     #[test]
     fn scrub_mode_hash_produces_hash_prefix() {
         let rendered = scrub_value("api_key", &"secret-value", ScrubMode::Hash);
-        assert!(rendered.starts_with("[HASH:"), "expected [HASH:...], got: {rendered}");
-        assert!(rendered.ends_with(']'), "expected closing ], got: {rendered}");
-        assert_eq!(rendered.len(), "[HASH:xxxxxxxx]".len(), "hash should be 8 hex digits");
+        assert!(
+            rendered.starts_with("[HASH:"),
+            "expected [HASH:...], got: {rendered}"
+        );
+        assert!(
+            rendered.ends_with(']'),
+            "expected closing ], got: {rendered}"
+        );
+        assert_eq!(
+            rendered.len(),
+            "[HASH:xxxxxxxx]".len(),
+            "hash should be 8 hex digits"
+        );
     }
 
     #[test]
@@ -209,13 +225,19 @@ mod tests {
     fn scrub_mode_hash_distinguishes_different_values() {
         let a = scrub_value("content", &"hello", ScrubMode::Hash);
         let b = scrub_value("content", &"world", ScrubMode::Hash);
-        assert_ne!(a, b, "different values should (likely) produce different hashes");
+        assert_ne!(
+            a, b,
+            "different values should (likely) produce different hashes"
+        );
     }
 
     #[test]
     fn scrub_mode_allow_passes_through_sensitive() {
         let rendered = scrub_value("api_key", &"my-secret", ScrubMode::Allow);
-        assert!(rendered.contains("my-secret"), "Allow mode should not redact: {rendered}");
+        assert!(
+            rendered.contains("my-secret"),
+            "Allow mode should not redact: {rendered}"
+        );
     }
 
     #[test]

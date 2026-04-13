@@ -118,7 +118,10 @@ async fn runrecorder_accumulates_events_on_execute() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].stage, "pre_completion");
     assert_eq!(events[1].stage, "pre_tool");
-    assert_eq!(events[1].metadata.get("tool_name").map(|s| s.as_str()), Some("echo"));
+    assert_eq!(
+        events[1].metadata.get("tool_name").map(|s| s.as_str()),
+        Some("echo")
+    );
 }
 
 #[tokio::test]
@@ -151,7 +154,10 @@ async fn runrecorder_finish_stores_record_and_clears_events() {
     assert_eq!(record.finished_at_ms, 2000);
 
     // The recorder should have cleared its internal buffer after flushing.
-    assert!(recorder.peek_events().await.is_empty(), "events not cleared after finish");
+    assert!(
+        recorder.peek_events().await.is_empty(),
+        "events not cleared after finish"
+    );
 }
 
 #[tokio::test]

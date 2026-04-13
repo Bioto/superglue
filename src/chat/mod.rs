@@ -11,7 +11,9 @@ use secrecy::ExposeSecret;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::time::{Duration, sleep};
+use tracing::instrument;
 
+use crate::cancel::CancellationToken;
 use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookContext, HookError, HookRegistry, HookStage};
 use crate::http::{Error as HttpError, HttpClient, join_base_url, sse::SseParser};
@@ -21,7 +23,6 @@ use crate::openai::{
 };
 use crate::proto;
 use crate::tools::{OnToolError, ToolInvokeError, ToolRegistry, ToolRetryPolicy};
-use crate::cancel::CancellationToken;
 
 /// Provider and model settings for [`complete_with_tools`].
 ///
@@ -200,22 +201,18 @@ pub fn conversation_messages_for_client(
     messages: &[ChatMessage],
     had_system_prompt: bool,
 ) -> Vec<ChatMessage> {
-    if had_system_prompt
-        && messages
-            .first()
-            .is_some_and(|m| m.role == "system")
-    {
+    if had_system_prompt && messages.first().is_some_and(|m| m.role == "system") {
         messages[1..].to_vec()
     } else {
         messages.to_vec()
     }
 }
 
-fn terminal_assistant_for_history(model_msg: &ChatMessage, final_content: &Option<String>) -> ChatMessage {
-    let model_text = model_msg
-        .content
-        .as_ref()
-        .and_then(MessageContent::as_text);
+fn terminal_assistant_for_history(
+    model_msg: &ChatMessage,
+    final_content: &Option<String>,
+) -> ChatMessage {
+    let model_text = model_msg.content.as_ref().and_then(MessageContent::as_text);
     match final_content {
         Some(t) if model_text != Some(t.as_str()) => {
             let mut m = model_msg.clone();
@@ -297,7 +294,10 @@ async fn invoke_with_policy(
                     tracing::warn!(tool = name, error = %message, "tool failed (skip policy)");
                     Ok(Value::String(format!("Tool error (skipped): {message}")))
                 }
-                OnToolError::Retry { max, initial_delay_ms } => {
+                OnToolError::Retry {
+                    max,
+                    initial_delay_ms,
+                } => {
                     let mut delay = *initial_delay_ms;
                     for attempt in 1..=*max {
                         tracing::warn!(
@@ -394,6 +394,10 @@ async fn dispatch_one(
 /// **Input guardrails** run on the last user message before the first LLM call.
 /// **Output guardrails** run on the final assistant text with a retry loop
 /// (up to [`GuardrailRegistry::max_output_retries`]).
+#[instrument(
+    skip(http, registry, hooks, guardrails, caller_messages, options),
+    fields(model = %options.model)
+)]
 pub async fn complete_with_tools(
     http: &HttpClient,
     registry: &ToolRegistry,
@@ -474,7 +478,10 @@ pub async fn complete_with_tools(
             .and_then(|c| c.as_text().map(str::to_string))
             .unwrap_or_default();
         hooks
-            .run(HookStage::PreCompletion, HookContext::new(HookStage::PreCompletion, last_user))
+            .run(
+                HookStage::PreCompletion,
+                HookContext::new(HookStage::PreCompletion, last_user),
+            )
             .await?;
 
         let specs = registry.list_specs().await;
@@ -503,7 +510,8 @@ pub async fn complete_with_tools(
         req.reasoning_effort = options.reasoning_effort.clone();
 
         let body = serde_json::to_value(&req)?;
-        let val = post_json_cancellable(http, &url, &body, &headers, options.cancel.as_ref()).await?;
+        let val =
+            post_json_cancellable(http, &url, &body, &headers, options.cancel.as_ref()).await?;
         let response: crate::openai::ChatCompletionResponse = serde_json::from_value(val)?;
 
         let choice = response.choices.first().ok_or(ChatError::NoChoice)?;
@@ -530,7 +538,9 @@ pub async fn complete_with_tools(
             // Dispatch all "function" tool calls concurrently (preserving order).
             let function_tcs: Vec<_> = tcs.iter().filter(|tc| tc.kind == "function").collect();
             let results = futures_util::future::join_all(
-                function_tcs.iter().map(|tc| dispatch_one(tc, hooks, registry)),
+                function_tcs
+                    .iter()
+                    .map(|tc| dispatch_one(tc, hooks, registry)),
             )
             .await;
             for r in results {
@@ -581,7 +591,8 @@ pub async fn complete_with_tools(
                         Some(transformed)
                     };
                     messages.push(terminal_assistant_for_history(msg, &final_content));
-                    let client_messages = conversation_messages_for_client(&messages, had_system_prompt);
+                    let client_messages =
+                        conversation_messages_for_client(&messages, had_system_prompt);
                     final_outcome = Some(CompletionOutcome {
                         content: final_content,
                         rounds: api_calls,
@@ -617,7 +628,14 @@ pub async fn complete_with_tools(
                             None,
                         );
                         let body = serde_json::to_value(&retry_req)?;
-                        let val = post_json_cancellable(http, &url, &body, &headers, options.cancel.as_ref()).await?;
+                        let val = post_json_cancellable(
+                            http,
+                            &url,
+                            &body,
+                            &headers,
+                            options.cancel.as_ref(),
+                        )
+                        .await?;
                         let resp: crate::openai::ChatCompletionResponse =
                             serde_json::from_value(val)?;
                         let retry_choice = resp.choices.first().ok_or(ChatError::NoChoice)?;
@@ -719,6 +737,10 @@ pub struct StreamOutcome {
 /// Input guardrails run on the last user message before the stream starts; output
 /// guardrails run on the fully-accumulated response after the stream ends (no retry —
 /// same behaviour as gluellm's simple streaming path).
+#[instrument(
+    skip(http, hooks, guardrails, messages, options, on_delta),
+    fields(model = %options.model)
+)]
 pub async fn stream_complete<F>(
     http: &HttpClient,
     hooks: &HookRegistry,
@@ -790,7 +812,10 @@ where
         .and_then(|c| c.as_text().map(str::to_string))
         .unwrap_or_default();
     hooks
-        .run(HookStage::PreCompletion, HookContext::new(HookStage::PreCompletion, last_user))
+        .run(
+            HookStage::PreCompletion,
+            HookContext::new(HookStage::PreCompletion, last_user),
+        )
         .await?;
 
     // Check cancellation before initiating the stream.
@@ -822,12 +847,12 @@ where
     req.reasoning_effort = options.reasoning_effort.clone();
 
     let body = serde_json::to_value(&req)?;
-    eprintln!("[stream_complete] POST {url}");
+    tracing::debug!(%url, "stream_complete POST (SSE)");
 
     let mut byte_stream = http
         .post_json_stream_with_headers(&url, &body, &headers)
         .await?;
-    eprintln!("[stream_complete] connection established, reading SSE chunks…");
+    tracing::debug!("stream_complete connection established, reading SSE chunks");
 
     let mut parser = SseParser::new();
     let mut outcome = StreamOutcome {
@@ -850,7 +875,11 @@ where
         let bytes = chunk?;
         byte_count += bytes.len();
         let text = String::from_utf8_lossy(&bytes);
-        eprintln!("[stream_complete] raw chunk ({} bytes): {:?}", bytes.len(), &text[..text.len().min(120)]);
+        tracing::trace!(
+            chunk_bytes = bytes.len(),
+            preview = ?&text[..text.len().min(120)],
+            "stream_complete raw chunk"
+        );
 
         let events = parser
             .push_str(&text)
@@ -859,15 +888,23 @@ where
         for event in events {
             event_count += 1;
             let data = event.data.trim();
-            eprintln!("[stream_complete] SSE event #{event_count} data={:?}", &data[..data.len().min(80)]);
+            tracing::trace!(
+                event_count,
+                data_preview = ?&data[..data.len().min(80)],
+                "stream_complete SSE event"
+            );
             if data == "[DONE]" {
-                eprintln!("[stream_complete] received [DONE]");
+                tracing::trace!("stream_complete received [DONE]");
                 break;
             }
             let chunk: ChatCompletionChunk = match serde_json::from_str(data) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[stream_complete] JSON parse error: {e} — data: {data}");
+                    tracing::warn!(
+                        error = %e,
+                        data_preview = ?&data[..data.len().min(200)],
+                        "stream_complete JSON parse error"
+                    );
                     return Err(ChatError::Serde(e));
                 }
             };
@@ -882,21 +919,19 @@ where
 
             for choice in &chunk.choices {
                 if let Some(fr) = &choice.finish_reason {
-                    eprintln!("[stream_complete] finish_reason={fr}");
+                    tracing::trace!(finish_reason = %fr, "stream_complete finish_reason");
                     outcome.finish_reason = Some(fr.clone());
                 }
                 if let Some(delta) = &choice.delta.content
                     && !delta.is_empty()
                 {
-                    eprintln!("[stream_complete] delta token: {:?}", delta);
+                    tracing::trace!(delta_len = delta.len(), "stream_complete delta");
                     outcome.content.push_str(delta);
                     on_delta(delta.clone());
                 }
             }
         }
     }
-
-    eprintln!("[stream_complete] done — {byte_count} bytes, {event_count} SSE events, {} content chars", outcome.content.len());
 
     // --- Output guardrails (no retry for streaming) ---
     if !guardrails.output_is_empty().await {
@@ -917,6 +952,16 @@ where
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     metrics::histogram!(crate::telemetry::metrics::STREAM_DURATION_MS, "model" => options.model.clone()).record(elapsed_ms);
+
+    tracing::info!(
+        request_id = %outcome.request_id,
+        model = %options.model,
+        byte_count,
+        event_count,
+        content_chars = outcome.content.len(),
+        elapsed_ms,
+        "stream_complete finished"
+    );
 
     Ok(outcome)
 }

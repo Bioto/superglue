@@ -263,6 +263,12 @@ impl HttpClient {
         let status = resp.status();
         if !status.is_success() {
             let body_bytes = resp.bytes().await.unwrap_or_default();
+            warn!(
+                status = %status,
+                url = %url,
+                body_len = body_bytes.len(),
+                "POST stream request failed (non-success status)"
+            );
             return Err(Error::unsuccessful(status, &body_bytes));
         }
         Ok(resp.bytes_stream().map(|r| r.map_err(Error::from)))

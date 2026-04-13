@@ -81,7 +81,13 @@ async fn input_guardrail_blocks_before_llm_call() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        matches!(err, ChatError::Guardrail(GuardrailError { stage: GuardrailStage::Input, .. })),
+        matches!(
+            err,
+            ChatError::Guardrail(GuardrailError {
+                stage: GuardrailStage::Input,
+                ..
+            })
+        ),
         "expected Guardrail(Input) error, got: {err:?}"
     );
 
@@ -115,7 +121,10 @@ async fn input_guardrail_transforms_content() {
         })
         .await;
 
-    let messages = vec![ChatMessage::text("user", "my token is SECRET-abc123 please help")];
+    let messages = vec![ChatMessage::text(
+        "user",
+        "my token is SECRET-abc123 please help",
+    )];
     let result = complete_with_tools(
         &http(),
         &ToolRegistry::new(),
@@ -141,7 +150,9 @@ async fn output_guardrail_blocks_after_response() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text_response("this has badword in it")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(text_response("this has badword in it")),
+        )
         .mount(&server)
         .await;
 
@@ -171,7 +182,13 @@ async fn output_guardrail_blocks_after_response() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
-        matches!(err, ChatError::Guardrail(GuardrailError { stage: GuardrailStage::Output, .. })),
+        matches!(
+            err,
+            ChatError::Guardrail(GuardrailError {
+                stage: GuardrailStage::Output,
+                ..
+            })
+        ),
         "expected Guardrail(Output) error, got: {err:?}"
     );
 }
@@ -238,7 +255,9 @@ async fn output_guardrail_transforms_content() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text_response("call me at 555-123-4567")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(text_response("call me at 555-123-4567")),
+        )
         .mount(&server)
         .await;
 
@@ -283,11 +302,18 @@ async fn max_length_guardrail_blocks_long_input() {
     guardrails
         .add_input(GuardrailConfig {
             name: "max-len".into(),
-            handler: Arc::new(MaxLengthGuardrail::new(Some(10), None, LengthStrategy::Block)),
+            handler: Arc::new(MaxLengthGuardrail::new(
+                Some(10),
+                None,
+                LengthStrategy::Block,
+            )),
         })
         .await;
 
-    let messages = vec![ChatMessage::text("user", "this message is definitely more than 10 chars")];
+    let messages = vec![ChatMessage::text(
+        "user",
+        "this message is definitely more than 10 chars",
+    )];
     let result = complete_with_tools(
         &http(),
         &ToolRegistry::new(),
@@ -301,7 +327,10 @@ async fn max_length_guardrail_blocks_long_input() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        ChatError::Guardrail(GuardrailError { stage: GuardrailStage::Input, .. })
+        ChatError::Guardrail(GuardrailError {
+            stage: GuardrailStage::Input,
+            ..
+        })
     ));
     assert_eq!(server.received_requests().await.unwrap().len(), 0);
 }
@@ -316,7 +345,9 @@ async fn max_length_guardrail_truncates_output() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(text_response("this is a very long response")))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(text_response("this is a very long response")),
+        )
         .mount(&server)
         .await;
 
@@ -324,7 +355,11 @@ async fn max_length_guardrail_truncates_output() {
     guardrails
         .add_output(GuardrailConfig {
             name: "max-output".into(),
-            handler: Arc::new(MaxLengthGuardrail::new(None, Some(10), LengthStrategy::Truncate)),
+            handler: Arc::new(MaxLengthGuardrail::new(
+                None,
+                Some(10),
+                LengthStrategy::Truncate,
+            )),
         })
         .await;
 
@@ -341,7 +376,10 @@ async fn max_length_guardrail_truncates_output() {
     .unwrap();
 
     let content = outcome.content.unwrap();
-    assert!(content.len() <= 10, "content should be truncated to 10 chars, got: {content:?}");
+    assert!(
+        content.len() <= 10,
+        "content should be truncated to 10 chars, got: {content:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +418,10 @@ async fn stream_input_guardrail_blocks() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        ChatError::Guardrail(GuardrailError { stage: GuardrailStage::Input, .. })
+        ChatError::Guardrail(GuardrailError {
+            stage: GuardrailStage::Input,
+            ..
+        })
     ));
     assert_eq!(server.received_requests().await.unwrap().len(), 0);
 }
@@ -446,7 +487,10 @@ async fn batch_input_guardrail_blocks_item() {
     let blocked = resp.results.iter().find(|r| r.error.is_some());
     assert!(blocked.is_some(), "one result should have an error");
     let err_msg = blocked.unwrap().error.as_deref().unwrap();
-    assert!(err_msg.contains("guardrail") || err_msg.contains("blocked"), "error should mention guardrail: {err_msg}");
+    assert!(
+        err_msg.contains("guardrail") || err_msg.contains("blocked"),
+        "error should mention guardrail: {err_msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +537,10 @@ async fn custom_handler_blocks() {
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
-        ChatError::Guardrail(GuardrailError { stage: GuardrailStage::Input, .. })
+        ChatError::Guardrail(GuardrailError {
+            stage: GuardrailStage::Input,
+            ..
+        })
     ));
     assert_eq!(server.received_requests().await.unwrap().len(), 0);
 }

@@ -92,13 +92,15 @@ async fn auto_generated_request_id() {
     let hooks = HookRegistry::new();
     let guardrails = GuardrailRegistry::default();
 
-    let outcome =
-        complete_with_tools(&http, &registry, &hooks, &guardrails, messages, &opts)
-            .await
-            .expect("complete_with_tools failed");
+    let outcome = complete_with_tools(&http, &registry, &hooks, &guardrails, messages, &opts)
+        .await
+        .expect("complete_with_tools failed");
 
     // Must be a non-empty string that looks like a UUID (contains hyphens).
-    assert!(!outcome.request_id.is_empty(), "request_id should not be empty");
+    assert!(
+        !outcome.request_id.is_empty(),
+        "request_id should not be empty"
+    );
     assert!(
         outcome.request_id.contains('-'),
         "auto-generated request_id should be a UUID: {}",
@@ -125,10 +127,9 @@ async fn caller_supplied_request_id_is_preserved() {
     let hooks = HookRegistry::new();
     let guardrails = GuardrailRegistry::default();
 
-    let outcome =
-        complete_with_tools(&http, &registry, &hooks, &guardrails, messages, &opts)
-            .await
-            .expect("complete_with_tools failed");
+    let outcome = complete_with_tools(&http, &registry, &hooks, &guardrails, messages, &opts)
+        .await
+        .expect("complete_with_tools failed");
 
     assert_eq!(
         outcome.request_id, "my-custom-trace-id",
@@ -143,8 +144,7 @@ async fn stream_auto_generated_request_id() {
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(sse_response("streamed"), "text/event-stream"),
+            ResponseTemplate::new(200).set_body_raw(sse_response("streamed"), "text/event-stream"),
         )
         .mount(&server)
         .await;
@@ -159,7 +159,10 @@ async fn stream_auto_generated_request_id() {
         .await
         .expect("stream_complete failed");
 
-    assert!(!outcome.request_id.is_empty(), "stream request_id should not be empty");
+    assert!(
+        !outcome.request_id.is_empty(),
+        "stream request_id should not be empty"
+    );
     assert!(
         outcome.request_id.contains('-'),
         "auto-generated stream request_id should be a UUID: {}",

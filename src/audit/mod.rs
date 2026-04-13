@@ -200,7 +200,10 @@ impl HookHandler for RunRecorder {
             .iter()
             .map(|(k, v)| {
                 // For string values, use the raw string to avoid JSON-quoted output.
-                let s = v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string());
+                let s = v
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| v.to_string());
                 (k.clone(), s)
             })
             .collect();

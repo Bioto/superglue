@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use superglue::chat::{ChatError, ChatOptions, complete_with_tools};
-use superglue::hooks::HookRegistry;
 use superglue::guardrails::GuardrailRegistry;
+use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
 use superglue::tools::{Tool, ToolInvokeError, ToolRegistry, ToolSpec};
@@ -123,7 +123,10 @@ async fn http_401_returns_error() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, ChatError::Http(_)), "expected Http error, got {err:?}");
+    assert!(
+        matches!(err, ChatError::Http(_)),
+        "expected Http error, got {err:?}"
+    );
 }
 
 #[tokio::test]
@@ -260,9 +263,10 @@ async fn malformed_tool_args_returns_serde_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            tool_call_response("echo", "NOT VALID JSON {{{"),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(tool_call_response("echo", "NOT VALID JSON {{{")),
+        )
         .mount(&server)
         .await;
 
@@ -294,9 +298,9 @@ async fn unknown_tool_returns_tool_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            tool_call_response("nonexistent_tool", "{}"),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(tool_call_response("nonexistent_tool", "{}")),
+        )
         .mount(&server)
         .await;
 
@@ -328,9 +332,9 @@ async fn tool_handler_error_propagates() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(
-            tool_call_response("error_tool", "{}"),
-        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(tool_call_response("error_tool", "{}")),
+        )
         .mount(&server)
         .await;
 
@@ -599,7 +603,7 @@ async fn concurrent_completions_all_succeed() {
                     &http,
                     &reg,
                     &HookRegistry::new(),
-        &GuardrailRegistry::new(),
+                    &GuardrailRegistry::new(),
                     vec![ChatMessage::text("user", "hi")],
                     &opts,
                 )

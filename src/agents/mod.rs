@@ -30,7 +30,9 @@
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 
-use crate::chat::{ChatError, ChatOptions, CompletionOutcome, StreamOutcome, complete_with_tools, stream_complete};
+use crate::chat::{
+    ChatError, ChatOptions, CompletionOutcome, StreamOutcome, complete_with_tools, stream_complete,
+};
 use crate::guardrails::GuardrailRegistry;
 use crate::hooks::HookRegistry;
 use crate::http::HttpClient;
@@ -228,7 +230,15 @@ impl AgentEngine {
         use crate::openai::ChatMessage;
         let opts = self.effective_options(base_options);
         let messages = vec![ChatMessage::text("user", user_message.into())];
-        complete_with_tools(http, registry, &self.hooks, &self.guardrails, messages, &opts).await
+        complete_with_tools(
+            http,
+            registry,
+            &self.hooks,
+            &self.guardrails,
+            messages,
+            &opts,
+        )
+        .await
     }
 
     /// Run a streaming completion (no tool loop).
@@ -247,7 +257,15 @@ impl AgentEngine {
         use crate::openai::ChatMessage;
         let opts = self.effective_options(base_options);
         let messages = vec![ChatMessage::text("user", user_message.into())];
-        stream_complete(http, &self.hooks, &self.guardrails, messages, &opts, on_delta).await
+        stream_complete(
+            http,
+            &self.hooks,
+            &self.guardrails,
+            messages,
+            &opts,
+            on_delta,
+        )
+        .await
     }
 }
 

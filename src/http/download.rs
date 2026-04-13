@@ -36,7 +36,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use governor::{Quota, RateLimiter, clock::DefaultClock, state::InMemoryState, state::NotKeyed, middleware::NoOpMiddleware};
+use governor::{
+    Quota, RateLimiter, clock::DefaultClock, middleware::NoOpMiddleware, state::InMemoryState,
+    state::NotKeyed,
+};
 use tokio::io::AsyncWriteExt;
 use tracing::instrument;
 

@@ -1,12 +1,11 @@
 //! Smoke tests for superglue::telemetry — verifies init_tracing and metrics initialisation
 //! are callable without panicking.
 
-use superglue::telemetry::{ScrubMode, TelemetryConfig, init_tracing};
 use superglue::telemetry::metrics::{
-    BATCH_DURATION_MS, BATCH_SIZE, COMPLETION_DURATION_MS, COMPLETIONS_ERRORS,
-    COMPLETIONS_TOTAL, HTTP_RETRIES_TOTAL, STREAM_DURATION_MS, TOOL_CALLS_ERRORS,
-    TOOL_CALLS_TOTAL,
+    BATCH_DURATION_MS, BATCH_SIZE, COMPLETION_DURATION_MS, COMPLETIONS_ERRORS, COMPLETIONS_TOTAL,
+    HTTP_RETRIES_TOTAL, STREAM_DURATION_MS, TOOL_CALLS_ERRORS, TOOL_CALLS_TOTAL,
 };
+use superglue::telemetry::{LogFormat, ScrubMode, TelemetryConfig, init_tracing};
 
 #[test]
 fn init_tracing_is_idempotent() {
@@ -17,6 +16,7 @@ fn init_tracing_is_idempotent() {
         log_level: "warn".to_string(),
         scrub_mode: ScrubMode::Redact,
         otlp_endpoint: None,
+        ..Default::default()
     });
 }
 
@@ -26,6 +26,7 @@ fn init_tracing_hash_mode_is_idempotent() {
         scrub_mode: ScrubMode::Hash,
         log_level: "error".to_string(),
         otlp_endpoint: None,
+        ..Default::default()
     });
 }
 
@@ -35,6 +36,16 @@ fn init_tracing_allow_mode_is_idempotent() {
         scrub_mode: ScrubMode::Allow,
         log_level: "error".to_string(),
         otlp_endpoint: None,
+        ..Default::default()
+    });
+}
+
+#[test]
+fn init_tracing_json_format_is_idempotent() {
+    init_tracing(TelemetryConfig {
+        log_format: LogFormat::Json,
+        log_level: "error".to_string(),
+        ..Default::default()
     });
 }
 
@@ -43,6 +54,7 @@ fn telemetry_config_default_values() {
     let cfg = TelemetryConfig::default();
     assert_eq!(cfg.log_level, "info");
     assert_eq!(cfg.scrub_mode, ScrubMode::Redact);
+    assert_eq!(cfg.log_format, LogFormat::Pretty);
     assert!(cfg.otlp_endpoint.is_none());
 }
 

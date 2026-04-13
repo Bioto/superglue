@@ -6,7 +6,7 @@ use crate::http::HttpClient;
 use crate::openai::ChatMessage;
 use crate::tools::ToolRegistry;
 
-use super::{complete_with_tools, ChatError, ChatOptions, CompletionOutcome};
+use super::{ChatError, ChatOptions, CompletionOutcome, complete_with_tools};
 
 /// OpenAI-style message list managed across [`Self::complete`] turns.
 ///
@@ -33,7 +33,8 @@ impl Conversation {
     }
 
     pub fn push_assistant_text(&mut self, text: impl Into<String>) {
-        self.messages.push(ChatMessage::text("assistant", text.into()));
+        self.messages
+            .push(ChatMessage::text("assistant", text.into()));
     }
 
     /// Runs the tool loop for the current [`Self::messages`] buffer and replaces it

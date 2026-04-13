@@ -10,15 +10,30 @@
 //!
 //! [`metrics`] initialisation is handled separately via [`metrics::init_metrics`].
 //!
+//! # Levels and structure
+//!
+//! - **`ERROR` / `WARN`**: failures, retries, skipped tools.
+//! - **`INFO`**: request lifecycle (start/finish, model, `request_id`, round counts).
+//! - **`DEBUG`**: connection and stream milestones.
+//! - **`TRACE`**: high-volume detail (per-SSE-chunk, per-token).
+//!
+//! Prefer structured fields (`model`, `request_id`, `error = %e`). Do not log secrets;
+//! [`ChatOptions`] omits `api_key` from `Debug`. The fmt layer scrubs known sensitive
+//! **field names** in output ([`scrub::SENSITIVE_FIELDS`]).
+//!
+//! Embedders should install their own subscriber or call [`init_tracing`] once;
+//! [`init_tracing`] uses `try_init` and ignores duplicate registration.
+//!
 //! # Example
 //!
 //! ```rust,no_run
-//! use superglue::telemetry::{ScrubMode, TelemetryConfig, init_tracing};
+//! use superglue::telemetry::{LogFormat, ScrubMode, TelemetryConfig, init_tracing};
 //!
 //! init_tracing(TelemetryConfig {
 //!     otlp_endpoint: Some("http://localhost:4318".to_string()),
 //!     log_level: "info".to_string(),
 //!     scrub_mode: ScrubMode::Redact,
+//!     log_format: LogFormat::Pretty,
 //! });
 //! ```
 
@@ -32,6 +47,16 @@ use scrub::ScrubFields;
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+/// Console / stderr log line format for the fmt layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogFormat {
+    /// Human-readable lines (default).
+    #[default]
+    Pretty,
+    /// One JSON object per line (useful for log aggregators).
+    Json,
+}
 
 /// Configuration for [`init_tracing`].
 #[derive(Debug, Clone)]
@@ -60,6 +85,9 @@ pub struct TelemetryConfig {
     /// - [`ScrubMode::Allow`] — passes values through unchanged.
     ///   Only for local development.
     pub scrub_mode: ScrubMode,
+
+    /// Pretty (multi-line) vs JSON lines for the fmt subscriber layer.
+    pub log_format: LogFormat,
 }
 
 impl Default for TelemetryConfig {
@@ -68,6 +96,7 @@ impl Default for TelemetryConfig {
             otlp_endpoint: None,
             log_level: "info".to_string(),
             scrub_mode: ScrubMode::Redact,
+            log_format: LogFormat::Pretty,
         }
     }
 }
@@ -77,6 +106,29 @@ pub use scrub::ScrubMode;
 // ---------------------------------------------------------------------------
 // Public initialisation
 // ---------------------------------------------------------------------------
+
+macro_rules! boxed_fmt_layer {
+    ($config:expr) => {
+        match ($config.log_format, $config.scrub_mode) {
+            (LogFormat::Json, scrub::ScrubMode::Allow) => tracing_subscriber::fmt::layer()
+                .json()
+                .with_target(true)
+                .boxed(),
+            (LogFormat::Pretty, scrub::ScrubMode::Allow) => {
+                tracing_subscriber::fmt::layer().with_target(true).boxed()
+            }
+            (LogFormat::Json, mode) => tracing_subscriber::fmt::layer()
+                .json()
+                .fmt_fields(ScrubFields(mode))
+                .with_target(true)
+                .boxed(),
+            (LogFormat::Pretty, mode) => tracing_subscriber::fmt::layer()
+                .fmt_fields(ScrubFields(mode))
+                .with_target(true)
+                .boxed(),
+        }
+    };
+}
 
 /// Initialise the global `tracing` subscriber.
 ///
@@ -89,18 +141,10 @@ pub use scrub::ScrubMode;
 /// specified OTLP/HTTP endpoint (e.g. an OpenTelemetry Collector). The `fmt`
 /// layer (with optional scrubbing) is always installed regardless.
 pub fn init_tracing(config: TelemetryConfig) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 
-    let fmt_layer: Box<dyn tracing_subscriber::Layer<_> + Send + Sync> =
-        if config.scrub_mode == scrub::ScrubMode::Allow {
-            tracing_subscriber::fmt::layer().with_target(true).boxed()
-        } else {
-            tracing_subscriber::fmt::layer()
-                .fmt_fields(ScrubFields(config.scrub_mode))
-                .with_target(true)
-                .boxed()
-        };
+    let fmt_layer: Box<dyn Layer<_> + Send + Sync> = boxed_fmt_layer!(&config);
 
     #[cfg(feature = "otlp")]
     if let Some(ref endpoint) = config.otlp_endpoint {
@@ -129,6 +173,7 @@ pub fn init_tracing(config: TelemetryConfig) {
             }
             Err(e) => {
                 // Fall through to fmt-only; warn after the subscriber is installed.
+                let fmt_layer: Box<dyn Layer<_> + Send + Sync> = boxed_fmt_layer!(&config);
                 let _ = tracing_subscriber::registry()
                     .with(filter)
                     .with(fmt_layer)

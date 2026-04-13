@@ -307,9 +307,7 @@ async fn post_returns_json_body_on_200() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"answer": 42})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"answer": 42})))
         .mount(&server)
         .await;
 
@@ -326,9 +324,7 @@ async fn post_returns_error_on_non_json_200() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_string("this is not json"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_string("this is not json"))
         .mount(&server)
         .await;
 

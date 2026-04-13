@@ -1,7 +1,7 @@
 //! Integration tests for the hook system (all stages, mutation, error strategies).
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -57,7 +57,11 @@ fn text_response(content: &str) -> serde_json::Value {
     })
 }
 
-fn tool_call_then_text(tool_name: &str, args: &str, after: &str) -> (serde_json::Value, serde_json::Value) {
+fn tool_call_then_text(
+    tool_name: &str,
+    args: &str,
+    after: &str,
+) -> (serde_json::Value, serde_json::Value) {
     let tool_call = json!({
         "id": "chatcmpl-tool",
         "object": "chat.completion",
@@ -110,7 +114,10 @@ impl Tool for EchoTool {
         }
     }
 
-    async fn call(&self, arguments: serde_json::Value) -> Result<serde_json::Value, ToolInvokeError> {
+    async fn call(
+        &self,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolInvokeError> {
         Ok(arguments)
     }
 }
@@ -154,13 +161,24 @@ async fn pre_completion_fires_before_each_api_call() {
 
     let http = http();
     let messages = vec![ChatMessage::text("user", "hello")];
-    let out = complete_with_tools(&http, &tool_reg, &registry, &GuardrailRegistry::new(), messages, &opts(server.uri()))
-        .await
-        .unwrap();
+    let out = complete_with_tools(
+        &http,
+        &tool_reg,
+        &registry,
+        &GuardrailRegistry::new(),
+        messages,
+        &opts(server.uri()),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(out.content.as_deref(), Some("done"));
     // PreCompletion fires once per HTTP call — two rounds means 2 fires.
-    assert_eq!(counter.load(Ordering::SeqCst), 2, "PreCompletion should fire for each API call");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "PreCompletion should fire for each API call"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -201,11 +219,22 @@ async fn post_completion_fires_after_each_response() {
 
     let http = http();
     let messages = vec![ChatMessage::text("user", "hello")];
-    complete_with_tools(&http, &tool_reg, &registry, &GuardrailRegistry::new(), messages, &opts(server.uri()))
-        .await
-        .unwrap();
+    complete_with_tools(
+        &http,
+        &tool_reg,
+        &registry,
+        &GuardrailRegistry::new(),
+        messages,
+        &opts(server.uri()),
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(counter.load(Ordering::SeqCst), 2, "PostCompletion fires after each HTTP response");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "PostCompletion fires after each HTTP response"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +266,10 @@ impl Tool for RecordingTool {
         }
     }
 
-    async fn call(&self, arguments: serde_json::Value) -> Result<serde_json::Value, ToolInvokeError> {
+    async fn call(
+        &self,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolInvokeError> {
         let x = arguments["x"].as_u64().unwrap_or(0) as u32;
         self.0.store(x, Ordering::SeqCst);
         Ok(arguments)
@@ -275,16 +307,30 @@ async fn pre_tool_can_mutate_args() {
         .await;
 
     let tool_reg = ToolRegistry::new();
-    tool_reg.register(Arc::new(RecordingTool(Arc::clone(&recorded_x)))).await.unwrap();
-
-    let http = http();
-    let messages = vec![ChatMessage::text("user", "call echo with x=1")];
-    complete_with_tools(&http, &tool_reg, &registry, &GuardrailRegistry::new(), messages, &opts(server.uri()))
+    tool_reg
+        .register(Arc::new(RecordingTool(Arc::clone(&recorded_x))))
         .await
         .unwrap();
 
+    let http = http();
+    let messages = vec![ChatMessage::text("user", "call echo with x=1")];
+    complete_with_tools(
+        &http,
+        &tool_reg,
+        &registry,
+        &GuardrailRegistry::new(),
+        messages,
+        &opts(server.uri()),
+    )
+    .await
+    .unwrap();
+
     // The hook replaced x=1 with x=99, so the tool should have received 99.
-    assert_eq!(recorded_x.load(Ordering::SeqCst), 99, "PreTool hook should have mutated args");
+    assert_eq!(
+        recorded_x.load(Ordering::SeqCst),
+        99,
+        "PreTool hook should have mutated args"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -343,9 +389,16 @@ async fn post_tool_can_mutate_result() {
 
     let http = http();
     let messages = vec![ChatMessage::text("user", "call echo")];
-    let out = complete_with_tools(&http, &tool_reg, &registry, &GuardrailRegistry::new(), messages, &opts(server.uri()))
-        .await
-        .unwrap();
+    let out = complete_with_tools(
+        &http,
+        &tool_reg,
+        &registry,
+        &GuardrailRegistry::new(),
+        messages,
+        &opts(server.uri()),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(out.content.as_deref(), Some("saw mutated result"));
 }
@@ -359,7 +412,10 @@ struct PanickingHook;
 #[async_trait]
 impl HookHandler for PanickingHook {
     async fn execute(&self, _ctx: HookContext) -> Result<HookContext, HookError> {
-        Err(HookError::new("panicking-hook", "intentional failure for test"))
+        Err(HookError::new(
+            "panicking-hook",
+            "intentional failure for test",
+        ))
     }
 }
 
@@ -387,9 +443,16 @@ async fn hook_skip_on_error() {
     let http = http();
     let messages = vec![ChatMessage::text("user", "hi")];
     // Skip strategy: even though the hook errors, the call must succeed.
-    let out = complete_with_tools(&http, &ToolRegistry::new(), &registry, &GuardrailRegistry::new(), messages, &opts(server.uri()))
-        .await
-        .unwrap();
+    let out = complete_with_tools(
+        &http,
+        &ToolRegistry::new(),
+        &registry,
+        &GuardrailRegistry::new(),
+        messages,
+        &opts(server.uri()),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(out.content.as_deref(), Some("ok"));
 }
@@ -421,12 +484,22 @@ async fn hook_abort_on_error() {
 
     let http = http();
     let messages = vec![ChatMessage::text("user", "hi")];
-    let err = complete_with_tools(&http, &ToolRegistry::new(), &registry, &GuardrailRegistry::new(), messages, &opts(server.uri()))
-        .await
-        .unwrap_err();
+    let err = complete_with_tools(
+        &http,
+        &ToolRegistry::new(),
+        &registry,
+        &GuardrailRegistry::new(),
+        messages,
+        &opts(server.uri()),
+    )
+    .await
+    .unwrap_err();
 
     let msg = err.to_string();
-    assert!(msg.contains("hook aborted") || msg.contains("intentional failure"), "Expected hook abort error, got: {msg}");
+    assert!(
+        msg.contains("hook aborted") || msg.contains("intentional failure"),
+        "Expected hook abort error, got: {msg}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -478,7 +551,11 @@ async fn pre_batch_item_fires_per_item() {
     .await
     .unwrap();
 
-    assert_eq!(counter.load(Ordering::SeqCst), 3, "PreBatchItem fires once per item");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        3,
+        "PreBatchItem fires once per item"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +609,11 @@ async fn post_batch_item_fires_per_item() {
     .unwrap();
 
     assert_eq!(resp.total_requests, 4);
-    assert_eq!(counter.load(Ordering::SeqCst), 4, "PostBatchItem fires once per item");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        4,
+        "PostBatchItem fires once per item"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -545,8 +626,7 @@ async fn stream_pre_completion_fires() {
 
     let server = MockServer::start().await;
 
-    let sse_body =
-        "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\
+    let sse_body = "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\
          \"delta\":{\"role\":\"assistant\",\"content\":\"hi\"},\"finish_reason\":null}]}\n\n\
          data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\
          \"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
@@ -577,9 +657,20 @@ async fn stream_pre_completion_fires() {
 
     let http = http();
     let messages = vec![ChatMessage::text("user", "hello")];
-    stream_complete(&http, &registry, &GuardrailRegistry::new(), messages, &opts(server.uri()), |_| {})
-        .await
-        .unwrap();
+    stream_complete(
+        &http,
+        &registry,
+        &GuardrailRegistry::new(),
+        messages,
+        &opts(server.uri()),
+        |_| {},
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "PreCompletion fires once for stream_complete");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "PreCompletion fires once for stream_complete"
+    );
 }

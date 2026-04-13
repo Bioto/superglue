@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use async_trait::async_trait;
 use serde_json::json;
 use superglue::chat::{ChatError, ChatOptions, Conversation, complete_with_tools};
-use superglue::hooks::HookRegistry;
 use superglue::guardrails::GuardrailRegistry;
+use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::{ChatMessage, MessageContent};
 use superglue::tools::{Tool, ToolRegistry, ToolSpec};
@@ -89,9 +89,16 @@ async fn completion_text_only_no_tools() {
         ..Default::default()
     };
     let messages = vec![ChatMessage::text("user", "hi")];
-    let out = complete_with_tools(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts)
-        .await
-        .unwrap();
+    let out = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        messages,
+        &opts,
+    )
+    .await
+    .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
     assert_eq!(out.rounds, 1);
     assert_eq!(out.messages.len(), 2);
@@ -129,9 +136,16 @@ async fn completion_tool_then_assistant_text() {
         ..Default::default()
     };
     let messages = vec![ChatMessage::text("user", "use echo")];
-    let out = complete_with_tools(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts)
-        .await
-        .unwrap();
+    let out = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        messages,
+        &opts,
+    )
+    .await
+    .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
     assert_eq!(out.rounds, 2);
     assert_eq!(out.messages.len(), 4);
@@ -161,9 +175,16 @@ async fn max_tool_rounds_returns_error() {
         ..Default::default()
     };
     let messages = vec![ChatMessage::text("user", "loop")];
-    let err = complete_with_tools(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts)
-        .await
-        .unwrap_err();
+    let err = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        messages,
+        &opts,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(err, ChatError::MaxToolRounds(2)));
 }
 
@@ -187,9 +208,16 @@ async fn system_prompt_is_prepended() {
         ..Default::default()
     };
     let messages = vec![ChatMessage::text("user", "hi")];
-    let out = complete_with_tools(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), messages, &opts)
-        .await
-        .unwrap();
+    let out = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        messages,
+        &opts,
+    )
+    .await
+    .unwrap();
     assert_eq!(out.content.as_deref(), Some("hello"));
     assert_eq!(out.messages.len(), 2);
     assert!(!out.messages.iter().any(|m| m.role == "system"));
@@ -216,7 +244,13 @@ async fn conversation_accumulates_two_user_turns() {
     let mut conv = Conversation::new();
     conv.push_user("first");
     let o1 = conv
-        .complete(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), &opts)
+        .complete(
+            &http,
+            &reg,
+            &HookRegistry::new(),
+            &GuardrailRegistry::new(),
+            &opts,
+        )
         .await
         .unwrap();
     assert_eq!(o1.content.as_deref(), Some("hello"));
@@ -224,7 +258,13 @@ async fn conversation_accumulates_two_user_turns() {
 
     conv.push_user("second");
     let o2 = conv
-        .complete(&http, &reg, &HookRegistry::new(), &GuardrailRegistry::new(), &opts)
+        .complete(
+            &http,
+            &reg,
+            &HookRegistry::new(),
+            &GuardrailRegistry::new(),
+            &opts,
+        )
         .await
         .unwrap();
     assert_eq!(o2.content.as_deref(), Some("hello"));
@@ -301,10 +341,7 @@ async fn stream_complete_delivers_tokens() {
 
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_raw(body, "text/event-stream"),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
 
@@ -421,5 +458,8 @@ async fn parallel_tool_calls_complete_in_one_round() {
     .unwrap();
 
     assert_eq!(out.content.as_deref(), Some("both done"));
-    assert_eq!(out.rounds, 2, "two rounds: one tool-call round + one final-text round");
+    assert_eq!(
+        out.rounds, 2,
+        "two rounds: one tool-call round + one final-text round"
+    );
 }

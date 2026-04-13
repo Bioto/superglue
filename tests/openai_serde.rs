@@ -10,9 +10,9 @@
 use serde_json::json;
 use superglue::openai::{
     AudioInputFormat, ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool,
-    ContentPart, FunctionCall, ImageDetail, ImageUrl, InputAudio, JsonSchemaFormat,
-    MessageContent, NamedToolChoice, NamedToolChoiceFunction, ResponseFormat, StopSequence,
-    StreamOptions, ToolCall, ToolChoice,
+    ContentPart, FunctionCall, ImageDetail, ImageUrl, InputAudio, JsonSchemaFormat, MessageContent,
+    NamedToolChoice, NamedToolChoiceFunction, ResponseFormat, StopSequence, StreamOptions,
+    ToolCall, ToolChoice,
 };
 
 // ---------------------------------------------------------------------------
@@ -231,11 +231,8 @@ fn response_format_json_schema() {
 
 #[test]
 fn request_minimal_omits_all_optional() {
-    let req = ChatCompletionRequest::new(
-        "gpt-4o".into(),
-        vec![ChatMessage::text("user", "hi")],
-        None,
-    );
+    let req =
+        ChatCompletionRequest::new("gpt-4o".into(), vec![ChatMessage::text("user", "hi")], None);
     let v = serde_json::to_value(&req).unwrap();
     // Required
     assert_eq!(v["model"], "gpt-4o");
@@ -271,11 +268,8 @@ fn request_minimal_omits_all_optional() {
 
 #[test]
 fn request_with_sampling_params_present() {
-    let mut req = ChatCompletionRequest::new(
-        "gpt-4o".into(),
-        vec![ChatMessage::text("user", "hi")],
-        None,
-    );
+    let mut req =
+        ChatCompletionRequest::new("gpt-4o".into(), vec![ChatMessage::text("user", "hi")], None);
     req.temperature = Some(0.7);
     req.top_p = Some(0.9);
     req.max_completion_tokens = Some(512);
@@ -350,8 +344,7 @@ fn response_deserializes_text_completion() {
             "total_tokens": 15
         }
     });
-    let resp: superglue::openai::ChatCompletionResponse =
-        serde_json::from_value(raw).unwrap();
+    let resp: superglue::openai::ChatCompletionResponse = serde_json::from_value(raw).unwrap();
     assert_eq!(resp.id, "chatcmpl-abc");
     assert_eq!(resp.model, "gpt-4o-mini");
     assert_eq!(resp.choices.len(), 1);
@@ -385,8 +378,7 @@ fn response_deserializes_tool_call() {
             "finish_reason": "tool_calls"
         }]
     });
-    let resp: superglue::openai::ChatCompletionResponse =
-        serde_json::from_value(raw).unwrap();
+    let resp: superglue::openai::ChatCompletionResponse = serde_json::from_value(raw).unwrap();
     let msg = &resp.choices[0].message;
     assert!(msg.content.is_none());
     let tcs = msg.tool_calls.as_ref().unwrap();
@@ -408,8 +400,7 @@ fn response_missing_usage_is_none() {
             "finish_reason": "stop"
         }]
     });
-    let resp: superglue::openai::ChatCompletionResponse =
-        serde_json::from_value(raw).unwrap();
+    let resp: superglue::openai::ChatCompletionResponse = serde_json::from_value(raw).unwrap();
     assert!(resp.usage.is_none());
 }
 
@@ -432,10 +423,7 @@ fn chunk_content_delta_deserializes() {
     });
     let chunk: ChatCompletionChunk = serde_json::from_value(raw).unwrap();
     assert_eq!(chunk.choices.len(), 1);
-    assert_eq!(
-        chunk.choices[0].delta.content.as_deref(),
-        Some("Hello")
-    );
+    assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("Hello"));
     assert!(chunk.choices[0].finish_reason.is_none());
 }
 
@@ -450,10 +438,7 @@ fn chunk_final_with_finish_reason_and_usage() {
         "usage": {"prompt_tokens": 8, "completion_tokens": 12, "total_tokens": 20}
     });
     let chunk: ChatCompletionChunk = serde_json::from_value(raw).unwrap();
-    assert_eq!(
-        chunk.choices[0].finish_reason.as_deref(),
-        Some("stop")
-    );
+    assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
     let u = chunk.usage.as_ref().unwrap();
     assert_eq!(u.total_tokens, 20);
 }
@@ -519,7 +504,10 @@ fn chat_tool_from_spec_with_description() {
     let v = serde_json::to_value(&tool).unwrap();
     assert_eq!(v["type"], "function");
     assert_eq!(v["function"]["name"], "get_time");
-    assert_eq!(v["function"]["description"], "Returns the current UTC time.");
+    assert_eq!(
+        v["function"]["description"],
+        "Returns the current UTC time."
+    );
     assert!(v["function"]["strict"].is_null() || v["function"].get("strict").is_none());
 }
 
