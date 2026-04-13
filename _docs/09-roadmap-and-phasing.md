@@ -35,19 +35,23 @@
 - ✅ `prost` + `protoc-bin-vendored` code generation via `build.rs`.
 - ✅ `stream_complete` — SSE streaming with usage in final chunk (`stream_options.include_usage`).
 
-## Phase 4: gRPC and additional bindings 🔲 next
+## Phase 4: gRPC and additional bindings ✅ partial
 
-- 🔲 `tonic` gRPC server exposing `complete` and `stream` as RPCs.
+- ✅ `tonic` gRPC server exposing `complete` (unary) and `stream` (server-streaming) as RPCs.
+- ✅ Audit trail — `HookEvent` + `RunRecord` proto types; `RunStore` + `RunRecorder`.
 - 🔲 Proto-generated client stubs for Python (replacing PyO3 for the gRPC deployment mode).
 - 🔲 Node.js binding via `napi-rs`.
 - 🔲 Workflow engine and hook dispatch with protobuf event streams.
+- 🔲 Replay / run-resume from recorded protobuf audit streams.
 
-## Phase 5: Hardening and ecosystem 🔲 future
+## Phase 5: Hardening and ecosystem ✅ partial
 
-- 🔲 Structured redaction and observability tiers (see [Observability](05-observability.md)).
-- 🔲 Security hardening (see [Security and threat model](06-security-and-threat-model.md)).
-- 🔲 Batch scheduling and parallel tool execution within a single turn.
-- 🔲 Per-tool error policies (retry vs. fail-fast).
+- ✅ Structured redaction and observability tiers — `ScrubMode` (Redact / Hash / Allow), OTLP export (`otlp` feature) (see [Observability](05-observability.md)).
+- ✅ Security hardening (Tier B) — `secrecy::Secret<String>` for API keys, `zeroize` on drop (see [Security and threat model](06-security-and-threat-model.md)).
+- ✅ Batch scheduling and parallel tool execution within a single turn (`join_all`).
+- ✅ Per-tool error policies (FailFast / Skip / Retry with exponential back-off).
+- ✅ Cooperative cancellation (`CancellationToken`) in batch and chat loops.
+- ✅ Throttled downloads (`governor` bandwidth limiter with progress callback).
 - 🔲 Migration guide from Python GlueLLM.
 
 ## Continuous cross-cutting work

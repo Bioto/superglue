@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: "sk-mock".into(),
+        api_key: secrecy::Secret::new("sk-mock".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()

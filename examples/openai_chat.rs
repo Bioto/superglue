@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let opts = ChatOptions {
         base_url,
-        api_key: key,
+        api_key: secrecy::Secret::new(key),
         model,
         max_tool_rounds: 8,
         system_prompt: Some(

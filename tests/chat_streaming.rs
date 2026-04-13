@@ -18,7 +18,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn opts(base_url: String) -> ChatOptions {
     ChatOptions {
         base_url,
-        api_key: "sk-test".into(),
+        api_key: secrecy::Secret::new("sk-test".to_string()),
         model: "mock".into(),
         ..Default::default()
     }
@@ -377,7 +377,7 @@ async fn stream_system_prompt_prepended() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: "sk-test".into(),
+        api_key: secrecy::Secret::new("sk-test".to_string()),
         model: "mock".into(),
         system_prompt: Some("Always respond in JSON.".into()),
         ..Default::default()

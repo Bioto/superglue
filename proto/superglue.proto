@@ -114,3 +114,61 @@ message CompletionOutcome {
   /// finish_reason from the last choice ("stop" | "length" | "tool_calls" | ...).
   optional string finish_reason = 4;
 }
+
+// ---------------------------------------------------------------------------
+// Audit / run recording
+// ---------------------------------------------------------------------------
+
+/// A single hook lifecycle event captured during a run, for replay and audit.
+message HookEvent {
+  /// Stage name (e.g. "pre_completion", "post_tool").
+  string stage = 1;
+  /// Stage-specific content payload (potentially redacted in stored records).
+  string content = 2;
+  /// Stage-specific key-value metadata (e.g. tool_name for tool stages).
+  map<string, string> metadata = 3;
+  /// Correlation ID linking this event to its parent run.
+  string request_id = 4;
+  /// Unix millisecond timestamp when the event was recorded.
+  int64 timestamp_ms = 5;
+}
+
+/// Full record of a single complete_with_tools call, suitable for audit and replay.
+message RunRecord {
+  string request_id = 1;
+  /// All messages sent and received during the run (in order).
+  repeated ChatMessage messages = 2;
+  /// Hook events fired during the run (in order).
+  repeated HookEvent hook_events = 3;
+  /// Final outcome.
+  CompletionOutcome outcome = 4;
+  /// Unix millisecond timestamp when the run started.
+  int64 started_at_ms = 5;
+  /// Unix millisecond timestamp when the run finished.
+  int64 finished_at_ms = 6;
+}
+
+// ---------------------------------------------------------------------------
+// gRPC streaming
+// ---------------------------------------------------------------------------
+
+/// A single content delta from a streaming completion.
+message StreamChunk {
+  /// Token delta content (may be empty for the final usage-only chunk).
+  string delta = 1;
+  /// Token usage — present only in the final chunk when include_usage is enabled.
+  optional Usage usage = 2;
+  /// Reason the stream ended — present only in the final chunk.
+  optional string finish_reason = 3;
+}
+
+// ---------------------------------------------------------------------------
+// gRPC service
+// ---------------------------------------------------------------------------
+
+service SuperglueService {
+  /// Non-streaming completion with optional tool loop.
+  rpc Complete (CompletionRequest) returns (CompletionOutcome);
+  /// Server-streaming completion; yields StreamChunk deltas then a final chunk.
+  rpc Stream (CompletionRequest) returns (stream StreamChunk);
+}

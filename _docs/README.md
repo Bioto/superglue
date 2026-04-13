@@ -29,14 +29,25 @@ These documents describe **intent, tradeoffs, and current implementation status*
 | Tool harness (offline scripted plans) | ✅ shipped |
 | OpenAI chat types (full spec) | ✅ shipped |
 | Chat completion tool loop (`complete_with_tools`) | ✅ shipped |
+| Parallel tool dispatch within a round | ✅ shipped |
 | Streaming completions (`stream_complete`, SSE) | ✅ shipped |
 | Protobuf schema (`prost`, `proto/superglue.proto`) | ✅ shipped |
 | Python binding (`superglue-py`, PyO3, CPython 3.14t) | ✅ shipped |
 | Python `Client.complete()` with tool callbacks | ✅ shipped |
 | Python `Client.stream()` with token callback | ✅ shipped (GIL-free 3.14t) |
-| gRPC server (`tonic`) | 🔲 planned (Phase 3+) |
+| Per-tool error policies (FailFast / Skip / Retry) | ✅ shipped |
+| Cooperative cancellation (`CancellationToken`) | ✅ shipped |
+| Throttled downloads (`governor` bandwidth limiter) | ✅ shipped |
+| API key zeroization (`secrecy` + `zeroize`) | ✅ shipped |
+| Observability — tracing scrub layer + metrics facade | ✅ shipped |
+| Observability — OTLP export (`otlp` feature) | ✅ shipped |
+| Observability — configurable scrub modes (Redact/Hash/Allow) | ✅ shipped |
+| Audit trail (`RunStore` + `RunRecorder`) | ✅ shipped |
+| gRPC server (`tonic`, `grpc` feature) | ✅ shipped |
 | Node.js binding (`napi-rs`) | 🔲 planned |
-| Workflow / hook engine | 🔲 planned |
+| Proto-generated language client stubs | 🔲 planned |
+| Replay / run-resume from audit trail | 🔲 planned |
+| Workflow engine | 🔲 planned |
 
 ## Related code
 

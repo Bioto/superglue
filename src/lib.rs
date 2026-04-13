@@ -1,4 +1,4 @@
-//! Superglue — polyglot LLM orchestration core (WIP).
+//! Superglue — polyglot LLM orchestration core.
 //!
 //! Phase 1: HTTP client with retries, rate limiting, and SSE framing. See [`http`].
 //! Phase 2: JSON [`tools`] registry, async [`Tool`] trait, and harness for scripted plans.
@@ -6,16 +6,26 @@
 //! Phase 3: Protobuf canonical schema at [`proto`] — the public API surface for all bindings.
 //! Phase 4: Streaming completions via [`chat::stream_complete`] (SSE / `stream: true`).
 //! Phase 5: Concurrent [`batch`] completions with configurable error strategies.
+//! Phase 6: [`agents`] with persona/goals/constraints; [`hooks`] and [`guardrails`] pipeline.
+//! Phase 7: [`telemetry`] (subscriber wiring, OTLP, metrics, scrubbing), [`cancel`],
+//!          [`http::download`] throttling, per-tool policies, [`audit`] run recording,
+//!          and optional [`grpc`] server.
 
 pub mod agents;
+pub mod audit;
 pub mod batch;
+pub mod cancel;
 pub mod chat;
 pub mod guardrails;
 pub mod hooks;
 pub mod http;
 pub mod openai;
 pub mod proto;
+pub mod telemetry;
 pub mod tools;
+
+#[cfg(feature = "grpc")]
+pub mod grpc;
 
 /// Returns a short version string for the crate.
 #[must_use]

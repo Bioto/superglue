@@ -21,7 +21,7 @@ SSE parsing is implemented in-house (`src/http/sse.rs`) rather than a crate depe
 | `prost` | ✅ | Protobuf runtime for generated types |
 | `prost-build` | ✅ | Build-time code generation from `.proto` files |
 | `protoc-bin-vendored` | ✅ | Bundles `protoc` so no system install is required |
-| `tonic` | 🔲 | gRPC on Tokio; pairs with `prost` messages |
+| `tonic` | ✅ (`grpc` feature) | gRPC on Tokio; pairs with `prost` messages |
 
 ## Async and control flow
 
@@ -29,22 +29,25 @@ SSE parsing is implemented in-house (`src/http/sse.rs`) rather than a crate depe
 |-------|--------|------|
 | `tokio` (rt-multi-thread, macros, sync, time, io-util) | ✅ | Runtime, timers, `mpsc` channels, `spawn_blocking` |
 | `async-trait` | ✅ | `async fn` in the `Tool` trait object |
-| `tokio-util` | 🔲 | `CancellationToken` for cooperative shutdown |
+| `tokio-util` | ✅ | `CancellationToken` for cooperative shutdown of batch and chat loops |
 
 ## Rate limiting
 
 | Crate | Status | Role |
 |-------|--------|------|
-| `governor` | ✅ | Token-bucket rate limiter; optional per-client QPS cap |
+| `governor` | ✅ | Token-bucket rate limiter; per-client QPS cap and throttled downloads |
 
 ## Observability
 
 | Crate | Status | Role |
 |-------|--------|------|
 | `tracing` | ✅ | Structured spans and events throughout the core |
-| `tracing-subscriber` | 🔲 | Subscriber wiring for production deployments |
-| `tracing-opentelemetry` | 🔲 | Bridge spans to OTLP exporters |
-| `metrics` | 🔲 | Metrics facade |
+| `tracing-subscriber` | ✅ | `fmt` layer with configurable scrub modes (Redact / Hash / Allow) |
+| `tracing-opentelemetry` | ✅ (`otlp` feature) | Bridge spans to OTLP exporters |
+| `opentelemetry_sdk` | ✅ (`otlp` feature) | SDK tracer provider + batch span processor |
+| `opentelemetry-otlp` | ✅ (`otlp` feature) | HTTP/protobuf OTLP span exporter |
+| `metrics` | ✅ | Metrics facade (counters + histograms for completions, tools, batches) |
+| `metrics-exporter-prometheus` | ✅ (`prometheus` feature) | Prometheus scrape endpoint |
 
 ## Error handling
 
@@ -57,8 +60,8 @@ SSE parsing is implemented in-house (`src/http/sse.rs`) rather than a crate depe
 | Crate | Status | Role |
 |-------|--------|------|
 | `rustls` | ✅ | TLS (via `reqwest`'s `rustls-tls` feature; no OpenSSL) |
-| `zeroize` / `secrecy` | 🔲 | Sensitive memory handling for API keys |
-| `ring` | 🔲 | Cryptographic primitives for integrity checks |
+| `zeroize` / `secrecy` | ✅ | `ChatOptions::api_key` stored as `Secret<String>`; zeroized on drop |
+| `ring` | 🔲 | Cryptographic primitives for integrity checks (not yet required) |
 
 ## Language bindings
 

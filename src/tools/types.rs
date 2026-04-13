@@ -33,3 +33,39 @@ impl From<proto::ToolSpec> for ToolSpec {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Per-tool error policy
+// ---------------------------------------------------------------------------
+
+/// What the chat loop should do when a tool's handler returns an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnToolError {
+    /// Propagate the error immediately, aborting the run. (default)
+    FailFast,
+    /// Append the error as the tool result and let the model continue.
+    Skip,
+    /// Retry the tool call up to `max` times with exponential backoff before
+    /// falling back to [`FailFast`](OnToolError::FailFast).
+    Retry {
+        /// Maximum number of retries (does not count the original attempt).
+        max: u32,
+        /// Base delay in milliseconds for the first retry. Doubles each attempt.
+        initial_delay_ms: u64,
+    },
+}
+
+impl Default for OnToolError {
+    fn default() -> Self {
+        OnToolError::FailFast
+    }
+}
+
+/// Per-tool error policy attached to a registered tool.
+///
+/// Obtain the default (fail-fast) policy with [`ToolRetryPolicy::default()`].
+#[derive(Debug, Clone, Default)]
+pub struct ToolRetryPolicy {
+    /// How the chat loop handles [`ToolInvokeError::HandlerFailed`] for this tool.
+    pub on_error: OnToolError,
+}

@@ -1,29 +1,34 @@
 //! Chat completions: non-streaming tool-loop and streaming (SSE) variants.
 
+use std::time::Instant;
+
 use futures_util::StreamExt;
+use secrecy::ExposeSecret;
 use serde_json::Value;
 use thiserror::Error;
+use tokio::time::{Duration, sleep};
 
 use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookContext, HookError, HookRegistry, HookStage};
 use crate::http::{Error as HttpError, HttpClient, join_base_url, sse::SseParser};
 use crate::openai::{
     ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, MessageContent,
-    ResponseFormat, StopSequence, ToolChoice,
+    ResponseFormat, StopSequence, ToolCall, ToolChoice,
 };
 use crate::proto;
-use crate::tools::ToolInvokeError;
-use crate::tools::ToolRegistry;
+use crate::tools::{OnToolError, ToolInvokeError, ToolRegistry, ToolRetryPolicy};
+use crate::cancel::CancellationToken;
 
 /// Provider and model settings for [`complete_with_tools`].
 ///
 /// All fields beyond `base_url`, `api_key`, `model`, and `max_tool_rounds` are forwarded
 /// directly to the OpenAI `POST /v1/chat/completions` body when set.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ChatOptions {
     /// e.g. `https://api.openai.com` (no trailing slash required).
     pub base_url: String,
-    pub api_key: String,
+    /// API key. Stored as [`secrecy::Secret`] — never appears in `Debug` output or logs.
+    pub api_key: secrecy::Secret<String>,
     pub model: String,
     /// Maximum **HTTP completion** calls (each can include tool follow-up rounds).
     pub max_tool_rounds: u32,
@@ -70,6 +75,41 @@ pub struct ChatOptions {
     /// Caller-supplied request identifier used for tracing and correlation.
     /// Auto-generated as a UUID v4 if `None` when the request is executed.
     pub request_id: Option<String>,
+
+    // --- Cooperative cancellation ---
+    /// When set, all HTTP calls in this request check the token and return
+    /// [`ChatError::Cancelled`] immediately if it has been cancelled.
+    pub cancel: Option<CancellationToken>,
+}
+
+impl Default for ChatOptions {
+    fn default() -> Self {
+        ChatOptions {
+            base_url: String::new(),
+            api_key: secrecy::Secret::new(String::new()),
+            model: String::new(),
+            max_tool_rounds: 0,
+            system_prompt: None,
+            temperature: None,
+            top_p: None,
+            n: None,
+            max_completion_tokens: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            stop: None,
+            response_format: None,
+            tool_choice: None,
+            parallel_tool_calls: None,
+            logprobs: None,
+            top_logprobs: None,
+            seed: None,
+            store: None,
+            service_tier: None,
+            reasoning_effort: None,
+            request_id: None,
+            cancel: None,
+        }
+    }
 }
 
 impl ChatOptions {
@@ -80,7 +120,7 @@ impl ChatOptions {
     ) -> Self {
         ChatOptions {
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            api_key: secrecy::Secret::new(api_key.into()),
             model: model.into(),
             max_tool_rounds: 16,
             ..Default::default()
@@ -96,7 +136,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             } else {
                 p.base_url
             },
-            api_key: p.api_key,
+            api_key: secrecy::Secret::new(p.api_key),
             model: if p.model.is_empty() {
                 "gpt-4o-mini".to_string()
             } else {
@@ -125,6 +165,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             service_tier: p.service_tier,
             reasoning_effort: p.reasoning_effort,
             request_id: None,
+            cancel: None,
         }
     }
 }
@@ -160,7 +201,150 @@ pub enum ChatError {
     NoChoice,
     #[error("exceeded max tool rounds ({0})")]
     MaxToolRounds(u32),
+    #[error("request cancelled")]
+    Cancelled,
 }
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/// Perform one HTTP JSON POST, honouring an optional cancellation token.
+async fn post_json_cancellable(
+    http: &HttpClient,
+    url: &str,
+    body: &Value,
+    headers: &[(&str, &str)],
+    cancel: Option<&CancellationToken>,
+) -> Result<Value, ChatError> {
+    if let Some(token) = cancel {
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(ChatError::Cancelled),
+            result = http.post_json_with_headers(url, body, headers) => Ok(result?),
+        }
+    } else {
+        Ok(http.post_json_with_headers(url, body, headers).await?)
+    }
+}
+
+/// Invoke a tool, retrying on [`ToolInvokeError::HandlerFailed`] according to `policy`.
+///
+/// Returns either:
+/// - `Ok(value)` — tool succeeded (possibly after retries).
+/// - `Err(ToolInvokeError)` — policy dictates fail-fast (after all retries exhausted).
+/// - `Ok(Value::String("<error text>"))` — policy is [`OnToolError::Skip`].
+async fn invoke_with_policy(
+    registry: &ToolRegistry,
+    name: &str,
+    arguments: Value,
+    policy: &ToolRetryPolicy,
+) -> Result<Value, ToolInvokeError> {
+    let result = registry.invoke(name, arguments.clone()).await;
+
+    match result {
+        Ok(v) => {
+            metrics::counter!(crate::telemetry::metrics::TOOL_CALLS_TOTAL, "tool_name" => name.to_string()).increment(1);
+            Ok(v)
+        }
+        Err(ToolInvokeError::HandlerFailed { ref message, .. }) => {
+            metrics::counter!(crate::telemetry::metrics::TOOL_CALLS_ERRORS, "tool_name" => name.to_string(), "error_kind" => "handler_failed").increment(1);
+            match &policy.on_error {
+                OnToolError::FailFast => Err(result.unwrap_err()),
+                OnToolError::Skip => {
+                    tracing::warn!(tool = name, error = %message, "tool failed (skip policy)");
+                    Ok(Value::String(format!("Tool error (skipped): {message}")))
+                }
+                OnToolError::Retry { max, initial_delay_ms } => {
+                    let mut delay = *initial_delay_ms;
+                    for attempt in 1..=*max {
+                        tracing::warn!(
+                            tool = name,
+                            attempt,
+                            max,
+                            delay_ms = delay,
+                            "tool failed, retrying"
+                        );
+                        sleep(Duration::from_millis(delay)).await;
+                        delay = delay.saturating_mul(2);
+
+                        match registry.invoke(name, arguments.clone()).await {
+                            Ok(v) => {
+                                metrics::counter!(crate::telemetry::metrics::TOOL_CALLS_TOTAL, "tool_name" => name.to_string()).increment(1);
+                                return Ok(v);
+                            }
+                            Err(ToolInvokeError::HandlerFailed { .. }) if attempt < *max => {
+                                continue;
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    Err(result.unwrap_err())
+                }
+            }
+        }
+        Err(other) => {
+            metrics::counter!(crate::telemetry::metrics::TOOL_CALLS_ERRORS, "tool_name" => name.to_string(), "error_kind" => "other").increment(1);
+            Err(other)
+        }
+    }
+}
+
+/// Dispatch a single `"function"` tool call through the full pre/post hook pipeline.
+///
+/// Returns the [`ChatMessage`] with `role="tool"` that should be appended to the
+/// conversation history. Called concurrently for all tool calls in a single round
+/// via [`futures_util::future::join_all`].
+async fn dispatch_one(
+    tc: &ToolCall,
+    hooks: &HookRegistry,
+    registry: &ToolRegistry,
+) -> Result<ChatMessage, ChatError> {
+    // --- PreTool hook (mutating) ---
+    let pre_ctx = hooks
+        .run(
+            HookStage::PreTool,
+            HookContext::with_meta(
+                HookStage::PreTool,
+                tc.function.arguments.trim(),
+                "tool_name",
+                tc.function.name.as_str(),
+            ),
+        )
+        .await?;
+    let args: Value = serde_json::from_str(pre_ctx.content.trim())?;
+
+    // Consult per-tool error policy.
+    let policy = registry.policy_for(&tc.function.name).await;
+    let result = invoke_with_policy(registry, &tc.function.name, args, &policy).await?;
+    let result_json = serde_json::to_string(&result)?;
+
+    // --- PostTool hook (mutating) ---
+    let post_ctx = hooks
+        .run(
+            HookStage::PostTool,
+            HookContext::with_meta(
+                HookStage::PostTool,
+                &result_json,
+                "tool_name",
+                tc.function.name.as_str(),
+            ),
+        )
+        .await?;
+
+    Ok(ChatMessage {
+        role: "tool".to_string(),
+        content: Some(MessageContent::Text(post_ctx.content)),
+        tool_calls: None,
+        tool_call_id: Some(tc.id.clone()),
+        name: Some(tc.function.name.clone()),
+        refusal: None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// complete_with_tools
+// ---------------------------------------------------------------------------
 
 /// Run OpenAI-style chat completions with tools: calls `POST /v1/chat/completions` until the model
 /// returns an assistant message without tool calls or [`ChatOptions::max_tool_rounds`] is exceeded.
@@ -176,6 +360,7 @@ pub async fn complete_with_tools(
     caller_messages: Vec<ChatMessage>,
     options: &ChatOptions,
 ) -> Result<CompletionOutcome, ChatError> {
+    let start = Instant::now();
     let request_id = options
         .request_id
         .clone()
@@ -185,9 +370,11 @@ pub async fn complete_with_tools(
         model = %options.model,
         "complete_with_tools started"
     );
+    metrics::counter!(crate::telemetry::metrics::COMPLETIONS_TOTAL, "model" => options.model.clone()).increment(1);
 
     let url = join_base_url(&options.base_url, "/v1/chat/completions");
-    let auth = format!("Bearer {}", options.api_key);
+    // Expose the secret only to build the header — the string is dropped at end of this scope.
+    let auth = format!("Bearer {}", options.api_key.expose_secret());
     let headers = [("Authorization", auth.as_str())];
 
     // Prepend system prompt if configured.
@@ -210,7 +397,6 @@ pub async fn complete_with_tools(
         let (outcome, guard_name) = guardrails.run_input(&last_user).await;
         match outcome {
             GuardrailOutcome::Allow(transformed) => {
-                // If the guardrail transformed the content, update the last user message.
                 if transformed != last_user {
                     if let Some(msg) = messages.iter_mut().rev().find(|m| m.role == "user") {
                         msg.content = Some(MessageContent::Text(transformed));
@@ -229,8 +415,9 @@ pub async fn complete_with_tools(
 
     let mut api_calls: u32 = 0;
 
-    loop {
+    let outcome = loop {
         if api_calls >= options.max_tool_rounds {
+            metrics::counter!(crate::telemetry::metrics::COMPLETIONS_ERRORS, "model" => options.model.clone(), "error_kind" => "max_tool_rounds").increment(1);
             return Err(ChatError::MaxToolRounds(options.max_tool_rounds));
         }
         api_calls += 1;
@@ -255,7 +442,6 @@ pub async fn complete_with_tools(
         };
 
         let mut req = ChatCompletionRequest::new(options.model.clone(), messages.clone(), tools);
-
         req.temperature = options.temperature;
         req.top_p = options.top_p;
         req.n = options.n;
@@ -274,7 +460,7 @@ pub async fn complete_with_tools(
         req.reasoning_effort = options.reasoning_effort.clone();
 
         let body = serde_json::to_value(&req)?;
-        let val = http.post_json_with_headers(&url, &body, &headers).await?;
+        let val = post_json_cancellable(http, &url, &body, &headers, options.cancel.as_ref()).await?;
         let response: crate::openai::ChatCompletionResponse = serde_json::from_value(val)?;
 
         let choice = response.choices.first().ok_or(ChatError::NoChoice)?;
@@ -297,50 +483,15 @@ pub async fn complete_with_tools(
             && !tcs.is_empty()
         {
             messages.push(msg.clone());
-            for tc in tcs {
-                if tc.kind != "function" {
-                    continue;
-                }
 
-                // --- PreTool hook (mutating) ---
-                let pre_ctx = hooks
-                    .run(
-                        HookStage::PreTool,
-                        HookContext::with_meta(
-                            HookStage::PreTool,
-                            tc.function.arguments.trim(),
-                            "tool_name",
-                            tc.function.name.as_str(),
-                        ),
-                    )
-                    .await?;
-                let args: Value = serde_json::from_str(pre_ctx.content.trim())?;
-
-                let result = registry.invoke(&tc.function.name, args).await?;
-                let result_json = serde_json::to_string(&result)?;
-
-                // --- PostTool hook (mutating) ---
-                let post_ctx = hooks
-                    .run(
-                        HookStage::PostTool,
-                        HookContext::with_meta(
-                            HookStage::PostTool,
-                            &result_json,
-                            "tool_name",
-                            tc.function.name.as_str(),
-                        ),
-                    )
-                    .await?;
-                let final_result = post_ctx.content;
-
-                messages.push(ChatMessage {
-                    role: "tool".to_string(),
-                    content: Some(MessageContent::Text(final_result)),
-                    tool_calls: None,
-                    tool_call_id: Some(tc.id.clone()),
-                    name: Some(tc.function.name.clone()),
-                    refusal: None,
-                });
+            // Dispatch all "function" tool calls concurrently (preserving order).
+            let function_tcs: Vec<_> = tcs.iter().filter(|tc| tc.kind == "function").collect();
+            let results = futures_util::future::join_all(
+                function_tcs.iter().map(|tc| dispatch_one(tc, hooks, registry)),
+            )
+            .await;
+            for r in results {
+                messages.push(r?); // first Err propagates, respects FailFast / Retry / Skip
             }
             continue;
         }
@@ -359,39 +510,41 @@ pub async fn complete_with_tools(
 
         // --- Output guardrails: retry loop ---
         if guardrails.output_is_empty().await {
-            return Ok(CompletionOutcome {
+            break CompletionOutcome {
                 content,
                 rounds: api_calls,
                 usage,
                 finish_reason,
                 request_id: request_id.clone(),
-            });
+            };
         }
 
         let text = content.clone().unwrap_or_default();
+        let saved_content = content;
+        let saved_finish = finish_reason;
         let max_retries = guardrails.max_output_retries;
 
+        let mut final_outcome = None;
         for attempt in 0..=max_retries {
             let (outcome, guard_name) = guardrails.run_output(&text).await;
             match outcome {
                 GuardrailOutcome::Allow(transformed) => {
                     let final_content = if transformed == text {
-                        content
+                        saved_content.clone()
                     } else {
                         Some(transformed)
                     };
-                    return Ok(CompletionOutcome {
+                    final_outcome = Some(CompletionOutcome {
                         content: final_content,
                         rounds: api_calls,
                         usage,
-                        finish_reason,
+                        finish_reason: saved_finish.clone(),
                         request_id: request_id.clone(),
                     });
+                    break;
                 }
                 GuardrailOutcome::Block(reason) => {
                     if attempt < max_retries {
-                        // Append the rejected assistant reply + a "please revise" user message,
-                        // then loop back to call the LLM again (no tools this time).
                         messages.push(msg.clone());
                         messages.push(ChatMessage::text(
                             "user",
@@ -400,8 +553,8 @@ pub async fn complete_with_tools(
                                  Please revise it."
                             ),
                         ));
-                        // Reset api_calls guard counter for the retry loop.
                         if api_calls >= options.max_tool_rounds {
+                            metrics::counter!(crate::telemetry::metrics::COMPLETIONS_ERRORS, "model" => options.model.clone(), "error_kind" => "guardrail").increment(1);
                             return Err(ChatError::Guardrail(GuardrailError::new(
                                 GuardrailStage::Output,
                                 guard_name,
@@ -409,47 +562,36 @@ pub async fn complete_with_tools(
                             )));
                         }
                         api_calls += 1;
-                        // Re-invoke the LLM (no tools — just text revision).
                         let retry_req = ChatCompletionRequest::new(
                             options.model.clone(),
                             messages.clone(),
                             None,
                         );
                         let body = serde_json::to_value(&retry_req)?;
-                        let val = http.post_json_with_headers(&url, &body, &headers).await?;
+                        let val = post_json_cancellable(http, &url, &body, &headers, options.cancel.as_ref()).await?;
                         let resp: crate::openai::ChatCompletionResponse =
                             serde_json::from_value(val)?;
-                        let choice = resp.choices.first().ok_or(ChatError::NoChoice)?;
-                        let retry_text = choice
+                        let retry_choice = resp.choices.first().ok_or(ChatError::NoChoice)?;
+                        let retry_text = retry_choice
                             .message
                             .content
                             .as_ref()
                             .and_then(|c| c.as_text().map(str::to_string))
                             .unwrap_or_default();
-                        // Loop: next attempt will check the new text.
-                        // We need to update `text` — use a labelled approach by breaking to
-                        // restart the guardrail loop with new text.
-                        // Use a simple recursive-style approach: just continue the outer loop.
                         let (out2, gn2) = guardrails.run_output(&retry_text).await;
                         match out2 {
                             GuardrailOutcome::Allow(t) => {
-                                return Ok(CompletionOutcome {
+                                final_outcome = Some(CompletionOutcome {
                                     content: Some(t),
                                     rounds: api_calls,
                                     usage,
-                                    finish_reason,
+                                    finish_reason: saved_finish.clone(),
                                     request_id: request_id.clone(),
                                 });
+                                break;
                             }
                             GuardrailOutcome::Block(r2) => {
-                                if attempt + 1 >= max_retries {
-                                    return Err(ChatError::Guardrail(GuardrailError::new(
-                                        GuardrailStage::Output,
-                                        gn2,
-                                        r2,
-                                    )));
-                                }
-                                // Continue outer for loop — but we've already advanced; break here.
+                                metrics::counter!(crate::telemetry::metrics::COMPLETIONS_ERRORS, "model" => options.model.clone(), "error_kind" => "guardrail").increment(1);
                                 return Err(ChatError::Guardrail(GuardrailError::new(
                                     GuardrailStage::Output,
                                     gn2,
@@ -458,6 +600,7 @@ pub async fn complete_with_tools(
                             }
                         }
                     } else {
+                        metrics::counter!(crate::telemetry::metrics::COMPLETIONS_ERRORS, "model" => options.model.clone(), "error_kind" => "guardrail").increment(1);
                         return Err(ChatError::Guardrail(GuardrailError::new(
                             GuardrailStage::Output,
                             guard_name,
@@ -468,15 +611,26 @@ pub async fn complete_with_tools(
             }
         }
 
-        // Should be unreachable — the loop above always returns.
-        return Ok(CompletionOutcome {
-            content,
+        break final_outcome.unwrap_or(CompletionOutcome {
+            content: saved_content,
             rounds: api_calls,
             usage,
-            finish_reason,
+            finish_reason: saved_finish,
             request_id: request_id.clone(),
         });
-    }
+    };
+
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    metrics::histogram!(crate::telemetry::metrics::COMPLETION_DURATION_MS, "model" => options.model.clone()).record(elapsed_ms);
+    tracing::info!(
+        request_id = %outcome.request_id,
+        model = %options.model,
+        rounds = outcome.rounds,
+        elapsed_ms,
+        "complete_with_tools finished"
+    );
+
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +667,7 @@ pub async fn stream_complete<F>(
 where
     F: FnMut(String) + Send,
 {
+    let start = Instant::now();
     let request_id = options
         .request_id
         .clone()
@@ -524,7 +679,7 @@ where
     );
 
     let url = join_base_url(&options.base_url, "/v1/chat/completions");
-    let auth = format!("Bearer {}", options.api_key);
+    let auth = format!("Bearer {}", options.api_key.expose_secret());
     let headers = [("Authorization", auth.as_str())];
 
     // Prepend system prompt if configured.
@@ -575,6 +730,13 @@ where
         .run(HookStage::PreCompletion, HookContext::new(HookStage::PreCompletion, last_user))
         .await?;
 
+    // Check cancellation before initiating the stream.
+    if let Some(token) = &options.cancel {
+        if token.is_cancelled() {
+            return Err(ChatError::Cancelled);
+        }
+    }
+
     let mut req = ChatCompletionRequest::new(options.model.clone(), full_messages, None);
     req.stream = Some(true);
     req.stream_options = Some(crate::openai::StreamOptions {
@@ -615,6 +777,13 @@ where
     let mut event_count = 0usize;
 
     while let Some(chunk) = byte_stream.next().await {
+        // Check cancellation between chunks.
+        if let Some(token) = &options.cancel {
+            if token.is_cancelled() {
+                return Err(ChatError::Cancelled);
+            }
+        }
+
         let bytes = chunk?;
         byte_count += bytes.len();
         let text = String::from_utf8_lossy(&bytes);
@@ -682,6 +851,9 @@ where
             }
         }
     }
+
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    metrics::histogram!(crate::telemetry::metrics::STREAM_DURATION_MS, "model" => options.model.clone()).record(elapsed_ms);
 
     Ok(outcome)
 }

@@ -8,16 +8,24 @@ license = "MIT"
 [features]
 # Enables `examples/chat_wiremock.rs` (local mock OpenAI); not needed for the library itself.
 example-wiremock = ["dep:wiremock"]
+# Enables the tonic gRPC server in `src/grpc/`.
+grpc = ["dep:tonic", "dep:tokio-stream"]
+# Enables the Prometheus metrics exporter.
+prometheus = ["dep:metrics-exporter-prometheus"]
+# Enables the OTLP span exporter via tracing-opentelemetry.
+otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 
 [build-dependencies]
 prost-build = "0.13"
 protoc-bin-vendored = "3"
+# tonic-build is always available so build.rs can conditionally invoke it for the grpc feature.
+tonic-build = "0.13"
 
 [dependencies]
 async-trait = "0.1"
 prost = "0.13"
 bytes = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 governor = "0.8"
 reqwest = { version = "0.12", default-features = false, features = [
@@ -29,10 +37,22 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = "0.7"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-opentelemetry = { version = "0.29", optional = true }
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", optional = true }
+secrecy = { version = "0.8", features = ["alloc"] }
+zeroize = "1"
+tonic = { version = "0.13", optional = true }
+tokio-stream = { version = "0.1", optional = true }
 uuid = { version = "1", features = ["v4"] }
 wiremock = { version = "0.6", optional = true }
 regex = "1.12.3"
+opentelemetry = { version = "0.28", optional = true }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.28", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
 
 [[example]]
 name = "chat_wiremock"

@@ -41,6 +41,7 @@ use tokio::task::JoinSet;
 
 use std::time::Duration;
 
+use crate::cancel::CancellationToken;
 use crate::chat::{ChatOptions, complete_with_tools};
 use crate::guardrails::GuardrailRegistry;
 use crate::hooks::{HookContext, HookRegistry, HookStage};
@@ -131,6 +132,9 @@ pub struct BatchConfig {
     /// Per-request connect timeout. Overrides the `HttpClient`'s configured
     /// connect timeout when set.
     pub connect_timeout: Option<Duration>,
+    /// Optional cancellation token. When cancelled, all in-flight and pending
+    /// batch items are aborted and [`BatchError::Cancelled`] is returned.
+    pub cancel: Option<CancellationToken>,
 }
 
 impl Default for BatchConfig {
@@ -140,6 +144,7 @@ impl Default for BatchConfig {
             error_strategy: ErrorStrategy::Continue,
             timeout: None,
             connect_timeout: None,
+            cancel: None,
         }
     }
 }
@@ -197,6 +202,8 @@ pub enum BatchError {
     FailFast { id: String, message: String },
     /// The concurrency infrastructure failed (should never happen in practice).
     Internal(String),
+    /// The batch was cancelled via the [`BatchConfig::cancel`] token.
+    Cancelled,
 }
 
 impl std::fmt::Display for BatchError {
@@ -206,6 +213,7 @@ impl std::fmt::Display for BatchError {
                 write!(f, "batch aborted on request '{id}': {message}")
             }
             BatchError::Internal(msg) => write!(f, "batch internal error: {msg}"),
+            BatchError::Cancelled => write!(f, "batch cancelled"),
         }
     }
 }
@@ -279,9 +287,12 @@ pub async fn batch_complete(
         Arc::clone(&http)
     };
 
+    metrics::histogram!(crate::telemetry::metrics::BATCH_SIZE).record(total_requests as f64);
+
     let sem = Arc::new(Semaphore::new(config.max_concurrent));
     let base_options = Arc::new(options.clone());
     let error_strategy = config.error_strategy.clone();
+    let cancel_token = config.cancel.clone();
 
     // Spawn one task per request.
     let mut join_set: JoinSet<TaskOutcome> = JoinSet::new();
@@ -305,6 +316,10 @@ pub async fn batch_complete(
 
         // Wire the batch item's id as the request_id for correlation.
         opts.request_id = Some(id.clone());
+        // Propagate the batch-level cancellation token into each per-item options.
+        if let Some(ref token) = cancel_token {
+            opts.cancel = Some(token.child_token());
+        }
 
         join_set.spawn(async move {
             let _permit = sem.acquire_owned().await.expect("semaphore closed");
@@ -389,7 +404,22 @@ pub async fn batch_complete(
     // Collect results as tasks complete, in whatever order they finish.
     let mut indexed: Vec<(usize, BatchResult)> = Vec::with_capacity(total_requests);
 
-    while let Some(joined) = join_set.join_next().await {
+    loop {
+        let next = if let Some(ref token) = cancel_token {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    join_set.abort_all();
+                    return Err(BatchError::Cancelled);
+                }
+                joined = join_set.join_next() => joined,
+            }
+        } else {
+            join_set.join_next().await
+        };
+
+        let Some(joined) = next else { break };
+
         let TaskOutcome { idx, result } =
             joined.map_err(|e| BatchError::Internal(e.to_string()))?;
 
@@ -420,12 +450,15 @@ pub async fn batch_complete(
     // Aggregate token usage.
     let total_usage = aggregate_usage(all_results.iter().filter_map(|r| r.usage.as_ref()));
 
+    let elapsed_secs = batch_start.elapsed().as_secs_f64();
+    metrics::histogram!(crate::telemetry::metrics::BATCH_DURATION_MS).record(elapsed_secs * 1000.0);
+
     Ok(BatchResponse {
         results: all_results,
         total_requests,
         successful,
         failed,
-        elapsed_secs: batch_start.elapsed().as_secs_f64(),
+        elapsed_secs,
         total_usage,
     })
 }

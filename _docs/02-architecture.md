@@ -13,19 +13,29 @@ superglue/                      — Rust library crate
 │   │   ├── client.rs           — HttpClient: GET, POST JSON, streaming POST (SSE)
 │   │   ├── retry.rs            — RetryPolicy (GET: all retryable; POST: transport + 429/5xx)
 │   │   ├── rate_limit.rs       — governor token-bucket rate limiter
+│   │   ├── download.rs         — throttled file download (governor bandwidth limiter)
 │   │   ├── sse.rs              — SseParser: incremental SSE framing
 │   │   ├── url.rs              — join_base_url helper
 │   │   └── error.rs            — unified HTTP error taxonomy
 │   ├── openai/
 │   │   └── mod.rs              — Full OpenAI chat completion types (request + response + streaming)
 │   ├── chat/
-│   │   └── mod.rs              — complete_with_tools, stream_complete, ChatOptions, CompletionOutcome
+│   │   └── mod.rs              — complete_with_tools (parallel tool dispatch), stream_complete, ChatOptions, CompletionOutcome
 │   ├── tools/
-│   │   ├── registry.rs         — ToolRegistry: register + dispatch by name
-│   │   ├── types.rs            — ToolSpec, ToolInvocation; From<proto::ToolSpec>
+│   │   ├── registry.rs         — ToolRegistry: register + dispatch; ToolRetryPolicy store
+│   │   ├── types.rs            — ToolSpec, ToolInvocation, OnToolError, ToolRetryPolicy
 │   │   ├── harness.rs          — offline scripted tool execution plans
 │   │   └── error.rs            — ToolInvokeError
-│   ├── proto.rs                — includes prost-generated types from proto/superglue.proto
+│   ├── telemetry/
+│   │   ├── mod.rs              — init_tracing, TelemetryConfig, OTLP wiring (otlp feature)
+│   │   ├── scrub.rs            — ScrubFields, ScrubMode (Redact/Hash/Allow)
+│   │   └── metrics.rs          — metric name constants, init_metrics (prometheus feature)
+│   ├── audit/
+│   │   └── mod.rs              — RunStore (in-memory), RunRecorder (HookHandler)
+│   ├── grpc/
+│   │   └── mod.rs              — tonic gRPC service (grpc feature): Complete + Stream RPCs
+│   ├── cancel.rs               — re-export of tokio_util::sync::CancellationToken
+│   ├── proto.rs                — includes prost/tonic-generated types from proto/superglue.proto
 │   └── lib.rs                  — public re-exports + version()
 
 superglue-py/                   — Python extension crate (PyO3, maturin)
@@ -42,13 +52,21 @@ superglue-py/                   — Python extension crate (PyO3, maturin)
 | `http::HttpClient` | `reqwest` wrapper; GET with full retries, POST JSON with POST-safe retries, streaming POST returning a byte stream |
 | `http::RetryPolicy` | Configurable max retries and exponential backoff; GET retries all retryable statuses; POST retries only transport errors + 429/502/503/504 |
 | `http::rate_limit` | Per-second quota via `governor`; optional, applied before every request |
+| `http::download_throttled` | Bandwidth-limited file download using a `governor` token bucket; optional progress callback |
 | `http::SseParser` | Incremental buffer-based SSE parser; handles split chunks, comments, multi-line data |
 | `openai` | Full `ChatCompletionRequest` (all OpenAI params), `ChatCompletionResponse`, `ChatMessage` with multipart content, `ChatCompletionChunk` for streaming, `Usage`, `ToolCall`, `ToolChoice`, `ResponseFormat`, `StopSequence`, etc. |
-| `chat::complete_with_tools` | Multi-turn tool loop: sends POST, checks for tool calls, dispatches to `ToolRegistry`, appends results, repeats until text response or `max_tool_rounds` |
+| `chat::complete_with_tools` | Multi-turn tool loop: sends POST, dispatches all tool calls in a round **concurrently** (`join_all`), applies per-tool error policies, checks cancellation token, appends results, repeats until text response or `max_tool_rounds` |
 | `chat::stream_complete` | Single-turn streaming: POST with `stream:true`, parses SSE chunks, calls `on_delta(token)` for each content delta, returns `StreamOutcome` |
-| `tools::ToolRegistry` | Async `Arc<dyn Tool>` store; concurrent-safe registration and dispatch by name |
+| `tools::ToolRegistry` | Async `Arc<dyn Tool>` store; concurrent-safe registration, dispatch by name, per-tool `ToolRetryPolicy` |
+| `tools::OnToolError` / `ToolRetryPolicy` | Per-tool error handling: `FailFast` (default), `Skip` (append error as tool message), `Retry` (exponential back-off) |
 | `tools::harness` | Deterministic offline test harness: execute a scripted plan of tool invocations without a live model |
-| `proto` | `prost`-generated types from `proto/superglue.proto`; covers `ChatOptions`, `ChatMessage`, `Usage`, `ToolSpec`, `CompletionOutcome` |
+| `cancel::CancellationToken` | Re-export of `tokio_util::sync::CancellationToken`; wired into `ChatOptions` and `BatchConfig` |
+| `telemetry::init_tracing` | Installs `tracing_subscriber::fmt` layer with configurable `ScrubMode`; optionally adds OTLP layer (`otlp` feature) |
+| `telemetry::ScrubMode` | `Redact` (default), `Hash` (correlation-safe), `Allow` (dev only) |
+| `telemetry::metrics` | `metrics` facade counters and histograms for completions, tool calls, batches, HTTP retries |
+| `audit::RunStore` / `RunRecorder` | In-memory bounded store for `proto::RunRecord`; `HookHandler` that captures pipeline events |
+| `grpc` (`grpc` feature) | `tonic`-based gRPC server exposing `Complete` (unary) and `Stream` (server-streaming) RPCs |
+| `proto` | `prost`/`tonic`-generated types from `proto/superglue.proto`; covers `ChatOptions`, `ChatMessage`, `Usage`, `ToolSpec`, `CompletionOutcome`, `HookEvent`, `RunRecord`, `StreamChunk` |
 
 ### Language bindings — Python (`superglue-py`)
 
@@ -98,7 +116,7 @@ flowchart LR
 | Mode | Status | Notes |
 |------|--------|-------|
 | **In-process FFI (PyO3)** | ✅ shipped | `superglue-py`; targets CPython 3.14t free-threaded |
-| **gRPC / tonic** | 🔲 planned | Would enable polyglot bindings without FFI per language |
+| **gRPC / tonic** | ✅ shipped | `--features grpc`; `Complete` + `Stream` RPCs; `serve` CLI subcommand |
 | **napi-rs (Node.js)** | 🔲 planned | Same Rust core, different binding layer |
 
 ## Token delivery in streaming

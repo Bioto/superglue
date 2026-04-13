@@ -10,4 +10,4 @@ pub mod types;
 pub use error::ToolInvokeError;
 pub use harness::{PlanStep, RunEvent, run_plan};
 pub use registry::{Tool, ToolRegistry};
-pub use types::{ToolInvocation, ToolSpec};
+pub use types::{OnToolError, ToolInvocation, ToolRetryPolicy, ToolSpec};

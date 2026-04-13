@@ -2,7 +2,7 @@
 
 ## Current status
 
-**Protobuf schema is implemented**. gRPC services are planned but not yet built.
+**Protobuf schema is implemented**. **gRPC server is implemented** (feature-gated by `--features grpc`). Workflow engine and replay are planned.
 
 ## Why protobuf internally
 
@@ -88,24 +88,31 @@ The generated `proto::` types serve two roles:
 1. **Data representation**: `CompletionOutcome` carries `usage: Option<proto::Usage>` through the chat pipeline and out to language bindings.
 2. **Configuration bridge**: `From<proto::ChatOptions> for ChatOptions` allows configuration to be deserialized from protobuf and handed to the Rust chat functions — the path a gRPC server would use.
 
-## gRPC — planned
+## gRPC — implemented (`grpc` feature)
 
-`tonic` is not yet wired. The intended deployment when it lands:
+The `tonic`-based gRPC server lives in `src/grpc/mod.rs` and is compiled with `--features grpc`. The deployment topology:
 
 ```
 Host language  →  gRPC client (generated)  →  tonic server  →  Rust core
 ```
 
-This allows any language with a gRPC library to use the core without a native FFI binding. Streaming RPCs map naturally to LLM streaming and event delivery.
+Two RPCs are exposed:
 
-`tonic` pairs with Tower middleware which shares conceptual models with the existing HTTP retry/rate-limit stack.
+| RPC | Type | Delegates to |
+|-----|------|-------------|
+| `Complete` | Unary | `chat::complete_with_tools` |
+| `Stream` | Server-streaming | `chat::stream_complete` |
+
+Start the server with `superglue serve --addr 0.0.0.0:50051 --api-key $KEY`.
+
+`tonic` pairs with Tower middleware which shares conceptual models with the existing HTTP retry/rate-limit stack. Proto-generated client stubs for host languages are planned.
 
 ## Deployment modes
 
 | Mode | Status | Notes |
 |------|--------|-------|
-| **In-process FFI (PyO3)** | ✅ shipped | `superglue-py` |
-| **gRPC / tonic sidecar** | 🔲 planned | Enables polyglot without per-language FFI |
+| **In-process FFI (PyO3)** | ✅ shipped | `superglue-py`; targets CPython 3.14t free-threaded |
+| **gRPC / tonic sidecar** | ✅ shipped | `--features grpc`; exposes `Complete` + `Stream` RPCs |
 | **Embedded library** | ✅ shipped | `superglue` crate consumed directly by Rust callers |
 
 ## Workflows and hooks — planned

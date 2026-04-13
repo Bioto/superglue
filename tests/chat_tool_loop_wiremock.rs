@@ -83,7 +83,7 @@ async fn completion_text_only_no_tools() {
     let reg = ToolRegistry::new();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: "sk-test".into(),
+        api_key: secrecy::Secret::new("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()
@@ -120,7 +120,7 @@ async fn completion_tool_then_assistant_text() {
     reg.register(std::sync::Arc::new(EchoTool)).await.unwrap();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: "sk-test".into(),
+        api_key: secrecy::Secret::new("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()
@@ -147,7 +147,7 @@ async fn max_tool_rounds_returns_error() {
     reg.register(std::sync::Arc::new(EchoTool)).await.unwrap();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: "sk-test".into(),
+        api_key: secrecy::Secret::new("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 2,
         ..Default::default()
@@ -172,7 +172,7 @@ async fn system_prompt_is_prepended() {
     let reg = ToolRegistry::new();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: "sk-test".into(),
+        api_key: secrecy::Secret::new("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         system_prompt: Some("You are helpful.".into()),
@@ -261,7 +261,7 @@ async fn stream_complete_delivers_tokens() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let options = superglue::chat::ChatOptions {
         base_url: server.uri(),
-        api_key: "test".into(),
+        api_key: secrecy::Secret::new("test".to_string()),
         model: "mock".into(),
         ..Default::default()
     };
@@ -283,4 +283,93 @@ async fn stream_complete_delivers_tokens() {
     assert_eq!(outcome.content, "Hello, world!");
     assert_eq!(outcome.finish_reason.as_deref(), Some("stop"));
     assert!(outcome.usage.is_some());
+}
+
+// ---------------------------------------------------------------------------
+// Parallel tool dispatch
+// ---------------------------------------------------------------------------
+
+/// Two tool calls returned in a single LLM response — both execute concurrently
+/// (driven by join_all) and appear as two tool-role messages in the next request.
+/// The whole exchange completes in exactly 2 completion rounds.
+#[tokio::test]
+async fn parallel_tool_calls_complete_in_one_round() {
+    let server = MockServer::start().await;
+
+    // First response: two tool calls simultaneously.
+    let two_tool_calls = serde_json::json!({
+        "id": "chatcmpl-parallel",
+        "model": "mock",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                    {
+                        "id": "call_a",
+                        "type": "function",
+                        "function": { "name": "echo", "arguments": "{\"v\":1}" }
+                    },
+                    {
+                        "id": "call_b",
+                        "type": "function",
+                        "function": { "name": "echo", "arguments": "{\"v\":2}" }
+                    }
+                ]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    });
+
+    // Second response: final text after both tool results.
+    let final_text = serde_json::json!({
+        "id": "chatcmpl-final",
+        "model": "mock",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "both done" },
+            "finish_reason": "stop"
+        }]
+    });
+
+    // First registered = higher priority: fires once (two-tool round).
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(two_tool_calls))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    // Fallback: final text response.
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(final_text))
+        .mount(&server)
+        .await;
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    let reg = ToolRegistry::new();
+    reg.register(Arc::new(EchoTool)).await.unwrap();
+
+    let opts = ChatOptions {
+        base_url: server.uri(),
+        api_key: secrecy::Secret::new("sk-test".to_string()),
+        model: "mock".into(),
+        max_tool_rounds: 8,
+        ..Default::default()
+    };
+
+    let out = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        vec![ChatMessage::text("user", "go")],
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.content.as_deref(), Some("both done"));
+    assert_eq!(out.rounds, 2, "two rounds: one tool-call round + one final-text round");
 }
