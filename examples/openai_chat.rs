@@ -6,7 +6,7 @@
 //! export OPENAI_API_KEY=sk-...
 //! # optional:
 //! export OPENAI_BASE_URL=https://api.openai.com
-//! export OPENAI_MODEL=gpt-4o-mini
+//! export OPENAI_MODEL=gpt-5.4-nano-2026-03-17-mini
 //! cargo run --example openai_chat
 //! ```
 //!
@@ -64,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let base_url =
         std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string());
-    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+    let model = std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-5.4-nano-2026-03-17-mini".to_string());
 
     let http = HttpClient::new(ClientConfig::default())?;
     let registry = ToolRegistry::new();

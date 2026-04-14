@@ -72,7 +72,7 @@ enum Command {
         base_url: String,
 
         /// Default model name.
-        #[arg(long, default_value = "gpt-4o-mini")]
+        #[arg(long, default_value = "gpt-5.4-nano-2026-03-17-mini")]
         model: String,
     },
 }

@@ -19,7 +19,7 @@
 //!
 //!     let http = HttpClient::new(ClientConfig::default()).unwrap();
 //!     let tools = ToolRegistry::new();
-//!     let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-4o-mini");
+//!     let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-5.4-nano-2026-03-17-mini");
 //!
 //!     let engine = AgentEngine::new(spec);
 //!     let outcome = engine.run(&http, &tools, "What is Rust's ownership model?", &options).await.unwrap();
@@ -65,7 +65,7 @@ pub struct AgentSpec {
     pub goals: Vec<String>,
     /// Hard rules the agent must not violate.
     pub constraints: Vec<String>,
-    /// LLM model to use (e.g. `"gpt-4o-mini"`).
+    /// LLM model to use (e.g. `"gpt-5.4-nano-2026-03-17-mini"`).
     /// Overrides the model in [`ChatOptions`] when non-empty.
     pub model: String,
     /// Maximum number of LLM + tool-call rounds per `run()`. Default 16.
@@ -328,10 +328,10 @@ mod tests {
     #[test]
     fn builder_setters_are_chainable() {
         let spec = AgentSpec::new("bot", "a coder")
-            .with_model("gpt-4o")
+            .with_model("gpt-5.4-nano-2026-03-17")
             .with_max_tool_rounds(8)
             .with_constraint("Write idiomatic Rust");
-        assert_eq!(spec.model, "gpt-4o");
+        assert_eq!(spec.model, "gpt-5.4-nano-2026-03-17");
         assert_eq!(spec.max_tool_rounds, 8);
         assert_eq!(spec.constraints.len(), 1);
     }

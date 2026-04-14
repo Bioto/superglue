@@ -243,9 +243,9 @@ mod tests {
     #[test]
     fn scrub_mode_non_sensitive_always_passes_through() {
         for mode in [ScrubMode::Redact, ScrubMode::Hash, ScrubMode::Allow] {
-            let rendered = scrub_value("model", &"gpt-4o", mode);
+            let rendered = scrub_value("model", &"gpt-5.4-nano-2026-03-17", mode);
             assert!(
-                rendered.contains("gpt-4o"),
+                rendered.contains("gpt-5.4-nano-2026-03-17"),
                 "non-sensitive field should pass through in {mode:?}: {rendered}"
             );
         }
