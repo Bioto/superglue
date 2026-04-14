@@ -337,6 +337,10 @@ async fn invoke_with_policy(
 /// Returns the [`ChatMessage`] with `role="tool"` that should be appended to the
 /// conversation history. Called concurrently for all tool calls in a single round
 /// via [`futures_util::future::join_all`].
+#[instrument(
+    skip(tc, hooks, registry),
+    fields(tool.name = %tc.function.name, tool.id = %tc.id)
+)]
 async fn dispatch_one(
     tc: &ToolCall,
     hooks: &HookRegistry,
@@ -468,6 +472,11 @@ pub async fn complete_with_tools(
             return Err(ChatError::MaxToolRounds(options.max_tool_rounds));
         }
         api_calls += 1;
+        tracing::info!(
+            round = api_calls,
+            request_id = %request_id,
+            "llm_completion_round"
+        );
 
         // --- PreCompletion hook (observation only) ---
         let last_user = messages
@@ -537,6 +546,11 @@ pub async fn complete_with_tools(
 
             // Dispatch all "function" tool calls concurrently (preserving order).
             let function_tcs: Vec<_> = tcs.iter().filter(|tc| tc.kind == "function").collect();
+            tracing::info!(
+                count = function_tcs.len(),
+                request_id = %request_id,
+                "tool_calls_batch"
+            );
             let results = futures_util::future::join_all(
                 function_tcs
                     .iter()

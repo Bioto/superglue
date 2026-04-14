@@ -7,6 +7,7 @@ use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 #[cfg(test)]
 use reqwest::StatusCode;
+use reqwest::header::HeaderMap;
 use reqwest::{Client, RequestBuilder};
 use serde_json::Value;
 use tokio::time::sleep;
@@ -135,7 +136,7 @@ impl HttpClient {
                 Ok(b) => return Ok(b),
                 Err(e) => {
                     if e.is_retryable() && attempt < self.config.retry.max_retries {
-                        let delay = self.config.retry.delay_ms_for_attempt(attempt);
+                        let delay = retry_delay_ms(&self.config.retry, attempt, &e);
                         warn!(attempt, delay_ms = delay, error = %e, "retrying HTTP GET");
                         sleep(Duration::from_millis(delay)).await;
                         attempt += 1;
@@ -165,11 +166,12 @@ impl HttpClient {
     async fn send_buffered(req: RequestBuilder) -> Result<Bytes, Error> {
         let resp = req.send().await?;
         let status = resp.status();
+        let retry_after = parse_retry_after(resp.headers());
         if status.is_success() {
             Ok(resp.bytes().await?)
         } else {
             let body = resp.bytes().await.unwrap_or_default();
-            Err(Error::unsuccessful(status, &body))
+            Err(Error::unsuccessful(status, &body, retry_after))
         }
     }
 
@@ -186,9 +188,10 @@ impl HttpClient {
         self.acquire_limiter().await;
         let resp = self.inner.get(url).send().await?;
         let status = resp.status();
+        let retry_after = parse_retry_after(resp.headers());
         if !status.is_success() {
             let body = resp.bytes().await.unwrap_or_default();
-            return Err(Error::unsuccessful(status, &body));
+            return Err(Error::unsuccessful(status, &body, retry_after));
         }
         Ok(resp.bytes_stream().map(|r| r.map_err(Error::from)))
     }
@@ -221,7 +224,7 @@ impl HttpClient {
                 Ok(v) => return Ok(v),
                 Err(e) => {
                     if e.is_retryable_post() && attempt < self.config.retry.max_retries {
-                        let delay = self.config.retry.delay_ms_for_attempt(attempt);
+                        let delay = retry_delay_ms(&self.config.retry, attempt, &e);
                         warn!(attempt, delay_ms = delay, error = %e, "retrying HTTP POST JSON");
                         sleep(Duration::from_millis(delay)).await;
                         attempt += 1;
@@ -261,6 +264,7 @@ impl HttpClient {
         }
         let resp = req.send().await?;
         let status = resp.status();
+        let retry_after = parse_retry_after(resp.headers());
         if !status.is_success() {
             let body_bytes = resp.bytes().await.unwrap_or_default();
             warn!(
@@ -269,7 +273,7 @@ impl HttpClient {
                 body_len = body_bytes.len(),
                 "POST stream request failed (non-success status)"
             );
-            return Err(Error::unsuccessful(status, &body_bytes));
+            return Err(Error::unsuccessful(status, &body_bytes, retry_after));
         }
         Ok(resp.bytes_stream().map(|r| r.map_err(Error::from)))
     }
@@ -277,12 +281,31 @@ impl HttpClient {
     async fn send_json_body(req: RequestBuilder) -> Result<Value, Error> {
         let resp = req.send().await?;
         let status = resp.status();
+        let retry_after = parse_retry_after(resp.headers());
         let bytes = resp.bytes().await?;
         if !status.is_success() {
-            return Err(Error::unsuccessful(status, &bytes));
+            return Err(Error::unsuccessful(status, &bytes, retry_after));
         }
         serde_json::from_slice(&bytes).map_err(|e| Error::InvalidJson(e.to_string()))
     }
+}
+
+/// Parse `Retry-After` as a delay in seconds (common for 429). Caps at 10 minutes. HTTP-date form is ignored.
+fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .or_else(|| headers.get("retry-after"))?;
+    let s = raw.to_str().ok()?.trim();
+    let secs = s.parse::<u64>().ok()?;
+    Some(Duration::from_secs(secs.min(600)))
+}
+
+fn retry_delay_ms(policy: &RetryPolicy, attempt: u32, err: &Error) -> u64 {
+    let base = policy.delay_ms_for_attempt(attempt);
+    let from_server = err.retry_after_hint().map(|d| d.as_millis().min(600_000) as u64);
+    let mut ms = from_server.unwrap_or(base).max(base);
+    ms = ms.saturating_add(((attempt as u64).wrapping_mul(31)) % 50);
+    ms
 }
 
 #[cfg(test)]
@@ -295,6 +318,7 @@ mod tests {
             status: StatusCode::SERVICE_UNAVAILABLE,
             preview: String::new(),
             len: 0,
+            retry_after: None,
         };
         assert!(e.is_retryable());
     }

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use reqwest::StatusCode;
 use thiserror::Error;
 
@@ -12,6 +14,8 @@ pub enum Error {
         status: StatusCode,
         preview: String,
         len: usize,
+        /// From the `Retry-After` header when parseable as a delay in seconds (HTTP-date not parsed).
+        retry_after: Option<Duration>,
     },
 
     #[error("retry budget exhausted after {attempts} attempts (last status: {last:?})")]
@@ -56,7 +60,11 @@ impl Error {
         }
     }
 
-    pub(crate) fn unsuccessful(status: StatusCode, body_sample: &[u8]) -> Self {
+    pub(crate) fn unsuccessful(
+        status: StatusCode,
+        body_sample: &[u8],
+        retry_after: Option<Duration>,
+    ) -> Self {
         const MAX: usize = 512;
         let len = body_sample.len();
         let preview = String::from_utf8_lossy(&body_sample[..len.min(MAX)]).into_owned();
@@ -64,6 +72,20 @@ impl Error {
             status,
             preview,
             len,
+            retry_after,
+        }
+    }
+
+    /// When the server returned `429` with `Retry-After: N` (seconds), prefer this wait duration.
+    #[must_use]
+    pub fn retry_after_hint(&self) -> Option<Duration> {
+        match self {
+            Self::Unsuccessful {
+                status,
+                retry_after,
+                ..
+            } if *status == StatusCode::TOO_MANY_REQUESTS => *retry_after,
+            _ => None,
         }
     }
 }

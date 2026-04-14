@@ -30,6 +30,8 @@
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 
+use tracing::instrument;
+
 use crate::chat::{
     ChatError, ChatOptions, CompletionOutcome, StreamOutcome, complete_with_tools, stream_complete,
 };
@@ -220,6 +222,14 @@ impl AgentEngine {
     /// other fields (api_key, base_url, temperature, …) are taken from
     /// `base_options` as-is. The agent's `model` overrides `base_options.model`
     /// when set.
+    #[instrument(
+        skip(self, http, registry, base_options, user_message),
+        fields(
+            agent.name = %self.spec.name,
+            agent.model = %self.spec.model,
+            agent.max_tool_rounds = self.spec.max_tool_rounds
+        )
+    )]
     pub async fn run(
         &self,
         http: &HttpClient,
@@ -244,6 +254,13 @@ impl AgentEngine {
     /// Run a streaming completion (no tool loop).
     ///
     /// Each content token is delivered to `on_delta` as it arrives.
+    #[instrument(
+        skip(self, http, base_options, on_delta, user_message),
+        fields(
+            agent.name = %self.spec.name,
+            agent.model = %self.spec.model
+        )
+    )]
     pub async fn stream<F>(
         &self,
         http: &HttpClient,
