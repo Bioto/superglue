@@ -137,7 +137,7 @@ impl HttpClient {
                 Err(e) => {
                     if e.is_retryable() && attempt < self.config.retry.max_retries {
                         let delay = retry_delay_ms(&self.config.retry, attempt, &e);
-                        warn!(attempt, delay_ms = delay, error = %e, "retrying HTTP GET");
+                        warn_http_retry("GET", url, attempt, delay, &e);
                         sleep(Duration::from_millis(delay)).await;
                         attempt += 1;
                         continue;
@@ -225,7 +225,7 @@ impl HttpClient {
                 Err(e) => {
                     if e.is_retryable_post() && attempt < self.config.retry.max_retries {
                         let delay = retry_delay_ms(&self.config.retry, attempt, &e);
-                        warn!(attempt, delay_ms = delay, error = %e, "retrying HTTP POST JSON");
+                        warn_http_retry("POST_JSON", url, attempt, delay, &e);
                         sleep(Duration::from_millis(delay)).await;
                         attempt += 1;
                         continue;
@@ -298,6 +298,55 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     let s = raw.to_str().ok()?.trim();
     let secs = s.parse::<u64>().ok()?;
     Some(Duration::from_secs(secs.min(600)))
+}
+
+/// Extra detail for transport / status errors so logs are not just "error sending request".
+fn warn_http_retry(kind: &'static str, url: &str, attempt: u32, delay_ms: u64, err: &Error) {
+    match err {
+        Error::Reqwest(re) => {
+            warn!(
+                kind,
+                url = %url,
+                attempt,
+                delay_ms,
+                error = %err,
+                reqwest_timeout = re.is_timeout(),
+                reqwest_connect = re.is_connect(),
+                reqwest_decode = re.is_decode(),
+                http_status = ?re.status(),
+                "retrying HTTP request"
+            );
+        }
+        Error::Unsuccessful {
+            status,
+            preview,
+            len,
+            ..
+        } => {
+            let preview_short: String = preview.chars().take(160).collect();
+            warn!(
+                kind,
+                url = %url,
+                attempt,
+                delay_ms,
+                error = %err,
+                http_status = %status,
+                response_len = *len,
+                response_preview = %preview_short,
+                "retrying HTTP request"
+            );
+        }
+        _ => {
+            warn!(
+                kind,
+                url = %url,
+                attempt,
+                delay_ms,
+                error = %err,
+                "retrying HTTP request"
+            );
+        }
+    }
 }
 
 fn retry_delay_ms(policy: &RetryPolicy, attempt: u32, err: &Error) -> u64 {
