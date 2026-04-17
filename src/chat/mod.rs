@@ -60,6 +60,8 @@ pub struct ChatOptions {
 
     // --- Tool control ---
     pub tool_choice: Option<ToolChoice>,
+    /// Forwarded to the chat Completions API when set. Omitting (`None`) leaves provider defaults.
+    /// **Local** tool execution uses concurrent dispatch regardless — see the `join_all` path in [`complete_with_tools`].
     pub parallel_tool_calls: Option<bool>,
 
     // --- Logprobs ---
@@ -544,7 +546,7 @@ pub async fn complete_with_tools(
         {
             messages.push(msg.clone());
 
-            // Dispatch all "function" tool calls concurrently (preserving order).
+            // Run tool handlers concurrently on this process (order of `tool` messages follows `tool_calls`).
             let function_tcs: Vec<_> = tcs.iter().filter(|tc| tc.kind == "function").collect();
             tracing::info!(
                 count = function_tcs.len(),
