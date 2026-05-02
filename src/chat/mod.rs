@@ -145,7 +145,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             },
             api_key: secrecy::Secret::new(p.api_key),
             model: if p.model.is_empty() {
-                "gpt-5.4-nano-2026-03-17-mini".to_string()
+                "gpt-5.4-nano-2026-03-17".to_string()
             } else {
                 p.model
             },

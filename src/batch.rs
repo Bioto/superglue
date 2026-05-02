@@ -17,7 +17,7 @@
 //!     let registry = Arc::new(ToolRegistry::new());
 //!     let hooks = Arc::new(HookRegistry::new());
 //!     let guardrails = Arc::new(GuardrailRegistry::new());
-//!     let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-5.4-nano-2026-03-17-mini");
+//!     let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-5.4-nano-2026-03-17");
 //!
 //!     let requests = vec![
 //!         BatchRequest::new("What is the capital of France?"),

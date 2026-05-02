@@ -19,7 +19,7 @@
 //!
 //!     let http = HttpClient::new(ClientConfig::default()).unwrap();
 //!     let tools = ToolRegistry::new();
-//!     let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-5.4-nano-2026-03-17-mini");
+//!     let options = ChatOptions::new("https://api.openai.com", "sk-...", "gpt-5.4-nano-2026-03-17");
 //!
 //!     let engine = AgentEngine::new(spec);
 //!     let outcome = engine.run(&http, &tools, "What is Rust's ownership model?", &options).await.unwrap();
@@ -65,7 +65,7 @@ pub struct AgentSpec {
     pub goals: Vec<String>,
     /// Hard rules the agent must not violate.
     pub constraints: Vec<String>,
-    /// LLM model to use (e.g. `"gpt-5.4-nano-2026-03-17-mini"`).
+    /// LLM model to use (e.g. `"gpt-5.4-nano-2026-03-17"`).
     /// Overrides the model in [`ChatOptions`] when non-empty.
     pub model: String,
     /// Maximum number of LLM + tool-call rounds per `run()`. Default 16.

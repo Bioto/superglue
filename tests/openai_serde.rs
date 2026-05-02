@@ -307,7 +307,7 @@ fn request_with_tools_present() {
 #[test]
 fn request_stream_true_serialises() {
     let mut req = ChatCompletionRequest::new(
-        "gpt-5.4-nano-2026-03-17-mini".into(),
+        "gpt-5.4-nano-2026-03-17".into(),
         vec![ChatMessage::text("user", "hi")],
         None,
     );
@@ -332,7 +332,7 @@ fn response_deserializes_text_completion() {
         "id": "chatcmpl-abc",
         "object": "chat.completion",
         "created": 1700000000u64,
-        "model": "gpt-5.4-nano-2026-03-17-mini",
+        "model": "gpt-5.4-nano-2026-03-17",
         "choices": [{
             "index": 0,
             "message": {"role": "assistant", "content": "Hello!"},
@@ -346,7 +346,7 @@ fn response_deserializes_text_completion() {
     });
     let resp: superglue::openai::ChatCompletionResponse = serde_json::from_value(raw).unwrap();
     assert_eq!(resp.id, "chatcmpl-abc");
-    assert_eq!(resp.model, "gpt-5.4-nano-2026-03-17-mini");
+    assert_eq!(resp.model, "gpt-5.4-nano-2026-03-17");
     assert_eq!(resp.choices.len(), 1);
     let choice = &resp.choices[0];
     assert_eq!(choice.finish_reason.as_deref(), Some("stop"));
@@ -414,7 +414,7 @@ fn chunk_content_delta_deserializes() {
         "id": "chatcmpl-stream",
         "object": "chat.completion.chunk",
         "created": 1700000000u64,
-        "model": "gpt-5.4-nano-2026-03-17-mini",
+        "model": "gpt-5.4-nano-2026-03-17",
         "choices": [{
             "index": 0,
             "delta": {"role": "assistant", "content": "Hello"},
@@ -433,7 +433,7 @@ fn chunk_final_with_finish_reason_and_usage() {
         "id": "chatcmpl-stream",
         "object": "chat.completion.chunk",
         "created": 1700000000u64,
-        "model": "gpt-5.4-nano-2026-03-17-mini",
+        "model": "gpt-5.4-nano-2026-03-17",
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 8, "completion_tokens": 12, "total_tokens": 20}
     });
@@ -449,7 +449,7 @@ fn chunk_tool_call_delta_deserializes() {
         "id": "chatcmpl-stream",
         "object": "chat.completion.chunk",
         "created": 1700000000u64,
-        "model": "gpt-5.4-nano-2026-03-17-mini",
+        "model": "gpt-5.4-nano-2026-03-17",
         "choices": [{
             "index": 0,
             "delta": {
@@ -479,7 +479,7 @@ fn chunk_empty_delta_deserializes() {
         "id": "chatcmpl-stream",
         "object": "chat.completion.chunk",
         "created": 1700000000u64,
-        "model": "gpt-5.4-nano-2026-03-17-mini",
+        "model": "gpt-5.4-nano-2026-03-17",
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
     });
     let chunk: ChatCompletionChunk = serde_json::from_value(raw).unwrap();
