@@ -1,0 +1,48 @@
+---
+description: superglue — polyglot LLM orchestration core (Rust owns logic)
+alwaysApply: true
+---
+
+# superglue
+
+Rust orchestration core at `projects/superglue/`. **All orchestration logic lives here** — bindings are thin FFI wrappers.
+
+## Design docs (read in order)
+
+Start at [`_docs/README.md`](_docs/README.md):
+
+1. Vision → Architecture → Tool boundary & async
+2. Protobuf/gRPC → Observability → Security
+3. Roadmap → Ecosystem reference
+
+## Binding parity
+
+API or tool-boundary changes require updates in:
+
+- [`superglue-py`](../superglue-py)
+- [`superglue-js`](../superglue-js)
+- [`superglue-kt`](../superglue-kt)
+
+## Tool boundary
+
+- JSON payloads across FFI — no opaque Python objects in the Rust core loop.
+- JS: explicit JSON Schema per tool. Python: introspection at binding layer only.
+
+## Feature flags (`Cargo.toml`)
+
+| Feature | Purpose |
+|---------|---------|
+| `grpc` | gRPC server/client |
+| `otlp` | OpenTelemetry export |
+| `prometheus` | Metrics endpoint |
+
+Gate optional deps behind features; keep default build lean.
+
+## Testing
+
+- Heavy Wiremock suite in `tests/`.
+- Tool harness for offline scripted plans — prefer over live API in CI.
+
+## Consumers
+
+`loom`, `charlotte`, `loom-coms`, and all language bindings.
