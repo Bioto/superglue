@@ -1,0 +1,26 @@
+[package]
+name = "superglue_js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Node.js bindings for superglue (napi-rs)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+async-trait = "0.1"
+napi = { version = "3", default-features = false, features = [
+    "napi9",
+    "async",
+    "serde-json",
+    "tokio_rt",
+] }
+napi-derive = "3"
+secrecy = "0.8"
+serde_json = "1"
+superglue = { path = "..", features = ["mcp"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
+
+[build-dependencies]
+napi-build = "2"
