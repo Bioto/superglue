@@ -165,6 +165,7 @@ impl RunRecorder {
             outcome: Some(outcome),
             started_at_ms,
             finished_at_ms,
+            process_events: Vec::new(),
         };
         self.store.insert(record).await;
     }

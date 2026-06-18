@@ -15,14 +15,24 @@ pub mod agents;
 pub mod audit;
 pub mod batch;
 pub mod cancel;
+pub mod client;
 pub mod chat;
+pub mod costing;
+pub mod events;
+pub mod fallback;
 pub mod guardrails;
 pub mod hooks;
 pub mod http;
 pub mod openai;
 pub mod proto;
+pub mod responses;
 pub mod telemetry;
 pub mod tools;
+
+#[cfg(feature = "mcp")]
+pub mod mcp;
+
+pub use client::{CallOptions, Client, ClientBuilder, ClientBuildError, ClientConversation};
 
 #[cfg(feature = "grpc")]
 pub mod grpc;

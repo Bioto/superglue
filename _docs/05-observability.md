@@ -7,6 +7,8 @@ Provide **one implementation** of instrumentation inside the Rust core so that l
 ## Decided direction
 
 - **Tracing**: use the `tracing` ecosystem with async-aware spans around LLM requests, stream chunks, tool calls, retries, and workflow transitions.
+- **Process events**: optional [`StatusEmitter`](../src/events/mod.rs) fan-out emits typed `ProcessEvent` records (`llm_call_start`, `llm_call_end`, `llm_call_error`, `tool_call_*`) with token usage and estimated USD cost. Opt-in via `ChatOptions.status_emitter` or Python `Client(status_emitter=...)`.
+- **Hooks vs events**: hooks may mutate pipeline content; status events are observation-only.
 - **Export**: support OpenTelemetry via `tracing-opentelemetry` (or equivalent) so spans can reach OTLP collectors. Exact feature flags and configuration are implementation details.
 - **Metrics**: use a metrics facade (for example the `metrics` crate family) for counters and histograms such as request duration, queue depth, and retry counts.
 

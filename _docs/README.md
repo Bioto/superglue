@@ -43,6 +43,7 @@ These documents describe **intent, tradeoffs, and current implementation status*
 | Observability — OTLP export (`otlp` feature) | ✅ shipped |
 | Observability — configurable scrub modes (Redact/Hash/Allow) | ✅ shipped |
 | Audit trail (`RunStore` + `RunRecorder`) | ✅ shipped |
+| Process events (`StatusEmitter` + cost estimation) | ✅ shipped |
 | gRPC server (`tonic`, `grpc` feature) | ✅ shipped |
 | Node.js binding (`napi-rs`) | 🔲 planned |
 | Proto-generated language client stubs | 🔲 planned |

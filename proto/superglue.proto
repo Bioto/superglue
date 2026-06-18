@@ -83,7 +83,7 @@ message ChatOptions {
   // Service
   optional string service_tier = 17;
 
-  // Reasoning models (o1/o3/o4): "low" | "medium" | "high"
+  // Reasoning models: "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
   optional string reasoning_effort = 18;
 
   /// JSON-encoded overrides for any field not covered above (merged into the request body).
@@ -146,6 +146,29 @@ message RunRecord {
   int64 started_at_ms = 5;
   /// Unix millisecond timestamp when the run finished.
   int64 finished_at_ms = 6;
+  /// Typed process events (llm_call_*, tool_call_*) emitted during the run.
+  repeated ProcessEvent process_events = 7;
+}
+
+enum ProcessEventKind {
+  LLM_CALL_START = 0;
+  LLM_CALL_END = 1;
+  LLM_CALL_ERROR = 2;
+  TOOL_CALL_START = 3;
+  TOOL_CALL_END = 4;
+}
+
+message ProcessEvent {
+  ProcessEventKind kind = 1;
+  string request_id = 2;
+  uint32 round = 3;
+  string model = 4;
+  uint32 tool_call_count = 5;
+  optional Usage usage = 6;
+  optional double estimated_cost_usd = 7;
+  optional string error_type = 8;
+  int64 timestamp_ms = 9;
+  map<string, string> metadata = 10;
 }
 
 // ---------------------------------------------------------------------------

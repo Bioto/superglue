@@ -21,6 +21,8 @@ superglue/                      — Rust library crate
 │   │   └── mod.rs              — Full OpenAI chat completion types (request + response + streaming)
 │   ├── chat/
 │   │   └── mod.rs              — complete_with_tools (parallel tool dispatch), stream_complete, ChatOptions, CompletionOutcome
+│   ├── client/
+│   │   └── mod.rs              — Client + ClientBuilder: high-level API (complete, stream, batch, tools, hooks, agents)
 │   ├── tools/
 │   │   ├── registry.rs         — ToolRegistry: register + dispatch; ToolRetryPolicy store
 │   │   ├── types.rs            — ToolSpec, ToolInvocation, OnToolError, ToolRetryPolicy
@@ -67,6 +69,7 @@ superglue-py/                   — Python extension crate (PyO3, maturin)
 | `audit::RunStore` / `RunRecorder` | In-memory bounded store for `proto::RunRecord`; `HookHandler` that captures pipeline events |
 | `grpc` (`grpc` feature) | `tonic`-based gRPC server exposing `Complete` (unary) and `Stream` (server-streaming) RPCs |
 | `proto` | `prost`/`tonic`-generated types from `proto/superglue.proto`; covers `ChatOptions`, `ChatMessage`, `Usage`, `ToolSpec`, `CompletionOutcome`, `HookEvent`, `RunRecord`, `StreamChunk` |
+| `client::Client` | Bundles `HttpClient`, `ChatOptions`, `ToolRegistry`, `HookRegistry`, `GuardrailRegistry`; `complete`, `stream`, `batch`, `run_agent`, guardrail helpers |
 
 ### Language bindings — Python (`superglue-py`)
 
@@ -79,6 +82,17 @@ superglue-py/                   — Python extension crate (PyO3, maturin)
 | GIL handling | `#[cfg(Py_GIL_DISABLED)]` for CPython 3.14t (no GIL); `PyEval_SaveThread/RestoreThread` for classic GIL Python |
 | `CompletionOutcome` | `.content`, `.rounds`, `.usage` |
 | `StreamOutcome` | `.content`, `.finish_reason`, `.usage` |
+
+### Native Rust (`superglue`)
+
+| Feature | Implementation |
+|---------|---------------|
+| `Client::builder()` / `Client::from_env()` | Same bundled state as `PyClient` / napi `Client` |
+| `client.complete(message)` | Delegates to `chat::complete_with_tools` |
+| `client.stream(message, on_delta)` | Delegates to `chat::stream_complete` |
+| `client.batch(requests, config)` | Delegates to `batch::batch_complete` |
+| `client.run_agent(spec, message)` | Delegates to `agents::AgentEngine` |
+| Examples | Numbered `01`–`24` + `demo` in `examples/` using `Client` |
 
 ## High-level diagram
 
@@ -127,3 +141,10 @@ Token delivery from the Rust async loop to a Python callback requires care becau
 2. In the Python binding, `on_delta` sends to a `tokio::sync::mpsc::unbounded_channel`.
 3. A `spawn_blocking` consumer reads from the channel and calls `Python::attach` safely on a dedicated OS thread.
 4. `block_on` waits for both the stream and the consumer to finish before returning to Python.
+
+## Responses API, model fallback, and MCP
+
+- **Chat Completions** (`/v1/chat/completions`): default path via `Client::complete` / `stream` and `chat::complete_with_tools`.
+- **Responses API** (`/v1/responses`): `Client::complete_response` and `Client::stream_response`; tool rounds thread state with `previous_response_id` instead of replaying full message history (`responses` module).
+- **Model fallback**: `ModelFallbackChain` on `ChatOptions` / `ClientBuilder::model_fallback_chain`; after HTTP retries on one model, eligible errors advance to the next model in the chain (`fallback` module).
+- **MCP tools** (`--features mcp`): `Client::connect_mcp_stdio` / `connect_mcp_http` register remote MCP tools into the same `ToolRegistry` as local tools (`mcp` module, `rmcp` SDK).

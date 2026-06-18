@@ -1,8 +1,9 @@
 //! Chat completions: non-streaming tool-loop and streaming (SSE) variants.
 
 mod conversation;
+mod reasoning;
 
-use std::time::Instant;
+use std::sync::Arc;
 
 pub use conversation::Conversation;
 
@@ -13,7 +14,13 @@ use thiserror::Error;
 use tokio::time::{Duration, sleep};
 use tracing::instrument;
 
+use std::time::Instant;
+
+use reasoning::normalize_reasoning_effort_str;
+
 use crate::cancel::CancellationToken;
+use crate::costing::estimate_model_call_cost_usd;
+use crate::events::{emit_safe, ProcessEvent, ProcessEventKind, StatusEmitter};
 use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookContext, HookError, HookRegistry, HookStage};
 use crate::http::{Error as HttpError, HttpClient, join_base_url, sse::SseParser};
@@ -78,6 +85,12 @@ pub struct ChatOptions {
     // --- Reasoning models (o1/o3/o4) ---
     pub reasoning_effort: Option<String>,
 
+    /// JSON object merged into the chat completion request body after typed fields.
+    pub extra_json: Option<Value>,
+
+    /// Optional fan-out emitter for typed process events (`llm_call_*`, `tool_call_*`).
+    pub status_emitter: Option<Arc<StatusEmitter>>,
+
     // --- Correlation ---
     /// Caller-supplied request identifier used for tracing and correlation.
     /// Auto-generated as a UUID v4 if `None` when the request is executed.
@@ -87,6 +100,10 @@ pub struct ChatOptions {
     /// When set, all HTTP calls in this request check the token and return
     /// [`ChatError::Cancelled`] immediately if it has been cancelled.
     pub cancel: Option<CancellationToken>,
+
+    /// Optional ordered model list (primary first). On eligible HTTP failures after retries,
+    /// the next model is attempted.
+    pub model_fallback: Option<crate::fallback::ModelFallbackChain>,
 }
 
 impl Default for ChatOptions {
@@ -113,8 +130,11 @@ impl Default for ChatOptions {
             store: None,
             service_tier: None,
             reasoning_effort: None,
+            extra_json: None,
+            status_emitter: None,
             request_id: None,
             cancel: None,
+            model_fallback: None,
         }
     }
 }
@@ -171,8 +191,14 @@ impl From<proto::ChatOptions> for ChatOptions {
             store: p.store,
             service_tier: p.service_tier,
             reasoning_effort: p.reasoning_effort,
+            extra_json: p
+                .extra_json
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok()),
+            status_emitter: None,
             request_id: None,
             cancel: None,
+            model_fallback: None,
         }
     }
 }
@@ -195,6 +221,8 @@ pub struct CompletionOutcome {
     /// when that option is set, so this slice can be passed back into [`complete_with_tools`]
     /// on the next turn.
     pub messages: Vec<ChatMessage>,
+    /// Model that produced the final successful HTTP response (after any fallback).
+    pub model_used: String,
 }
 
 /// Strips the leading `system` message when it was injected from [`ChatOptions::system_prompt`].
@@ -246,10 +274,6 @@ pub enum ChatError {
     Cancelled,
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 /// Perform one HTTP JSON POST, honouring an optional cancellation token.
 async fn post_json_cancellable(
     http: &HttpClient,
@@ -266,6 +290,101 @@ async fn post_json_cancellable(
         }
     } else {
         Ok(http.post_json_with_headers(url, body, headers).await?)
+    }
+}
+
+/// POST JSON with per-model HTTP retries and optional model fallback chain.
+pub(crate) async fn post_json_with_model_fallback(
+    http: &HttpClient,
+    url: &str,
+    body: &Value,
+    headers: &[(&str, &str)],
+    options: &ChatOptions,
+    request_id: &str,
+    round: u32,
+) -> Result<(Value, String), ChatError> {
+    let models = crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
+    let default_policy = crate::fallback::FallbackPolicy::default();
+    let policy = options
+        .model_fallback
+        .as_ref()
+        .map(|c| &c.policy)
+        .unwrap_or(&default_policy);
+
+    let mut last_err = None;
+    for (i, model) in models.iter().enumerate() {
+        if i > 0 {
+            crate::fallback::emit_model_fallback(
+                options.status_emitter.as_ref(),
+                request_id,
+                &models[i - 1],
+                model,
+                round,
+            )
+            .await;
+        }
+        let mut body = body.clone();
+        crate::fallback::set_body_model(&mut body, model);
+
+        match post_json_cancellable(http, url, &body, headers, options.cancel.as_ref()).await {
+            Ok(v) => return Ok((v, model.clone())),
+            Err(e) => {
+                if i + 1 < models.len()
+                    && crate::fallback::chat_error_eligible_for_fallback(&e, policy)
+                {
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or(ChatError::Http(
+        crate::http::Error::InvalidJson("model fallback exhausted".into()),
+    )))
+}
+
+pub(crate) fn observation_hook_ctx(
+    stage: HookStage,
+    content: String,
+    request_id: &str,
+    round: u32,
+    model: &str,
+) -> HookContext {
+    let mut ctx = HookContext::new(stage, content);
+    ctx.metadata.insert(
+        "request_id".to_string(),
+        Value::String(request_id.to_string()),
+    );
+    ctx.metadata
+        .insert("round".to_string(), Value::Number(round.into()));
+    ctx.metadata
+        .insert("model".to_string(), Value::String(model.to_string()));
+    ctx
+}
+
+fn merge_extra_json(body: &mut Value, extra: &Value) {
+    if let (Value::Object(body_map), Value::Object(extra_map)) = (body, extra) {
+        for (k, v) in extra_map {
+            body_map.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+fn normalized_reasoning(options: &ChatOptions) -> Option<String> {
+    options
+        .reasoning_effort
+        .as_ref()
+        .and_then(|e| normalize_reasoning_effort_str(&options.model, e))
+}
+
+fn http_error_type(err: &ChatError) -> String {
+    match err {
+        ChatError::Http(e) => format!("http:{e}"),
+        ChatError::Cancelled => "cancelled".to_string(),
+        ChatError::Serde(e) => format!("serde:{e}"),
+        ChatError::NoChoice => "no_choice".to_string(),
+        other => format!("{other}"),
     }
 }
 
@@ -340,14 +459,26 @@ async fn invoke_with_policy(
 /// conversation history. Called concurrently for all tool calls in a single round
 /// via [`futures_util::future::join_all`].
 #[instrument(
-    skip(tc, hooks, registry),
+    skip(tc, hooks, registry, status_emitter),
     fields(tool.name = %tc.function.name, tool.id = %tc.id)
 )]
-async fn dispatch_one(
+pub(crate) async fn dispatch_one(
     tc: &ToolCall,
     hooks: &HookRegistry,
     registry: &ToolRegistry,
+    status_emitter: Option<&Arc<StatusEmitter>>,
+    request_id: &str,
+    round: u32,
+    model: &str,
 ) -> Result<ChatMessage, ChatError> {
+    if let Some(emitter) = status_emitter {
+        let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
+        ev.round = round;
+        ev.metadata
+            .insert("tool_name".to_string(), tc.function.name.clone());
+        emit_safe(Some(emitter), ev).await;
+    }
+
     // --- PreTool hook (mutating) ---
     let pre_ctx = hooks
         .run(
@@ -379,6 +510,14 @@ async fn dispatch_one(
             ),
         )
         .await?;
+
+    if let Some(emitter) = status_emitter {
+        let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallEnd, request_id, model);
+        ev.round = round;
+        ev.metadata
+            .insert("tool_name".to_string(), tc.function.name.clone());
+        emit_safe(Some(emitter), ev).await;
+    }
 
     Ok(ChatMessage {
         role: "tool".to_string(),
@@ -467,6 +606,7 @@ pub async fn complete_with_tools(
     }
 
     let mut api_calls: u32 = 0;
+    let mut model_used = options.model.clone();
 
     let outcome = loop {
         if api_calls >= options.max_tool_rounds {
@@ -491,9 +631,29 @@ pub async fn complete_with_tools(
         hooks
             .run(
                 HookStage::PreCompletion,
-                HookContext::new(HookStage::PreCompletion, last_user),
+                observation_hook_ctx(
+                    HookStage::PreCompletion,
+                    last_user,
+                    &request_id,
+                    api_calls,
+                    &options.model,
+                ),
             )
             .await?;
+
+        emit_safe(
+            options.status_emitter.as_ref(),
+            {
+                let mut ev = ProcessEvent::new(
+                    ProcessEventKind::LlmCallStart,
+                    &request_id,
+                    &options.model,
+                );
+                ev.round = api_calls;
+                ev
+            },
+        )
+        .await;
 
         let specs = registry.list_specs().await;
         let tools = if specs.is_empty() {
@@ -518,15 +678,77 @@ pub async fn complete_with_tools(
         req.seed = options.seed;
         req.store = options.store;
         req.service_tier = options.service_tier.clone();
-        req.reasoning_effort = options.reasoning_effort.clone();
+        req.reasoning_effort = normalized_reasoning(options);
 
-        let body = serde_json::to_value(&req)?;
-        let val =
-            post_json_cancellable(http, &url, &body, &headers, options.cancel.as_ref()).await?;
+        let mut body = serde_json::to_value(&req)?;
+        if let Some(extra) = &options.extra_json {
+            merge_extra_json(&mut body, extra);
+        }
+
+        let (val, round_model) = match post_json_with_model_fallback(
+            http,
+            &url,
+            &body,
+            &headers,
+            options,
+            &request_id,
+            api_calls,
+        )
+        .await
+        {
+            Ok(pair) => pair,
+            Err(e) => {
+                let mut ev = ProcessEvent::new(
+                    ProcessEventKind::LlmCallError,
+                    &request_id,
+                    &options.model,
+                );
+                ev.round = api_calls;
+                ev.error_type = Some(http_error_type(&e));
+                emit_safe(options.status_emitter.as_ref(), ev).await;
+                return Err(e);
+            }
+        };
+        model_used = round_model.clone();
         let response: crate::openai::ChatCompletionResponse = serde_json::from_value(val)?;
 
         let choice = response.choices.first().ok_or(ChatError::NoChoice)?;
         let msg = &choice.message;
+
+        let tool_call_count = msg
+            .tool_calls
+            .as_ref()
+            .map(|tcs| {
+                tcs.iter()
+                    .filter(|tc| tc.kind == "function")
+                    .count() as u32
+            })
+            .unwrap_or(0);
+        let usage_proto = response.usage.as_ref().map(|u| proto::Usage {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        });
+        let estimated_cost = usage_proto
+            .as_ref()
+            .map(|u| estimate_model_call_cost_usd(&round_model, u));
+
+        emit_safe(
+            options.status_emitter.as_ref(),
+            {
+                let mut ev = ProcessEvent::new(
+                    ProcessEventKind::LlmCallEnd,
+                    &request_id,
+                    &round_model,
+                );
+                ev.round = api_calls;
+                ev.tool_call_count = tool_call_count;
+                ev.usage = usage_proto.clone();
+                ev.estimated_cost_usd = estimated_cost;
+                ev
+            },
+        )
+        .await;
 
         // --- PostCompletion hook (observation only) ---
         let assistant_text = msg
@@ -537,7 +759,13 @@ pub async fn complete_with_tools(
         hooks
             .run(
                 HookStage::PostCompletion,
-                HookContext::new(HookStage::PostCompletion, assistant_text),
+                observation_hook_ctx(
+                    HookStage::PostCompletion,
+                    assistant_text,
+                    &request_id,
+                    api_calls,
+                    &options.model,
+                ),
             )
             .await?;
 
@@ -554,9 +782,17 @@ pub async fn complete_with_tools(
                 "tool_calls_batch"
             );
             let results = futures_util::future::join_all(
-                function_tcs
-                    .iter()
-                    .map(|tc| dispatch_one(tc, hooks, registry)),
+                function_tcs.iter().map(|tc| {
+                    dispatch_one(
+                        tc,
+                        hooks,
+                        registry,
+                        options.status_emitter.as_ref(),
+                        &request_id,
+                        api_calls,
+                        &options.model,
+                    )
+                }),
             )
             .await;
             for r in results {
@@ -566,11 +802,7 @@ pub async fn complete_with_tools(
         }
 
         // --- Terminal response: extract content ---
-        let usage = response.usage.as_ref().map(|u| proto::Usage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        });
+        let usage = usage_proto;
         let content = msg
             .content
             .as_ref()
@@ -588,6 +820,7 @@ pub async fn complete_with_tools(
                 finish_reason,
                 request_id: request_id.clone(),
                 messages: client_messages,
+                model_used: model_used.clone(),
             };
         }
 
@@ -616,6 +849,7 @@ pub async fn complete_with_tools(
                         finish_reason: saved_finish.clone(),
                         request_id: request_id.clone(),
                         messages: client_messages,
+                        model_used: model_used.clone(),
                     });
                     break;
                 }
@@ -644,14 +878,17 @@ pub async fn complete_with_tools(
                             None,
                         );
                         let body = serde_json::to_value(&retry_req)?;
-                        let val = post_json_cancellable(
+                        let (val, retry_model) = post_json_with_model_fallback(
                             http,
                             &url,
                             &body,
                             &headers,
-                            options.cancel.as_ref(),
+                            options,
+                            &request_id,
+                            api_calls,
                         )
                         .await?;
+                        model_used = retry_model;
                         let resp: crate::openai::ChatCompletionResponse =
                             serde_json::from_value(val)?;
                         let retry_choice = resp.choices.first().ok_or(ChatError::NoChoice)?;
@@ -677,6 +914,7 @@ pub async fn complete_with_tools(
                                     finish_reason: saved_finish.clone(),
                                     request_id: request_id.clone(),
                                     messages: client_messages,
+                                    model_used: model_used.clone(),
                                 });
                                 break;
                             }
@@ -714,14 +952,15 @@ pub async fn complete_with_tools(
             finish_reason: saved_finish,
             request_id: request_id.clone(),
             messages: default_messages,
+            model_used: model_used.clone(),
         });
     };
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-    metrics::histogram!(crate::telemetry::metrics::COMPLETION_DURATION_MS, "model" => options.model.clone()).record(elapsed_ms);
+    metrics::histogram!(crate::telemetry::metrics::COMPLETION_DURATION_MS, "model" => outcome.model_used.clone()).record(elapsed_ms);
     tracing::info!(
         request_id = %outcome.request_id,
-        model = %options.model,
+        model = %outcome.model_used,
         rounds = outcome.rounds,
         elapsed_ms,
         "complete_with_tools finished"
@@ -860,9 +1099,12 @@ where
     req.seed = options.seed;
     req.store = options.store;
     req.service_tier = options.service_tier.clone();
-    req.reasoning_effort = options.reasoning_effort.clone();
+    req.reasoning_effort = normalized_reasoning(options);
 
-    let body = serde_json::to_value(&req)?;
+    let mut body = serde_json::to_value(&req)?;
+    if let Some(extra) = &options.extra_json {
+        merge_extra_json(&mut body, extra);
+    }
     tracing::debug!(%url, "stream_complete POST (SSE)");
 
     let mut byte_stream = http

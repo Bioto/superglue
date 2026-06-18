@@ -1,19 +1,18 @@
 [package]
 name = "superglue"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 description = "Superglue library and CLI"
-license = "MIT"
 
 [features]
-# Enables `examples/chat_wiremock.rs` (local mock OpenAI); not needed for the library itself.
-example-wiremock = ["dep:wiremock"]
 # Enables the tonic gRPC server in `src/grpc/`.
 grpc = ["dep:tonic", "dep:tokio-stream"]
 # Enables the Prometheus metrics exporter.
 prometheus = ["dep:metrics-exporter-prometheus"]
 # Enables the OTLP span exporter via tracing-opentelemetry.
 otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+mcp = ["dep:rmcp"]
 
 [build-dependencies]
 prost-build = "0.13"
@@ -48,15 +47,16 @@ zeroize = "1"
 tonic = { version = "0.13", optional = true }
 tokio-stream = { version = "0.1", optional = true }
 uuid = { version = "1", features = ["v4"] }
-wiremock = { version = "0.6", optional = true }
 regex = "1.12.3"
 opentelemetry = { version = "0.28", optional = true }
 opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.28", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
+rmcp = { version = "0.16", optional = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 [[example]]
-name = "chat_wiremock"
-required-features = ["example-wiremock"]
+name = "28_mcp_tools"
+path = "examples/28_mcp_tools.rs"
+required-features = ["mcp"]
 
 [dev-dependencies]
 assert_cmd = "2"

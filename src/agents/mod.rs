@@ -75,6 +75,8 @@ pub struct AgentSpec {
     /// When `Some`, the compiled system prompt is replaced entirely with this
     /// value. Useful for agents whose prompt is managed externally.
     pub system_prompt_override: Option<String>,
+    /// Optional reasoning effort override for reasoning-capable models.
+    pub reasoning_effort: Option<String>,
 }
 
 impl AgentSpec {
@@ -89,6 +91,7 @@ impl AgentSpec {
             max_tool_rounds: 16,
             max_output_retries: 3,
             system_prompt_override: None,
+            reasoning_effort: None,
         }
     }
 
@@ -211,6 +214,9 @@ impl AgentEngine {
         opts.system_prompt = Some(self.spec.compile_system_prompt());
         if !self.spec.model.is_empty() {
             opts.model = self.spec.model.clone();
+        }
+        if let Some(re) = &self.spec.reasoning_effort {
+            opts.reasoning_effort = Some(re.clone());
         }
         opts.max_tool_rounds = self.spec.max_tool_rounds;
         opts

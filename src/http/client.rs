@@ -30,7 +30,7 @@ pub struct ClientConfig {
     pub quota_per_second: Option<std::num::NonZeroU32>,
     /// Maximum number of idle keep-alive connections per host retained in the
     /// pool. Maps directly to `reqwest::ClientBuilder::pool_max_idle_per_host`.
-    /// Default: 8 (reqwest default).
+    /// Default: 50 (aligned with gluellm httpx pool keepalive sizing).
     pub pool_max_idle_per_host: usize,
     /// How long an idle connection is kept alive before being evicted from the
     /// pool. `None` uses reqwest's default (90 s). Maps to
@@ -42,11 +42,11 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             timeout: Duration::from_secs(60),
-            connect_timeout: Duration::from_secs(15),
+            connect_timeout: Duration::from_secs(30),
             user_agent: format!("superglue/{}", env!("CARGO_PKG_VERSION")),
             retry: RetryPolicy::default(),
             quota_per_second: None,
-            pool_max_idle_per_host: 8,
+            pool_max_idle_per_host: 50,
             pool_idle_timeout: None,
         }
     }
@@ -360,6 +360,14 @@ fn retry_delay_ms(policy: &RetryPolicy, attempt: u32, err: &Error) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_client_config_matches_gluellm_pool_sizing() {
+        let cfg = ClientConfig::default();
+        assert_eq!(cfg.connect_timeout, Duration::from_secs(30));
+        assert_eq!(cfg.pool_max_idle_per_host, 50);
+        assert_eq!(cfg.timeout, Duration::from_secs(60));
+    }
 
     #[test]
     fn retryable_classification() {

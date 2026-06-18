@@ -20,6 +20,7 @@ async fn runstore_insert_and_get() {
         outcome: None,
         started_at_ms: 1000,
         finished_at_ms: 2000,
+        process_events: vec![],
     };
     store.insert(record).await;
 
@@ -46,6 +47,7 @@ async fn runstore_list_all() {
                 outcome: None,
                 started_at_ms: i as i64,
                 finished_at_ms: i as i64 + 1,
+                process_events: vec![],
             })
             .await;
     }
@@ -66,6 +68,7 @@ async fn runstore_clear() {
             outcome: None,
             started_at_ms: 0,
             finished_at_ms: 1,
+            process_events: vec![],
         })
         .await;
     assert_eq!(store.len().await, 1);
@@ -86,6 +89,7 @@ async fn runstore_capacity_cap_evicts_oldest() {
                 outcome: None,
                 started_at_ms: i as i64,
                 finished_at_ms: i as i64 + 1,
+                process_events: vec![],
             })
             .await;
     }
