@@ -16,6 +16,7 @@ use tracing::warn;
 use crate::http::error::Error;
 use crate::http::rate_limit::{DirectRateLimiter, direct_per_second};
 use crate::http::retry::RetryPolicy;
+use crate::providers::{RateLimitKey, RateLimitRegistry};
 
 /// Configuration for [`HttpClient`].
 #[derive(Debug, Clone)]
@@ -26,8 +27,10 @@ pub struct ClientConfig {
     pub connect_timeout: Duration,
     pub user_agent: String,
     pub retry: RetryPolicy,
-    /// When set, every request waits for this per-second quota first.
+    /// When set, every request waits for this per-second quota first (legacy global bucket).
     pub quota_per_second: Option<std::num::NonZeroU32>,
+    /// Per-API-key rate limits (preferred when set).
+    pub rate_limit_registry: Option<Arc<RateLimitRegistry>>,
     /// Maximum number of idle keep-alive connections per host retained in the
     /// pool. Maps directly to `reqwest::ClientBuilder::pool_max_idle_per_host`.
     /// Default: 50 (aligned with gluellm httpx pool keepalive sizing).
@@ -46,6 +49,7 @@ impl Default for ClientConfig {
             user_agent: format!("superglue/{}", env!("CARGO_PKG_VERSION")),
             retry: RetryPolicy::default(),
             quota_per_second: None,
+            rate_limit_registry: None,
             pool_max_idle_per_host: 50,
             pool_idle_timeout: None,
         }
@@ -60,6 +64,7 @@ pub struct HttpClient {
     /// derived clients via [`clone_with_timeouts`](Self::clone_with_timeouts).
     pub config: ClientConfig,
     limiter: Option<Arc<DirectRateLimiter>>,
+    rate_limit_registry: Option<Arc<RateLimitRegistry>>,
 }
 
 impl HttpClient {
@@ -79,10 +84,12 @@ impl HttpClient {
         }
         let inner = builder.build()?;
         let limiter = config.quota_per_second.map(direct_per_second);
+        let rate_limit_registry = config.rate_limit_registry.clone();
         Ok(Self {
             inner,
             config,
             limiter,
+            rate_limit_registry,
         })
     }
 
@@ -102,10 +109,16 @@ impl HttpClient {
         HttpClient::new(new_cfg)
     }
 
-    async fn acquire_limiter(&self) {
-        if let Some(lim) = &self.limiter {
+    async fn acquire_rate_limit(&self, key: Option<RateLimitKey>) {
+        if let (Some(reg), Some(k)) = (&self.rate_limit_registry, key) {
+            reg.acquire(k).await;
+        } else if let Some(lim) = &self.limiter {
             lim.until_ready().await;
         }
+    }
+
+    async fn acquire_limiter(&self) {
+        self.acquire_rate_limit(None).await;
     }
 
     /// GET and buffer the full body. Retries retryable statuses and transport errors per [`RetryPolicy`].
@@ -199,7 +212,7 @@ impl HttpClient {
     /// `POST` with JSON body. Retries only [`Error::is_retryable_post`] (transport + 429/502/503/504),
     /// not arbitrary 5xx, to reduce duplicate side effects on non-idempotent requests.
     pub async fn post_json(&self, url: &str, body: &Value) -> Result<Value, Error> {
-        self.post_json_with_headers(url, body, &[]).await
+        self.post_json_with_headers(url, body, &[], None).await
     }
 
     /// `POST` with JSON body and extra headers (e.g. `Authorization`, `OpenAI-Organization`).
@@ -208,18 +221,16 @@ impl HttpClient {
         url: &str,
         body: &Value,
         headers: &[(&str, &str)],
+        rate_limit_key: Option<RateLimitKey>,
     ) -> Result<Value, Error> {
         let mut attempt: u32 = 0;
         loop {
-            self.acquire_limiter().await;
-            let mut req = self
-                .inner
-                .post(url)
-                .header("Content-Type", "application/json")
-                .json(body);
+            self.acquire_rate_limit(rate_limit_key).await;
+            let mut req = self.inner.post(url);
             for (k, v) in headers {
                 req = req.header(*k, *v);
             }
+            req = req.json(body);
             match Self::send_json_body(req).await {
                 Ok(v) => return Ok(v),
                 Err(e) => {
@@ -252,16 +263,14 @@ impl HttpClient {
         url: &str,
         body: &Value,
         headers: &[(&str, &str)],
-    ) -> Result<impl Stream<Item = Result<Bytes, Error>> + Send, Error> {
-        self.acquire_limiter().await;
-        let mut req = self
-            .inner
-            .post(url)
-            .header("Content-Type", "application/json")
-            .json(body);
+        rate_limit_key: Option<RateLimitKey>,
+    ) -> Result<impl Stream<Item = Result<Bytes, Error>> + Send + use<>, Error> {
+        self.acquire_rate_limit(rate_limit_key).await;
+        let mut req = self.inner.post(url);
         for (k, v) in headers {
             req = req.header(*k, *v);
         }
+        req = req.json(body);
         let resp = req.send().await?;
         let status = resp.status();
         let retry_after = parse_retry_after(resp.headers());
@@ -276,6 +285,49 @@ impl HttpClient {
             return Err(Error::unsuccessful(status, &body_bytes, retry_after));
         }
         Ok(resp.bytes_stream().map(|r| r.map_err(Error::from)))
+    }
+
+    /// `POST` multipart form (e.g. file uploads). Retries like [`Self::post_json_with_headers`].
+    pub async fn post_multipart(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        purpose: &str,
+        filename: &str,
+        file_bytes: Vec<u8>,
+        rate_limit_key: Option<RateLimitKey>,
+    ) -> Result<Value, Error> {
+        let mut attempt: u32 = 0;
+        loop {
+            self.acquire_rate_limit(rate_limit_key).await;
+            let part = reqwest::multipart::Part::bytes(file_bytes.clone())
+                .file_name(filename.to_string())
+                .mime_str("application/octet-stream")
+                .map_err(|e| Error::InvalidJson(e.to_string()))?;
+            let form = reqwest::multipart::Form::new()
+                .text("purpose", purpose.to_string())
+                .part("file", part);
+            let mut req = self.inner.post(url).multipart(form);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            match Self::send_json_body(req).await {
+                Ok(v) => return Ok(v),
+                Err(e) => {
+                    if e.is_retryable_post() && attempt < self.config.retry.max_retries {
+                        let delay = retry_delay_ms(&self.config.retry, attempt, &e);
+                        warn_http_retry("POST_MULTIPART", url, attempt, delay, &e);
+                        sleep(Duration::from_millis(delay)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    if e.is_retryable_post() {
+                        return Err(Self::retries_exhausted(&e, attempt));
+                    }
+                    return Err(e);
+                }
+            }
+        }
     }
 
     async fn send_json_body(req: RequestBuilder) -> Result<Value, Error> {

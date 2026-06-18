@@ -10,7 +10,7 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::chat::{
-    post_json_with_model_fallback, ChatError, ChatOptions, dispatch_one,
+    credentials_for, post_json_with_model_fallback, ChatError, ChatOptions, dispatch_one,
     observation_hook_ctx,
 };
 use crate::costing::estimate_model_call_cost_usd;
@@ -224,6 +224,15 @@ fn function_calls(output: &[ResponseOutputItem]) -> Vec<(String, String, String)
         .collect()
 }
 
+fn responses_rate_limit_key(options: &ChatOptions) -> Option<crate::providers::RateLimitKey> {
+    let model_ref = crate::providers::parse_model_ref(&options.model);
+    if model_ref.provider != crate::providers::ProviderId::OpenAi {
+        return None;
+    }
+    let creds = credentials_for(options);
+    crate::providers::rate_limit_key_for(&model_ref, &creds).ok()
+}
+
 async fn post_response(
     http: &HttpClient,
     url: &str,
@@ -233,7 +242,16 @@ async fn post_response(
     request_id: &str,
     round: u32,
 ) -> Result<(ResponseObject, String), ResponseError> {
-    let (val, model) = post_json_with_model_fallback(http, url, body, headers, options, request_id, round)
+    let (val, model) = post_json_with_model_fallback(
+        http,
+        url,
+        body,
+        headers,
+        options,
+        request_id,
+        round,
+        responses_rate_limit_key(options),
+    )
         .await?;
     let resp: ResponseObject = serde_json::from_value(val)?;
     Ok((resp, model))
@@ -504,7 +522,7 @@ where
 
     let body = serde_json::to_value(&req)?;
     let stream = http
-        .post_json_stream_with_headers(&url, &body, &headers)
+        .post_json_stream_with_headers(&url, &body, &headers, responses_rate_limit_key(options))
         .await?;
 
     let mut parser = SseParser::new();

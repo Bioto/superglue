@@ -2,19 +2,22 @@
 //!
 //! Mirrors the `Client` type exposed by Python, JavaScript, and Kotlin bindings.
 
+mod bootstrap;
+
+use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
 
 use secrecy::Secret;
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::agents::{AgentEngine, AgentSpec};
 use crate::batch::{batch_complete, BatchConfig, BatchError, BatchRequest, BatchResponse};
 use crate::chat::{
-    complete_with_tools, stream_complete, ChatError, ChatOptions, CompletionOutcome,
-    Conversation, StreamOutcome,
+    complete_with_tools, stream_complete, stream_complete_with_tools, ChatError, ChatOptions,
+    CompletionOutcome, Conversation, StreamOutcome,
 };
 use crate::fallback::{FallbackPolicy, ModelFallbackChain};
 use crate::responses::{
@@ -31,6 +34,10 @@ use crate::http::{ClientConfig, Error as HttpError, HttpClient, RetryPolicy};
 use crate::openai::ChatMessage;
 use crate::tools::{Tool, ToolRegistry};
 
+pub use bootstrap::{
+    bootstrap_from_parts, provider_id_from_str, BindingBootstrap, BindingBootstrapConfig,
+};
+
 const DEFAULT_MODEL: &str = "gpt-5.4-nano-2026-03-17-mini";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
@@ -39,6 +46,8 @@ const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 pub enum ClientBuildError {
     #[error("api_key is required")]
     MissingApiKey,
+    #[error("missing API key for provider {0}")]
+    MissingProviderKey(crate::providers::ProviderId),
     #[error(transparent)]
     Http(#[from] HttpError),
 }
@@ -58,6 +67,7 @@ struct ClientInner {
     hooks: Arc<HookRegistry>,
     guardrails: Arc<GuardrailRegistry>,
     http: Arc<HttpClient>,
+    max_upload_bytes: usize,
     #[cfg(feature = "mcp")]
     mcp_sessions: Mutex<Vec<Arc<crate::mcp::McpSession>>>,
 }
@@ -89,6 +99,9 @@ pub struct ClientBuilder {
     reasoning_effort: Option<String>,
     status_emitter: Option<Arc<StatusEmitter>>,
     model_fallback: Option<ModelFallbackChain>,
+    provider_credentials: Option<crate::providers::ProviderCredentials>,
+    provider_qps: HashMap<crate::providers::ProviderId, u32>,
+    max_upload_bytes: usize,
 }
 
 impl Default for ClientBuilder {
@@ -112,6 +125,9 @@ impl Default for ClientBuilder {
             reasoning_effort: None,
             status_emitter: None,
             model_fallback: None,
+            provider_credentials: None,
+            provider_qps: HashMap::new(),
+            max_upload_bytes: crate::files::default_max_upload_bytes(),
         }
     }
 }
@@ -164,6 +180,36 @@ impl ClientBuilder {
 
     pub fn retry_multiplier(mut self, m: f64) -> Self {
         self.retry_multiplier = m;
+        self
+    }
+
+    /// Set API key for a specific provider (overrides env for that provider).
+    pub fn api_key_for(mut self, provider: crate::providers::ProviderId, key: impl Into<String>) -> Self {
+        let mut creds = self.provider_credentials.unwrap_or_else(|| {
+            let mut c = crate::providers::ProviderCredentials::from_env();
+            c.with_legacy_openai_key(
+                self.api_key.as_deref().unwrap_or(""),
+                Some(&self.base_url),
+            );
+            c
+        });
+        creds.insert_key(provider, key);
+        self.provider_credentials = Some(creds);
+        self
+    }
+
+    /// Per-provider default QPS when a new API-key bucket is created.
+    pub fn requests_per_second_for(
+        mut self,
+        provider: crate::providers::ProviderId,
+        qps: u32,
+    ) -> Self {
+        self.provider_qps.insert(provider, qps);
+        self
+    }
+
+    pub fn max_upload_bytes(mut self, bytes: usize) -> Self {
+        self.max_upload_bytes = bytes;
         self
     }
 
@@ -227,46 +273,44 @@ impl ClientBuilder {
     ///
     /// Returns [`ClientBuildError`] if `api_key` is missing or the HTTP client fails to construct.
     pub fn build(self) -> Result<Client, ClientBuildError> {
-        let api_key = self
-            .api_key
-            .filter(|k| !k.is_empty())
-            .ok_or(ClientBuildError::MissingApiKey)?;
-
-        let cfg = ClientConfig {
-            retry: RetryPolicy {
-                max_retries: self.max_retries,
-                initial_interval_ms: self.retry_initial_delay_ms,
-                max_interval_ms: self.retry_max_delay_ms,
-                multiplier: self.retry_multiplier,
-            },
-            quota_per_second: self.requests_per_second.and_then(NonZeroU32::new),
+        let bootstrap = bootstrap_from_parts(BindingBootstrapConfig {
+            api_key: self
+                .api_key
+                .filter(|k| !k.is_empty())
+                .ok_or(ClientBuildError::MissingApiKey)?,
+            base_url: self.base_url,
+            model: self.model,
+            system_prompt: self.system_prompt,
+            max_tool_rounds: self.max_tool_rounds,
+            max_retries: self.max_retries,
+            retry_initial_delay_ms: self.retry_initial_delay_ms,
+            retry_max_delay_ms: self.retry_max_delay_ms,
+            retry_multiplier: self.retry_multiplier,
+            requests_per_second: self.requests_per_second,
             timeout: self.timeout,
             connect_timeout: self.connect_timeout,
+            max_output_retries: self.max_output_retries,
             pool_max_idle_per_host: self.pool_max_idle_per_host,
             pool_idle_timeout: self.pool_idle_timeout,
-            ..ClientConfig::default()
-        };
-        let http = HttpClient::new(cfg)?;
+            reasoning_effort: self.reasoning_effort,
+            status_emitter: self.status_emitter,
+            model_fallback: self.model_fallback,
+            provider_credentials: self.provider_credentials,
+            provider_qps: self.provider_qps,
+            max_upload_bytes: self.max_upload_bytes,
+        })?;
+        let max_output_retries = self.max_output_retries;
 
         Ok(Client {
             inner: Arc::new(ClientInner {
-                options: ChatOptions {
-                    api_key: Secret::new(api_key),
-                    model: self.model,
-                    base_url: self.base_url,
-                    system_prompt: self.system_prompt,
-                    max_tool_rounds: self.max_tool_rounds,
-                    reasoning_effort: self.reasoning_effort,
-                    status_emitter: self.status_emitter,
-                    model_fallback: self.model_fallback,
-                    ..Default::default()
-                },
+                options: bootstrap.options,
                 registry: Arc::new(ToolRegistry::new()),
                 hooks: Arc::new(HookRegistry::new()),
                 guardrails: Arc::new(
-                    GuardrailRegistry::new().with_max_output_retries(self.max_output_retries),
+                    GuardrailRegistry::new().with_max_output_retries(max_output_retries),
                 ),
-                http: Arc::new(http),
+                http: Arc::new(bootstrap.http),
+                max_upload_bytes: bootstrap.max_upload_bytes,
                 #[cfg(feature = "mcp")]
                 mcp_sessions: Mutex::new(Vec::new()),
             }),
@@ -463,15 +507,67 @@ impl Client {
         let messages = vec![ChatMessage::text("user", user_message.into())];
         let http = effective_http(&self.inner.http, call.timeout, call.connect_timeout)?;
         let options = finalize_call_options(&self.inner.options, &call);
-        stream_complete(
-            &http,
-            &self.inner.hooks,
-            &self.inner.guardrails,
-            messages,
-            &options,
-            on_delta,
+        let specs = self.inner.registry.list_specs().await;
+        if specs.is_empty() {
+            stream_complete(
+                &http,
+                &self.inner.hooks,
+                &self.inner.guardrails,
+                messages,
+                &options,
+                on_delta,
+            )
+            .await
+        } else {
+            let out = stream_complete_with_tools(
+                &http,
+                &self.inner.registry,
+                &self.inner.hooks,
+                &self.inner.guardrails,
+                messages,
+                &options,
+                on_delta,
+            )
+            .await?;
+            Ok(StreamOutcome {
+                content: out.content,
+                finish_reason: out.finish_reason,
+                usage: out.usage,
+                request_id: out.request_id,
+            })
+        }
+    }
+
+    /// Upload a file to the provider Files API (or prepare inline metadata for Anthropic).
+    pub async fn upload_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+        purpose: crate::files::FilePurpose,
+        provider: Option<crate::providers::ProviderId>,
+    ) -> Result<crate::files::UploadedFile, crate::files::FileError> {
+        let creds = crate::chat::credentials_for(&self.inner.options);
+        let provider = provider.unwrap_or_else(|| {
+            crate::providers::parse_model_ref(&self.inner.options.model).provider
+        });
+        crate::files::upload_file(
+            &self.inner.http,
+            &creds,
+            provider,
+            path.as_ref(),
+            purpose,
+            self.inner.max_upload_bytes,
         )
         .await
+    }
+
+    /// Build a user message with inline file bytes for chat.
+    #[must_use]
+    pub fn message_with_file_bytes(
+        text: Option<&str>,
+        filename: &str,
+        bytes: &[u8],
+    ) -> ChatMessage {
+        crate::files::message_with_file_bytes(text, filename, bytes)
     }
 
     /// Non-streaming completion via the OpenAI Responses API (`/v1/responses`).

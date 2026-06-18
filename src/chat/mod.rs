@@ -1,7 +1,8 @@
 //! Chat completions: non-streaming tool-loop and streaming (SSE) variants.
 
 mod conversation;
-mod reasoning;
+pub mod reasoning;
+mod stream_tools;
 
 use std::sync::Arc;
 
@@ -104,6 +105,9 @@ pub struct ChatOptions {
     /// Optional ordered model list (primary first). On eligible HTTP failures after retries,
     /// the next model is attempted.
     pub model_fallback: Option<crate::fallback::ModelFallbackChain>,
+
+    /// Multi-provider API keys (when set, used instead of legacy `api_key` / `base_url` alone).
+    pub provider_credentials: Option<Arc<crate::providers::ProviderCredentials>>,
 }
 
 impl Default for ChatOptions {
@@ -135,6 +139,7 @@ impl Default for ChatOptions {
             request_id: None,
             cancel: None,
             model_fallback: None,
+            provider_credentials: None,
         }
     }
 }
@@ -199,6 +204,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             request_id: None,
             cancel: None,
             model_fallback: None,
+            provider_credentials: None,
         }
     }
 }
@@ -272,6 +278,23 @@ pub enum ChatError {
     MaxToolRounds(u32),
     #[error("request cancelled")]
     Cancelled,
+    #[error(transparent)]
+    Credentials(#[from] crate::providers::CredentialsError),
+    #[error("unsupported provider for this API: {0}")]
+    UnsupportedProvider(crate::providers::ProviderId),
+}
+
+/// Resolve credentials from options (multi-provider map or legacy single OpenAI key).
+pub fn credentials_for(options: &ChatOptions) -> crate::providers::ProviderCredentials {
+    if let Some(creds) = &options.provider_credentials {
+        return creds.as_ref().clone();
+    }
+    let mut creds = crate::providers::ProviderCredentials::new();
+    creds.with_legacy_openai_key(
+        options.api_key.expose_secret(),
+        Some(&options.base_url),
+    );
+    creds
 }
 
 /// Perform one HTTP JSON POST, honouring an optional cancellation token.
@@ -280,17 +303,191 @@ async fn post_json_cancellable(
     url: &str,
     body: &Value,
     headers: &[(&str, &str)],
+    rate_limit_key: Option<crate::providers::RateLimitKey>,
     cancel: Option<&CancellationToken>,
 ) -> Result<Value, ChatError> {
     if let Some(token) = cancel {
         tokio::select! {
             biased;
             _ = token.cancelled() => Err(ChatError::Cancelled),
-            result = http.post_json_with_headers(url, body, headers) => Ok(result?),
+            result = http.post_json_with_headers(url, body, headers, rate_limit_key) => Ok(result?),
         }
     } else {
-        Ok(http.post_json_with_headers(url, body, headers).await?)
+        Ok(http
+            .post_json_with_headers(url, body, headers, rate_limit_key)
+            .await?)
     }
+}
+
+/// POST via provider adapter with per-model HTTP retries and optional model fallback chain.
+pub(crate) async fn provider_chat_post(
+    http: &HttpClient,
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    tool_specs: Option<&[crate::tools::ToolSpec]>,
+    options: &ChatOptions,
+    request_id: &str,
+    round: u32,
+    stream: bool,
+) -> Result<(Value, crate::providers::ModelRef), ChatError> {
+    let models =
+        crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
+    let default_policy = crate::fallback::FallbackPolicy::default();
+    let policy = options
+        .model_fallback
+        .as_ref()
+        .map(|c| &c.policy)
+        .unwrap_or(&default_policy);
+
+    let mut last_err = None;
+    for (i, model_str) in models.iter().enumerate() {
+        if i > 0 {
+            crate::fallback::emit_model_fallback(
+                options.status_emitter.as_ref(),
+                request_id,
+                &models[i - 1],
+                model_str,
+                round,
+            )
+            .await;
+        }
+
+        let model_ref = crate::providers::parse_model_ref(model_str);
+        credentials
+            .key_for(model_ref.provider)
+            .map_err(ChatError::Credentials)?;
+
+        let provider = crate::providers::resolve_provider(&model_ref);
+        let ctx = crate::providers::ProviderRequestContext {
+            model_ref: &model_ref,
+            credentials,
+            messages,
+            tools: tool_specs,
+            stream,
+            options,
+        };
+        let req = provider.build_chat_request(&ctx);
+        let header_refs: Vec<(&str, &str)> = req
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        match post_json_cancellable(
+            http,
+            &req.url,
+            &req.body,
+            &header_refs,
+            Some(req.rate_limit_key),
+            options.cancel.as_ref(),
+        )
+        .await
+        {
+            Ok(v) => return Ok((v, model_ref)),
+            Err(e) => {
+                if i + 1 < models.len()
+                    && crate::fallback::chat_error_eligible_for_fallback(&e, policy)
+                {
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or(ChatError::Http(
+        HttpError::InvalidJson("model fallback exhausted".into()),
+    )))
+}
+
+/// Open a streaming POST via provider adapter with per-model HTTP retries and optional fallback.
+pub(crate) async fn provider_chat_stream(
+    http: &HttpClient,
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    tool_specs: Option<&[crate::tools::ToolSpec]>,
+    options: &ChatOptions,
+    request_id: &str,
+    round: u32,
+) -> Result<
+    (
+        impl futures_util::Stream<Item = Result<bytes::Bytes, HttpError>> + Send + use<>,
+        crate::providers::ModelRef,
+    ),
+    ChatError,
+> {
+    let models =
+        crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
+    let default_policy = crate::fallback::FallbackPolicy::default();
+    let policy = options
+        .model_fallback
+        .as_ref()
+        .map(|c| &c.policy)
+        .unwrap_or(&default_policy);
+
+    let mut last_err = None;
+    for (i, model_str) in models.iter().enumerate() {
+        if i > 0 {
+            crate::fallback::emit_model_fallback(
+                options.status_emitter.as_ref(),
+                request_id,
+                &models[i - 1],
+                model_str,
+                round,
+            )
+            .await;
+        }
+
+        let model_ref = crate::providers::parse_model_ref(model_str);
+        credentials
+            .key_for(model_ref.provider)
+            .map_err(ChatError::Credentials)?;
+
+        let provider = crate::providers::resolve_provider(&model_ref);
+        let ctx = crate::providers::ProviderRequestContext {
+            model_ref: &model_ref,
+            credentials,
+            messages,
+            tools: tool_specs,
+            stream: true,
+            options,
+        };
+        let req = provider.build_chat_request(&ctx);
+        let url = req.url.clone();
+        let body = req.body.clone();
+        let owned_headers = req.headers.clone();
+        let rate_key = req.rate_limit_key;
+        let header_refs: Vec<(&str, &str)> = owned_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        if let Some(token) = options.cancel.as_ref()
+            && token.is_cancelled()
+        {
+            return Err(ChatError::Cancelled);
+        }
+
+        match http
+            .post_json_stream_with_headers(&url, &body, &header_refs, Some(rate_key))
+            .await
+        {
+            Ok(stream) => return Ok((stream, model_ref)),
+            Err(e) => {
+                let chat_err = ChatError::Http(e);
+                if i + 1 < models.len()
+                    && crate::fallback::chat_error_eligible_for_fallback(&chat_err, policy)
+                {
+                    last_err = Some(chat_err);
+                    continue;
+                }
+                return Err(chat_err);
+            }
+        }
+    }
+    Err(last_err.unwrap_or(ChatError::Http(
+        HttpError::InvalidJson("model fallback exhausted".into()),
+    )))
 }
 
 /// POST JSON with per-model HTTP retries and optional model fallback chain.
@@ -302,8 +499,10 @@ pub(crate) async fn post_json_with_model_fallback(
     options: &ChatOptions,
     request_id: &str,
     round: u32,
+    rate_limit_key: Option<crate::providers::RateLimitKey>,
 ) -> Result<(Value, String), ChatError> {
-    let models = crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
+    let models =
+        crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
     let default_policy = crate::fallback::FallbackPolicy::default();
     let policy = options
         .model_fallback
@@ -326,7 +525,16 @@ pub(crate) async fn post_json_with_model_fallback(
         let mut body = body.clone();
         crate::fallback::set_body_model(&mut body, model);
 
-        match post_json_cancellable(http, url, &body, headers, options.cancel.as_ref()).await {
+        match post_json_cancellable(
+            http,
+            url,
+            &body,
+            headers,
+            rate_limit_key,
+            options.cancel.as_ref(),
+        )
+        .await
+        {
             Ok(v) => return Ok((v, model.clone())),
             Err(e) => {
                 if i + 1 < models.len()
@@ -340,7 +548,7 @@ pub(crate) async fn post_json_with_model_fallback(
         }
     }
     Err(last_err.unwrap_or(ChatError::Http(
-        crate::http::Error::InvalidJson("model fallback exhausted".into()),
+        HttpError::InvalidJson("model fallback exhausted".into()),
     )))
 }
 
@@ -563,10 +771,7 @@ pub async fn complete_with_tools(
     );
     metrics::counter!(crate::telemetry::metrics::COMPLETIONS_TOTAL, "model" => options.model.clone()).increment(1);
 
-    let url = join_base_url(&options.base_url, "/v1/chat/completions");
-    // Expose the secret only to build the header — the string is dropped at end of this scope.
-    let auth = format!("Bearer {}", options.api_key.expose_secret());
-    let headers = [("Authorization", auth.as_str())];
+    let credentials = credentials_for(options);
 
     // Prepend system prompt if configured.
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(caller_messages.len() + 1);
@@ -656,43 +861,21 @@ pub async fn complete_with_tools(
         .await;
 
         let specs = registry.list_specs().await;
-        let tools = if specs.is_empty() {
+        let tool_specs = if specs.is_empty() {
             None
         } else {
-            Some(specs.into_iter().map(ChatTool::from).collect::<Vec<_>>())
+            Some(specs.as_slice())
         };
 
-        let mut req = ChatCompletionRequest::new(options.model.clone(), messages.clone(), tools);
-        req.temperature = options.temperature;
-        req.top_p = options.top_p;
-        req.n = options.n;
-        req.max_completion_tokens = options.max_completion_tokens;
-        req.presence_penalty = options.presence_penalty;
-        req.frequency_penalty = options.frequency_penalty;
-        req.stop = options.stop.clone();
-        req.response_format = options.response_format.clone();
-        req.tool_choice = options.tool_choice.clone();
-        req.parallel_tool_calls = options.parallel_tool_calls;
-        req.logprobs = options.logprobs;
-        req.top_logprobs = options.top_logprobs;
-        req.seed = options.seed;
-        req.store = options.store;
-        req.service_tier = options.service_tier.clone();
-        req.reasoning_effort = normalized_reasoning(options);
-
-        let mut body = serde_json::to_value(&req)?;
-        if let Some(extra) = &options.extra_json {
-            merge_extra_json(&mut body, extra);
-        }
-
-        let (val, round_model) = match post_json_with_model_fallback(
+        let (val, model_ref) = match provider_chat_post(
             http,
-            &url,
-            &body,
-            &headers,
+            &credentials,
+            &messages,
+            tool_specs,
             options,
             &request_id,
             api_calls,
+            false,
         )
         .await
         {
@@ -709,29 +892,43 @@ pub async fn complete_with_tools(
                 return Err(e);
             }
         };
-        model_used = round_model.clone();
-        let response: crate::openai::ChatCompletionResponse = serde_json::from_value(val)?;
+        model_used = model_ref.raw.clone();
+        let provider = crate::providers::resolve_provider(&model_ref);
+        let normalized = provider
+            .parse_chat_response(&val)
+            .map_err(|e| {
+                if e.to_string().contains("no choices") {
+                    ChatError::NoChoice
+                } else {
+                    ChatError::Http(HttpError::InvalidJson(e.to_string()))
+                }
+            })?;
 
-        let choice = response.choices.first().ok_or(ChatError::NoChoice)?;
-        let msg = &choice.message;
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: normalized
+                .content
+                .clone()
+                .map(MessageContent::Text),
+            tool_calls: if normalized.tool_calls.is_empty() {
+                None
+            } else {
+                Some(normalized.tool_calls.clone())
+            },
+            tool_call_id: None,
+            name: None,
+            refusal: None,
+        };
 
-        let tool_call_count = msg
+        let tool_call_count = normalized
             .tool_calls
-            .as_ref()
-            .map(|tcs| {
-                tcs.iter()
-                    .filter(|tc| tc.kind == "function")
-                    .count() as u32
-            })
-            .unwrap_or(0);
-        let usage_proto = response.usage.as_ref().map(|u| proto::Usage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        });
+            .iter()
+            .filter(|tc| tc.kind == "function")
+            .count() as u32;
+        let usage_proto = normalized.usage.clone();
         let estimated_cost = usage_proto
             .as_ref()
-            .map(|u| estimate_model_call_cost_usd(&round_model, u));
+            .map(|u| estimate_model_call_cost_usd(&model_used, u));
 
         emit_safe(
             options.status_emitter.as_ref(),
@@ -739,7 +936,7 @@ pub async fn complete_with_tools(
                 let mut ev = ProcessEvent::new(
                     ProcessEventKind::LlmCallEnd,
                     &request_id,
-                    &round_model,
+                    &model_used,
                 );
                 ev.round = api_calls;
                 ev.tool_call_count = tool_call_count;
@@ -751,11 +948,7 @@ pub async fn complete_with_tools(
         .await;
 
         // --- PostCompletion hook (observation only) ---
-        let assistant_text = msg
-            .content
-            .as_ref()
-            .and_then(|c| c.as_text().map(str::to_string))
-            .unwrap_or_default();
+        let assistant_text = normalized.content.clone().unwrap_or_default();
         hooks
             .run(
                 HookStage::PostCompletion,
@@ -764,18 +957,20 @@ pub async fn complete_with_tools(
                     assistant_text,
                     &request_id,
                     api_calls,
-                    &options.model,
+                    &model_used,
                 ),
             )
             .await?;
 
-        if let Some(tcs) = &msg.tool_calls
-            && !tcs.is_empty()
-        {
+        if !normalized.tool_calls.is_empty() {
             messages.push(msg.clone());
 
             // Run tool handlers concurrently on this process (order of `tool` messages follows `tool_calls`).
-            let function_tcs: Vec<_> = tcs.iter().filter(|tc| tc.kind == "function").collect();
+            let function_tcs: Vec<_> = normalized
+                .tool_calls
+                .iter()
+                .filter(|tc| tc.kind == "function")
+                .collect();
             tracing::info!(
                 count = function_tcs.len(),
                 request_id = %request_id,
@@ -803,11 +998,8 @@ pub async fn complete_with_tools(
 
         // --- Terminal response: extract content ---
         let usage = usage_proto;
-        let content = msg
-            .content
-            .as_ref()
-            .and_then(|c| c.as_text().map(str::to_string));
-        let finish_reason = choice.finish_reason.clone();
+        let content = normalized.content.clone();
+        let finish_reason = normalized.finish_reason.clone();
 
         // --- Output guardrails: retry loop ---
         if guardrails.output_is_empty().await {
@@ -839,7 +1031,7 @@ pub async fn complete_with_tools(
                     } else {
                         Some(transformed)
                     };
-                    messages.push(terminal_assistant_for_history(msg, &final_content));
+                    messages.push(terminal_assistant_for_history(&msg, &final_content));
                     let client_messages =
                         conversation_messages_for_client(&messages, had_system_prompt);
                     final_outcome = Some(CompletionOutcome {
@@ -872,37 +1064,39 @@ pub async fn complete_with_tools(
                             )));
                         }
                         api_calls += 1;
-                        let retry_req = ChatCompletionRequest::new(
-                            options.model.clone(),
-                            messages.clone(),
-                            None,
-                        );
-                        let body = serde_json::to_value(&retry_req)?;
-                        let (val, retry_model) = post_json_with_model_fallback(
+                        let credentials = credentials_for(options);
+                        let (val, model_ref) = provider_chat_post(
                             http,
-                            &url,
-                            &body,
-                            &headers,
+                            &credentials,
+                            &messages,
+                            None,
                             options,
                             &request_id,
                             api_calls,
+                            false,
                         )
                         .await?;
-                        model_used = retry_model;
-                        let resp: crate::openai::ChatCompletionResponse =
-                            serde_json::from_value(val)?;
-                        let retry_choice = resp.choices.first().ok_or(ChatError::NoChoice)?;
-                        let retry_text = retry_choice
-                            .message
-                            .content
-                            .as_ref()
-                            .and_then(|c| c.as_text().map(str::to_string))
-                            .unwrap_or_default();
+                        model_used = model_ref.raw.clone();
+                        let provider = crate::providers::resolve_provider(&model_ref);
+                        let normalized = provider
+                            .parse_chat_response(&val)
+                            .map_err(|e| {
+                                ChatError::Http(HttpError::InvalidJson(e.to_string()))
+                            })?;
+                        let retry_text = normalized.content.clone().unwrap_or_default();
                         let (out2, gn2) = guardrails.run_output(&retry_text).await;
                         match out2 {
                             GuardrailOutcome::Allow(t) => {
+                                let retry_msg = ChatMessage {
+                                    role: "assistant".to_string(),
+                                    content: Some(MessageContent::Text(retry_text.clone())),
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                    name: None,
+                                    refusal: None,
+                                };
                                 messages.push(terminal_assistant_for_history(
-                                    &retry_choice.message,
+                                    &retry_msg,
                                     &Some(t.clone()),
                                 ));
                                 let client_messages =
@@ -1018,11 +1212,6 @@ where
         "stream_complete started"
     );
 
-    let url = join_base_url(&options.base_url, "/v1/chat/completions");
-    let auth = format!("Bearer {}", options.api_key.expose_secret());
-    let headers = [("Authorization", auth.as_str())];
-
-    // Prepend system prompt if configured.
     let mut full_messages: Vec<ChatMessage> = Vec::with_capacity(messages.len() + 1);
     if let Some(sp) = &options.system_prompt {
         full_messages.push(ChatMessage::text("system", sp));
@@ -1080,35 +1269,33 @@ where
         }
     }
 
-    let mut req = ChatCompletionRequest::new(options.model.clone(), full_messages, None);
-    req.stream = Some(true);
-    req.stream_options = Some(crate::openai::StreamOptions {
-        include_usage: Some(true),
-        include_obfuscation: None,
-    });
-    req.temperature = options.temperature;
-    req.top_p = options.top_p;
-    req.n = options.n;
-    req.max_completion_tokens = options.max_completion_tokens;
-    req.presence_penalty = options.presence_penalty;
-    req.frequency_penalty = options.frequency_penalty;
-    req.stop = options.stop.clone();
-    req.response_format = options.response_format.clone();
-    req.logprobs = options.logprobs;
-    req.top_logprobs = options.top_logprobs;
-    req.seed = options.seed;
-    req.store = options.store;
-    req.service_tier = options.service_tier.clone();
-    req.reasoning_effort = normalized_reasoning(options);
+    let credentials = credentials_for(options);
+    let model_ref = crate::providers::parse_model_ref(&options.model);
+    let provider = crate::providers::resolve_provider(&model_ref);
+    let ctx = crate::providers::ProviderRequestContext {
+        model_ref: &model_ref,
+        credentials: &credentials,
+        messages: &full_messages,
+        tools: None,
+        stream: true,
+        options,
+    };
+    let provider_req = provider.build_chat_request(&ctx);
+    let header_refs: Vec<(&str, &str)> = provider_req
+        .headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
-    let mut body = serde_json::to_value(&req)?;
-    if let Some(extra) = &options.extra_json {
-        merge_extra_json(&mut body, extra);
-    }
-    tracing::debug!(%url, "stream_complete POST (SSE)");
+    tracing::debug!(%provider_req.url, "stream_complete POST (SSE)");
 
     let mut byte_stream = http
-        .post_json_stream_with_headers(&url, &body, &headers)
+        .post_json_stream_with_headers(
+            &provider_req.url,
+            &provider_req.body,
+            &header_refs,
+            Some(provider_req.rate_limit_key),
+        )
         .await?;
     tracing::debug!("stream_complete connection established, reading SSE chunks");
 
@@ -1222,4 +1409,332 @@ where
     );
 
     Ok(outcome)
+}
+
+/// Outcome of a streaming completion with tool rounds.
+#[derive(Debug, Clone)]
+pub struct StreamToolOutcome {
+    pub content: String,
+    pub finish_reason: Option<String>,
+    pub usage: Option<proto::Usage>,
+    pub request_id: String,
+    pub rounds: u32,
+    pub model_used: String,
+    pub messages: Vec<ChatMessage>,
+}
+
+/// Stream a chat completion with multi-round tool execution (SSE).
+///
+/// Text deltas are forwarded to `on_delta`. Tool rounds mirror [`complete_with_tools`].
+#[instrument(
+    skip(http, registry, hooks, guardrails, caller_messages, options, on_delta),
+    fields(model = %options.model)
+)]
+pub async fn stream_complete_with_tools<F>(
+    http: &HttpClient,
+    registry: &ToolRegistry,
+    hooks: &HookRegistry,
+    guardrails: &GuardrailRegistry,
+    caller_messages: Vec<ChatMessage>,
+    options: &ChatOptions,
+    mut on_delta: F,
+) -> Result<StreamToolOutcome, ChatError>
+where
+    F: FnMut(String) + Send,
+{
+    let start = Instant::now();
+    let request_id = options
+        .request_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    tracing::info!(
+        request_id = %request_id,
+        model = %options.model,
+        "stream_complete_with_tools started"
+    );
+
+    let credentials = credentials_for(options);
+
+    let mut messages: Vec<ChatMessage> = Vec::with_capacity(caller_messages.len() + 1);
+    if let Some(sp) = &options.system_prompt {
+        messages.push(ChatMessage::text("system", sp));
+    }
+    messages.extend(caller_messages);
+    let had_system_prompt = options.system_prompt.is_some();
+
+    if !guardrails.input_is_empty().await {
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .and_then(|m| m.content.as_ref())
+            .and_then(|c| c.as_text().map(str::to_string))
+            .unwrap_or_default();
+        let (outcome, guard_name) = guardrails.run_input(&last_user).await;
+        match outcome {
+            GuardrailOutcome::Allow(transformed) => {
+                if transformed != last_user {
+                    if let Some(msg) = messages.iter_mut().rev().find(|m| m.role == "user") {
+                        msg.content = Some(MessageContent::Text(transformed));
+                    }
+                }
+            }
+            GuardrailOutcome::Block(reason) => {
+                return Err(ChatError::Guardrail(GuardrailError::new(
+                    GuardrailStage::Input,
+                    guard_name,
+                    reason,
+                )));
+            }
+        }
+    }
+
+    let mut api_calls: u32 = 0;
+    let mut model_used = options.model.clone();
+
+    loop {
+        if api_calls >= options.max_tool_rounds {
+            return Err(ChatError::MaxToolRounds(options.max_tool_rounds));
+        }
+        api_calls += 1;
+
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .and_then(|m| m.content.as_ref())
+            .and_then(|c| c.as_text().map(str::to_string))
+            .unwrap_or_default();
+        hooks
+            .run(
+                HookStage::PreCompletion,
+                observation_hook_ctx(
+                    HookStage::PreCompletion,
+                    last_user,
+                    &request_id,
+                    api_calls,
+                    &options.model,
+                ),
+            )
+            .await?;
+
+        emit_safe(
+            options.status_emitter.as_ref(),
+            {
+                let mut ev = ProcessEvent::new(
+                    ProcessEventKind::LlmCallStart,
+                    &request_id,
+                    &options.model,
+                );
+                ev.round = api_calls;
+                ev
+            },
+        )
+        .await;
+
+        let specs = registry.list_specs().await;
+        let tool_specs = if specs.is_empty() {
+            None
+        } else {
+            Some(specs.as_slice())
+        };
+
+        let (mut byte_stream, model_ref) = provider_chat_stream(
+            http,
+            &credentials,
+            &messages,
+            tool_specs,
+            options,
+            &request_id,
+            api_calls,
+        )
+        .await?;
+        model_used = model_ref.raw.clone();
+        let is_anthropic = model_ref.provider == crate::providers::ProviderId::Anthropic;
+
+        let mut parser = SseParser::new();
+        let mut round_content = String::new();
+        let mut tool_accumulator = stream_tools::ToolCallAccumulator::new();
+        let mut anthropic_acc =
+            crate::providers::anthropic_stream::AnthropicStreamAccumulator::new();
+        let mut round_finish: Option<String> = None;
+        let mut round_usage: Option<proto::Usage> = None;
+
+        while let Some(chunk) = byte_stream.next().await {
+            if let Some(token) = &options.cancel
+                && token.is_cancelled()
+            {
+                return Err(ChatError::Cancelled);
+            }
+            let bytes = chunk?;
+            let text = String::from_utf8_lossy(&bytes);
+            let events = parser
+                .push_str(&text)
+                .map_err(|e| ChatError::Http(HttpError::InvalidJson(e.to_string())))?;
+
+            for event in events {
+                let data = event.data.trim();
+                if data == "[DONE]" {
+                    break;
+                }
+                if is_anthropic {
+                    if let Some(delta) = anthropic_acc.apply_sse_data(data).map_err(ChatError::Serde)?
+                        && !delta.is_empty()
+                    {
+                        round_content.push_str(&delta);
+                        on_delta(delta);
+                    }
+                } else {
+                    let chunk: ChatCompletionChunk = serde_json::from_str(data)?;
+                    let prev_len = round_content.len();
+                    stream_tools::apply_openai_chunk(
+                        &chunk,
+                        &mut round_content,
+                        &mut tool_accumulator,
+                        &mut round_finish,
+                        &mut round_usage,
+                    );
+                    if round_content.len() > prev_len {
+                        on_delta(round_content[prev_len..].to_string());
+                    }
+                }
+            }
+        }
+
+        let round = if is_anthropic {
+            anthropic_acc.into_round_outcome()
+        } else {
+            let tool_calls = tool_accumulator.finish();
+            crate::providers::StreamRoundOutcome {
+                content: round_content,
+                tool_calls,
+                finish_reason: round_finish,
+                usage: round_usage,
+            }
+        };
+
+        let tool_call_count = round
+            .tool_calls
+            .iter()
+            .filter(|tc| tc.kind == "function")
+            .count() as u32;
+        emit_safe(
+            options.status_emitter.as_ref(),
+            {
+                let mut ev = ProcessEvent::new(
+                    ProcessEventKind::LlmCallEnd,
+                    &request_id,
+                    &model_used,
+                );
+                ev.round = api_calls;
+                ev.tool_call_count = tool_call_count;
+                ev.usage = round.usage.clone();
+                ev.estimated_cost_usd = round
+                    .usage
+                    .as_ref()
+                    .map(|u| estimate_model_call_cost_usd(&model_used, u));
+                ev
+            },
+        )
+        .await;
+
+        hooks
+            .run(
+                HookStage::PostCompletion,
+                observation_hook_ctx(
+                    HookStage::PostCompletion,
+                    round.content.clone(),
+                    &request_id,
+                    api_calls,
+                    &model_used,
+                ),
+            )
+            .await?;
+
+        let msg = ChatMessage {
+            role: "assistant".to_string(),
+            content: if round.content.is_empty() {
+                None
+            } else {
+                Some(MessageContent::Text(round.content.clone()))
+            },
+            tool_calls: if round.tool_calls.is_empty() {
+                None
+            } else {
+                Some(round.tool_calls.clone())
+            },
+            tool_call_id: None,
+            name: None,
+            refusal: None,
+        };
+
+        if !round.tool_calls.is_empty() {
+            messages.push(msg.clone());
+            let function_tcs: Vec<_> = round
+                .tool_calls
+                .iter()
+                .filter(|tc| tc.kind == "function")
+                .collect();
+            let results = futures_util::future::join_all(
+                function_tcs.iter().map(|tc| {
+                    dispatch_one(
+                        tc,
+                        hooks,
+                        registry,
+                        options.status_emitter.as_ref(),
+                        &request_id,
+                        api_calls,
+                        &options.model,
+                    )
+                }),
+            )
+            .await;
+            for r in results {
+                messages.push(r?);
+            }
+            continue;
+        }
+
+        let mut final_content = round.content;
+        let final_finish = round.finish_reason;
+        let final_usage = round.usage;
+        messages.push(msg.clone());
+
+        if !guardrails.output_is_empty().await {
+            let (out_outcome, guard_name) = guardrails.run_output(&final_content).await;
+            match out_outcome {
+                GuardrailOutcome::Allow(transformed) => {
+                    final_content = transformed;
+                }
+                GuardrailOutcome::Block(reason) => {
+                    return Err(ChatError::Guardrail(GuardrailError::new(
+                        GuardrailStage::Output,
+                        guard_name,
+                        reason,
+                    )));
+                }
+            }
+        }
+
+        let client_messages = conversation_messages_for_client(&messages, had_system_prompt);
+        let outcome = StreamToolOutcome {
+            content: final_content,
+            finish_reason: final_finish,
+            usage: final_usage,
+            request_id: request_id.clone(),
+            rounds: api_calls,
+            model_used,
+            messages: client_messages,
+        };
+
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        tracing::info!(
+            request_id = %outcome.request_id,
+            model = %outcome.model_used,
+            rounds = outcome.rounds,
+            elapsed_ms,
+            "stream_complete_with_tools finished"
+        );
+        return Ok(outcome);
+    }
 }

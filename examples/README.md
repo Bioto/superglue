@@ -46,6 +46,9 @@ Set `OPENAI_BASE_URL` for Ollama or other OpenAI-compatible hosts (`08_custom_ba
 | 26 | stream_response (Responses API) | `26_stream_response` |
 | 27 | response threading + tools | `27_response_threading` |
 | 28 | MCP tools (optional `MCP_RUN=1`) | `28_mcp_tools` |
+| 29 | multi-provider `provider:model` | `29_multi_provider` |
+| 30 | streaming with tool rounds | `30_streaming_tools` |
+| 31 | file upload / inline attachment | `31_file_upload` |
 | demo | quick demo | `demo` |
 
 Run with: `cargo run --example <name>` (no `.rs` suffix).

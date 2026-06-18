@@ -47,7 +47,7 @@ async fn post_retries_429() {
     cfg.retry = fast_retry(2);
     let http = HttpClient::new(cfg).unwrap();
     let result = http
-        .post_json_with_headers(&server.uri(), &json!({}), &[])
+        .post_json_with_headers(&server.uri(), &json!({}), &[], None)
         .await;
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(count.load(Ordering::SeqCst), 2);
@@ -75,7 +75,7 @@ async fn post_retries_502() {
     cfg.retry = fast_retry(2);
     let http = HttpClient::new(cfg).unwrap();
     assert!(
-        http.post_json_with_headers(&server.uri(), &json!({}), &[])
+        http.post_json_with_headers(&server.uri(), &json!({}), &[], None)
             .await
             .is_ok()
     );
@@ -104,7 +104,7 @@ async fn post_retries_503() {
     cfg.retry = fast_retry(3);
     let http = HttpClient::new(cfg).unwrap();
     assert!(
-        http.post_json_with_headers(&server.uri(), &json!({}), &[])
+        http.post_json_with_headers(&server.uri(), &json!({}), &[], None)
             .await
             .is_ok()
     );
@@ -133,7 +133,7 @@ async fn post_retries_504() {
     cfg.retry = fast_retry(2);
     let http = HttpClient::new(cfg).unwrap();
     assert!(
-        http.post_json_with_headers(&server.uri(), &json!({}), &[])
+        http.post_json_with_headers(&server.uri(), &json!({}), &[], None)
             .await
             .is_ok()
     );
@@ -162,7 +162,7 @@ async fn post_does_not_retry_400() {
     cfg.retry = fast_retry(3);
     let http = HttpClient::new(cfg).unwrap();
     let err = http
-        .post_json_with_headers(&server.uri(), &json!({}), &[])
+        .post_json_with_headers(&server.uri(), &json!({}), &[], None)
         .await
         .unwrap_err();
     // Should fail immediately with 400, not retry
@@ -187,7 +187,7 @@ async fn post_does_not_retry_401() {
     let mut cfg = ClientConfig::default();
     cfg.retry = fast_retry(3);
     let http = HttpClient::new(cfg).unwrap();
-    http.post_json_with_headers(&server.uri(), &json!({}), &[])
+    http.post_json_with_headers(&server.uri(), &json!({}), &[], None)
         .await
         .unwrap_err();
     assert_eq!(count.load(Ordering::SeqCst), 1, "should not retry 401");
@@ -210,7 +210,7 @@ async fn post_does_not_retry_403() {
     let mut cfg = ClientConfig::default();
     cfg.retry = fast_retry(3);
     let http = HttpClient::new(cfg).unwrap();
-    http.post_json_with_headers(&server.uri(), &json!({}), &[])
+    http.post_json_with_headers(&server.uri(), &json!({}), &[], None)
         .await
         .unwrap_err();
     assert_eq!(count.load(Ordering::SeqCst), 1, "should not retry 403");
@@ -235,7 +235,7 @@ async fn post_does_not_retry_500() {
     let mut cfg = ClientConfig::default();
     cfg.retry = fast_retry(3);
     let http = HttpClient::new(cfg).unwrap();
-    http.post_json_with_headers(&server.uri(), &json!({}), &[])
+    http.post_json_with_headers(&server.uri(), &json!({}), &[], None)
         .await
         .unwrap_err();
     assert_eq!(count.load(Ordering::SeqCst), 1, "should not retry 500");
@@ -263,7 +263,7 @@ async fn post_exhausts_retries_on_persistent_429() {
     cfg.retry = fast_retry(3);
     let http = HttpClient::new(cfg).unwrap();
     let err = http
-        .post_json_with_headers(&server.uri(), &json!({}), &[])
+        .post_json_with_headers(&server.uri(), &json!({}), &[], None)
         .await
         .unwrap_err();
     // 1 original attempt + 3 retries = 4 total
@@ -292,7 +292,7 @@ async fn post_exhausts_retries_on_persistent_503() {
     let mut cfg = ClientConfig::default();
     cfg.retry = fast_retry(2);
     let http = HttpClient::new(cfg).unwrap();
-    http.post_json_with_headers(&server.uri(), &json!({}), &[])
+    http.post_json_with_headers(&server.uri(), &json!({}), &[], None)
         .await
         .unwrap_err();
     assert_eq!(count.load(Ordering::SeqCst), 3); // 1 + 2 retries
@@ -313,7 +313,7 @@ async fn post_returns_json_body_on_200() {
 
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let val = http
-        .post_json_with_headers(&server.uri(), &json!({"q": "?"}), &[])
+        .post_json_with_headers(&server.uri(), &json!({"q": "?"}), &[], None)
         .await
         .unwrap();
     assert_eq!(val["answer"], 42);
@@ -330,7 +330,7 @@ async fn post_returns_error_on_non_json_200() {
 
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let err = http
-        .post_json_with_headers(&server.uri(), &json!({}), &[])
+        .post_json_with_headers(&server.uri(), &json!({}), &[], None)
         .await
         .unwrap_err();
     assert!(
@@ -357,7 +357,7 @@ async fn post_sends_custom_headers() {
 
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let result = http
-        .post_json_with_headers(&server.uri(), &json!({}), &[("X-Custom-Key", "secret")])
+        .post_json_with_headers(&server.uri(), &json!({}), &[("X-Custom-Key", "secret")], None)
         .await;
     assert!(result.is_ok(), "custom header not forwarded: {result:?}");
 }

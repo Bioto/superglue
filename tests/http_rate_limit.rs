@@ -66,7 +66,7 @@ async fn rate_limiter_post_caps_throughput() {
     let url = server.uri();
     let start = Instant::now();
     for _ in 0..3 {
-        http.post_json_with_headers(&url, &json!({}), &[])
+        http.post_json_with_headers(&url, &json!({}), &[], None)
             .await
             .unwrap();
     }
