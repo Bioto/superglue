@@ -1,0 +1,34 @@
+---
+description: superglue-kt — JNI Android library; primary consumer Butler
+alwaysApply: true
+---
+
+# superglue-kt
+
+Rust JNI + Android library at `projects/superglue-kt/`. Primary consumer: [`projects/butler`](../butler).
+
+## API contract
+
+Follow [`superglue-js/index.d.ts`](../superglue-js/index.d.ts) — Kotlin/Java surface mirrors Node binding semantics.
+
+## Build
+
+- Rust: `native/` crate built with **cargo-ndk**
+- Gradle: `buildRustJni` on `preBuild` when `ANDROID_NDK_HOME` is set
+- ABIs: arm64-v8a, x86_64 (emulator)
+
+## SDK levels
+
+- Library **minSdk 24** — do not conflate with Butler's **API 36+** app requirement.
+
+## Host tests
+
+- JNI `.so` may be missing on JVM unit tests — probe via `SuperglueBridge` / version API; degrade gracefully.
+
+## Examples
+
+- Numbered examples mirror `superglue-js` and `superglue-py` topics (`examples/README.md`).
+
+## Gradle integration
+
+Butler includes `:superglue-android` via `settings.gradle.kts` — path changes in monorepo layout must update both repos.

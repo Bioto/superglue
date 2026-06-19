@@ -1,0 +1,22 @@
+[package]
+name = "superglue_py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Python bindings for superglue (experimental)"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(Py_GIL_DISABLED)'] }
+
+[lib]
+name = "superglue_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+async-trait = "0.1"
+prost = "0.13"
+pyo3 = { version = "0.28", features = ["extension-module"] }
+secrecy = "0.8"
+serde_json = "1"
+superglue = { path = "..", features = ["mcp"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

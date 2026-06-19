@@ -1,0 +1,31 @@
+name: superglue
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --features mcp
+
+  superglue-js:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: superglue-js
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: superglue-js/package-lock.json
+      - run: npm ci
+      - run: npm run build:native:debug
+      - run: npm run build:ts

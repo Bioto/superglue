@@ -1,0 +1,31 @@
+---
+description: superglue-kt JNI and Android module conventions
+globs: "**/*.{kt,java,rs}"
+alwaysApply: false
+---
+
+# superglue-kt JNI conventions
+
+## JNI boundary
+
+- Keep JNI methods thin — marshal JSON/strings across boundary; logic stays in Rust `native/`.
+- Match error mapping documented in superglue-js types.
+
+## Kotlin/Java module
+
+- Public entry: `com.superglue.kt` package.
+- Butler uses `com.butler.data.ai.SuperglueBridge` for safe probes when native lib absent.
+
+## Rust native crate
+
+- Build with NDK toolchain; do not assume host `cargo build` produces Android artifacts.
+- After Rust API changes: rebuild JNI + reinstall on device/emulator.
+
+## Testing without device
+
+- JVM tests must pass when `.so` is missing (feature detection, not crash).
+- Instrumented tests on emulator for full JNI path.
+
+## Parity
+
+Binding changes require cross-check with `superglue-js/index.d.ts` and py examples.
