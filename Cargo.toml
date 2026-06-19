@@ -1,24 +1,3 @@
-# Superglue monorepo: core + bindings share one version and develop in lockstep.
-# Bump `[workspace.package].version` here only; run `scripts/sync-superglue-versions.sh`.
-
-[workspace]
-resolver = "2"
-members = [
-    ".",
-    "superglue-js",
-    "superglue-py",
-    "superglue-kt/native",
-]
-
-[workspace.package]
-version = "0.1.0"
-edition = "2024"
-license = "MIT"
-
-[profile.release]
-lto = true
-strip = true
-
 [package]
 name = "superglue"
 version.workspace = true
