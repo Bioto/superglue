@@ -2,7 +2,6 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
 use serde_json::Value;
 
 use crate::openai::{FunctionCall, ToolCall};

@@ -17,17 +17,15 @@ use tracing::instrument;
 
 use std::time::Instant;
 
-use reasoning::normalize_reasoning_effort_str;
-
 use crate::cancel::CancellationToken;
 use crate::costing::estimate_model_call_cost_usd;
 use crate::events::{emit_safe, ProcessEvent, ProcessEventKind, StatusEmitter};
 use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookContext, HookError, HookRegistry, HookStage};
-use crate::http::{Error as HttpError, HttpClient, join_base_url, sse::SseParser};
+use crate::http::{Error as HttpError, HttpClient, sse::SseParser};
 use crate::openai::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatMessage, ChatTool, MessageContent,
-    ResponseFormat, StopSequence, ToolCall, ToolChoice,
+    ChatCompletionChunk, ChatMessage, MessageContent, ResponseFormat, StopSequence, ToolCall,
+    ToolChoice,
 };
 use crate::proto;
 use crate::tools::{OnToolError, ToolInvokeError, ToolRegistry, ToolRetryPolicy};
@@ -571,21 +569,6 @@ pub(crate) fn observation_hook_ctx(
     ctx
 }
 
-fn merge_extra_json(body: &mut Value, extra: &Value) {
-    if let (Value::Object(body_map), Value::Object(extra_map)) = (body, extra) {
-        for (k, v) in extra_map {
-            body_map.insert(k.clone(), v.clone());
-        }
-    }
-}
-
-fn normalized_reasoning(options: &ChatOptions) -> Option<String> {
-    options
-        .reasoning_effort
-        .as_ref()
-        .and_then(|e| normalize_reasoning_effort_str(&options.model, e))
-}
-
 fn http_error_type(err: &ChatError) -> String {
     match err {
         ChatError::Http(e) => format!("http:{e}"),
@@ -811,7 +794,7 @@ pub async fn complete_with_tools(
     }
 
     let mut api_calls: u32 = 0;
-    let mut model_used = options.model.clone();
+    let mut model_used;
 
     let outcome = loop {
         if api_calls >= options.max_tool_rounds {
@@ -1490,7 +1473,7 @@ where
     }
 
     let mut api_calls: u32 = 0;
-    let mut model_used = options.model.clone();
+    let mut model_used;
 
     loop {
         if api_calls >= options.max_tool_rounds {

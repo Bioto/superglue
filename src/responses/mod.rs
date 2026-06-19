@@ -302,7 +302,7 @@ pub async fn complete_with_tools(
     };
 
     let mut api_calls = 0u32;
-    let mut model_used = options.model.clone();
+    let mut model_used;
     let mut previous_response_id: Option<String> = None;
     let mut tool_input: Option<Vec<ResponseInputItem>> = None;
 

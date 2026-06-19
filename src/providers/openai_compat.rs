@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::chat::reasoning::normalize_reasoning_effort_str;
 use crate::http::join_base_url;
-use crate::openai::{ChatCompletionRequest, ChatMessage, ChatTool, StreamOptions};
+use crate::openai::{ChatCompletionRequest, ChatTool, StreamOptions};
 
 use super::adapter::{
     LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest,

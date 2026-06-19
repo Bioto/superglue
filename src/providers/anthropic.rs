@@ -1,7 +1,7 @@
 //! Anthropic Messages API adapter.
 
 use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::http::join_base_url;

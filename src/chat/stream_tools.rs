@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use crate::openai::{
     ChatCompletionChunk, FunctionCall, StreamToolCallDelta, ToolCall,
 };
-use crate::providers::StreamRoundOutcome;
 
 /// Accumulates OpenAI-compat `tool_calls` deltas by stable `index`.
 #[derive(Debug, Default)]
@@ -48,11 +47,6 @@ impl ToolCallAccumulator {
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.by_index.is_empty()
-    }
-
-    #[must_use]
     pub fn finish(&self) -> Vec<ToolCall> {
         self.by_index
             .values()
@@ -71,9 +65,6 @@ impl ToolCallAccumulator {
             .collect()
     }
 }
-
-/// Result of streaming one LLM round (before tool dispatch).
-pub type StreamRoundResult = StreamRoundOutcome;
 
 /// Apply one OpenAI-compat chat completion chunk to accumulators.
 pub fn apply_openai_chunk(

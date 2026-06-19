@@ -6,7 +6,7 @@ use crate::openai::{ChatMessage, ToolCall};
 use crate::proto;
 use crate::tools::ToolSpec;
 
-use super::credentials::{ApiKeyId, ProviderCredentials};
+use super::credentials::ProviderCredentials;
 use super::model_ref::ModelRef;
 use super::provider_id::ProviderId;
 use super::rate_limit::RateLimitKey;

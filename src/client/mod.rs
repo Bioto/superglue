@@ -5,12 +5,11 @@
 mod bootstrap;
 
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 
-use secrecy::Secret;
 use std::time::Duration;
 use thiserror::Error;
+#[cfg(feature = "mcp")]
 use tokio::sync::Mutex;
 
 use crate::agents::{AgentEngine, AgentSpec};
@@ -30,7 +29,7 @@ use crate::guardrails::{
     GuardrailStage, LengthStrategy, MaxLengthGuardrail, PiiRedactGuardrail,
 };
 use crate::hooks::{HookConfig, HookRegistry, HookStage};
-use crate::http::{ClientConfig, Error as HttpError, HttpClient, RetryPolicy};
+use crate::http::{Error as HttpError, HttpClient};
 use crate::openai::ChatMessage;
 use crate::tools::{Tool, ToolRegistry};
 
