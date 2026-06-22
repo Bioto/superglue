@@ -730,6 +730,16 @@ impl Client {
         Ok(())
     }
 
+    #[napi(js_name = "toolsRegistryPtr")]
+    pub fn tools_registry_ptr(&self) -> i64 {
+        Arc::as_ptr(&self.inner.registry) as i64
+    }
+
+    #[napi(js_name = "hooksRegistryPtr")]
+    pub fn hooks_registry_ptr(&self) -> i64 {
+        Arc::as_ptr(&self.inner.hooks) as i64
+    }
+
     #[napi]
     pub async fn register_guardrail(
         &self,

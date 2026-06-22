@@ -216,4 +216,8 @@ public final class SuperglueNativeJni {
         long connectTimeoutSecs,
         String requestId
     );
+
+    public static native long clientToolsRegistryPtr(long handle);
+
+    public static native long clientHooksRegistryPtr(long handle);
 }

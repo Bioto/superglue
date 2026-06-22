@@ -30,6 +30,8 @@ export declare class Client {
   /** Register a tool: `callback` receives JSON args and returns a JSON object (or Promise of). */
   registerTool(name: string, description: string, parameters: any, callback: JsonCallback): Promise<void>
   registerHook(stage: string, handler: JsonCallback, name?: string | undefined, errorStrategy?: string | undefined | null): Promise<void>
+  toolsRegistryPtr(): number
+  hooksRegistryPtr(): number
   registerGuardrail(handler: GuardrailCallback, stage?: string | undefined | null, name?: string | undefined | null): Promise<void>
   addBlocklistGuardrail(patterns: Array<string>, action?: string | undefined | null, stage?: string | undefined | null, name?: string | undefined | null): Promise<void>
   addMaxLengthGuardrail(maxInput?: number | undefined | null, maxOutput?: number | undefined | null, strategy?: string | undefined | null, name?: string | undefined | null): Promise<void>

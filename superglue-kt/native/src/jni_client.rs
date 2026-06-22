@@ -1301,3 +1301,35 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientMes
     };
     jstr_from_str(&mut env, &json)
 }
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientToolsRegistryPtr(
+    mut env: JNIEnv,
+    _cl: JClass,
+    handle: jlong,
+) -> jlong {
+    let state = match get_client(handle as u64) {
+        Ok(s) => s,
+        Err(e) => {
+            jthrow(&mut env, &e);
+            return 0;
+        }
+    };
+    Arc::as_ptr(&state.registry) as jlong
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientHooksRegistryPtr(
+    mut env: JNIEnv,
+    _cl: JClass,
+    handle: jlong,
+) -> jlong {
+    let state = match get_client(handle as u64) {
+        Ok(s) => s,
+        Err(e) => {
+            jthrow(&mut env, &e);
+            return 0;
+        }
+    };
+    Arc::as_ptr(&state.hooks) as jlong
+}

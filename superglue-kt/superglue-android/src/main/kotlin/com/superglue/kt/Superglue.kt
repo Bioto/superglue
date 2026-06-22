@@ -520,6 +520,12 @@ public class SuperglueClient
             SuperglueNativeJni.clientRegisterHook(handle, stage, name, errorStrategy, callback)
         }
 
+        public fun toolsRegistryPtr(): Long =
+            SuperglueNativeJni.clientToolsRegistryPtr(handle)
+
+        public fun hooksRegistryPtr(): Long =
+            SuperglueNativeJni.clientHooksRegistryPtr(handle)
+
         public fun registerGuardrail(
             callback: GuardrailCallback,
             stage: String = GuardSide.BOTH,

@@ -961,6 +961,16 @@ impl PyClient {
         Ok(())
     }
 
+    /// Opaque pointer to the internal tool registry (for extension modules).
+    fn tools_registry_ptr(&self) -> u64 {
+        Arc::as_ptr(&self.registry) as u64
+    }
+
+    /// Opaque pointer to the internal hook registry (for extension modules).
+    fn hooks_registry_ptr(&self) -> u64 {
+        Arc::as_ptr(&self.hooks) as u64
+    }
+
     // ------------------------------------------------------------------
     // Guardrail registration
     // ------------------------------------------------------------------
