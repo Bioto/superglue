@@ -32,6 +32,9 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+group = "com.superglue.kt"
+version = "0.1.0"
+
 android {
     namespace = "com.superglue.kt"
     compileSdk = 36

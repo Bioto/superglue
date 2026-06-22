@@ -15,7 +15,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Runnable examples mirroring `superglue-py/examples/22–24`.
+ * Runnable examples mirroring `superglue-py/examples/22–31`.
  * Set `OPENAI_API_KEY` in the environment to run live sections.
  */
 class FeatureExamplesTest {
@@ -106,6 +106,26 @@ class FeatureExamplesTest {
                 ),
             )
         val result = client.complete("Say 'pool ok' in two words.")
+        assertTrue(result.content?.isNotEmpty() == true)
+        client.close()
+    }
+
+    @Test
+    fun example25_model_fallback() {
+        if (apiKey.isEmpty()) {
+            println("Set OPENAI_API_KEY to run example 25 live.")
+            return
+        }
+        val backup = System.getenv("OPENAI_FALLBACK_MODEL") ?: model
+        val client =
+            SuperglueClient.open(
+                ClientConfig(
+                    apiKey = apiKey,
+                    model = model,
+                    modelFallbackModels = listOf(model, backup),
+                ),
+            )
+        val result = client.complete("Reply with exactly: fallback ok")
         assertTrue(result.content?.isNotEmpty() == true)
         client.close()
     }

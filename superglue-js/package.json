@@ -36,6 +36,7 @@
     "build:native": "napi build --platform --release",
     "build:native:debug": "napi build --platform",
     "build:ts": "tsc -p tsconfig.json",
+    "test": "npm run build:native:debug && node test/run.mjs",
     "artifacts": "napi artifacts",
     "prepublishOnly": "napi prepublish -t npm",
     "version": "napi version"
