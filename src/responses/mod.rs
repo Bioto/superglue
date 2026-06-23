@@ -167,7 +167,10 @@ fn reasoning_from_options(options: &ChatOptions) -> Option<ResponseReasoning> {
         .as_ref()
         .map(|effort| ResponseReasoning {
             effort: effort.clone(),
-            summary: Some("auto".into()),
+            summary: options
+                .reasoning_summary
+                .api_value()
+                .map(str::to_string),
         })
 }
 

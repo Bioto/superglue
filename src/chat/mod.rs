@@ -83,6 +83,8 @@ pub struct ChatOptions {
 
     // --- Reasoning models (o1/o3/o4) ---
     pub reasoning_effort: Option<String>,
+    /// Responses API reasoning summary verbosity (`detailed` by default).
+    pub reasoning_summary: reasoning::ReasoningSummaryLevel,
 
     /// JSON object merged into the chat completion request body after typed fields.
     pub extra_json: Option<Value>,
@@ -132,6 +134,7 @@ impl Default for ChatOptions {
             store: None,
             service_tier: None,
             reasoning_effort: None,
+            reasoning_summary: reasoning::ReasoningSummaryLevel::default(),
             extra_json: None,
             status_emitter: None,
             request_id: None,
@@ -194,6 +197,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             store: p.store,
             service_tier: p.service_tier,
             reasoning_effort: p.reasoning_effort,
+            reasoning_summary: reasoning::ReasoningSummaryLevel::default(),
             extra_json: p
                 .extra_json
                 .as_ref()

@@ -1,5 +1,40 @@
 //! Model-aware normalization of OpenAI `reasoning_effort` values.
 
+use serde::{Deserialize, Serialize};
+
+/// OpenAI Responses API reasoning summary verbosity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningSummaryLevel {
+    #[default]
+    Detailed,
+    Auto,
+    Off,
+}
+
+impl ReasoningSummaryLevel {
+    /// Parse config/env values (`detailed`, `auto`, `off` / `none`).
+    #[must_use]
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "detailed" => Some(Self::Detailed),
+            "auto" => Some(Self::Auto),
+            "off" | "none" | "false" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// Value for Responses `reasoning.summary`, or `None` to omit summaries.
+    #[must_use]
+    pub fn api_value(self) -> Option<&'static str> {
+        match self {
+            Self::Detailed => Some("detailed"),
+            Self::Auto => Some("auto"),
+            Self::Off => None,
+        }
+    }
+}
+
 /// Supported reasoning effort levels (OpenAI Responses / reasoning models).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReasoningEffort {
@@ -143,5 +178,15 @@ mod tests {
     #[test]
     fn non_reasoning_model_returns_none() {
         assert!(normalize_reasoning_effort("gpt-4o", ReasoningEffort::High).is_none());
+    }
+
+    #[test]
+    fn reasoning_summary_level_api_values() {
+        assert_eq!(
+            ReasoningSummaryLevel::Detailed.api_value(),
+            Some("detailed")
+        );
+        assert_eq!(ReasoningSummaryLevel::Auto.api_value(), Some("auto"));
+        assert_eq!(ReasoningSummaryLevel::Off.api_value(), None);
     }
 }
