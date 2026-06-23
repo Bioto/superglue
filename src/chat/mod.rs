@@ -647,7 +647,7 @@ async fn invoke_with_policy(
 /// Cap tool result/argument payload size in process-event metadata (UI / observability).
 const TOOL_EVENT_METADATA_MAX_CHARS: usize = 16_384;
 
-fn truncate_tool_event_metadata(value: &str) -> String {
+pub(crate) fn truncate_tool_event_metadata(value: &str) -> String {
     if value.chars().count() <= TOOL_EVENT_METADATA_MAX_CHARS {
         return value.to_string();
     }
@@ -677,12 +677,14 @@ pub(crate) async fn dispatch_one(
     request_id: &str,
     round: u32,
     model: &str,
+    emit_start: bool,
 ) -> Result<ChatMessage, ChatError> {
-    if let Some(emitter) = status_emitter {
+    let tool_name = tc.function.name.clone();
+    if emit_start && let Some(emitter) = status_emitter {
         let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
         ev.round = round;
         ev.metadata
-            .insert("tool_name".to_string(), tc.function.name.clone());
+            .insert("tool_name".to_string(), tool_name.clone());
         ev.metadata.insert(
             "arguments".to_string(),
             truncate_tool_event_metadata(tc.function.arguments.trim()),
@@ -690,56 +692,66 @@ pub(crate) async fn dispatch_one(
         emit_safe(Some(emitter), ev).await;
     }
 
-    // --- PreTool hook (mutating) ---
-    let pre_ctx = hooks
-        .run(
-            HookStage::PreTool,
-            HookContext::with_meta(
+    let exec_result: Result<String, ChatError> = async {
+        let pre_ctx = hooks
+            .run(
                 HookStage::PreTool,
-                tc.function.arguments.trim(),
-                "tool_name",
-                tc.function.name.as_str(),
-            ),
-        )
-        .await?;
-    let args: Value = serde_json::from_str(pre_ctx.content.trim())?;
-
-    // Consult per-tool error policy.
-    let policy = registry.policy_for(&tc.function.name).await;
-    let result = invoke_with_policy(registry, &tc.function.name, args, &policy).await?;
-    let result_json = serde_json::to_string(&result)?;
-
-    // --- PostTool hook (mutating) ---
-    let post_ctx = hooks
-        .run(
-            HookStage::PostTool,
-            HookContext::with_meta(
+                HookContext::with_meta(
+                    HookStage::PreTool,
+                    tc.function.arguments.trim(),
+                    "tool_name",
+                    tc.function.name.as_str(),
+                ),
+            )
+            .await?;
+        let args: Value = serde_json::from_str(pre_ctx.content.trim())?;
+        let policy = registry.policy_for(&tc.function.name).await;
+        let result = invoke_with_policy(registry, &tc.function.name, args, &policy).await?;
+        let result_json = serde_json::to_string(&result)?;
+        let post_ctx = hooks
+            .run(
                 HookStage::PostTool,
-                &result_json,
-                "tool_name",
-                tc.function.name.as_str(),
-            ),
-        )
-        .await?;
+                HookContext::with_meta(
+                    HookStage::PostTool,
+                    &result_json,
+                    "tool_name",
+                    tc.function.name.as_str(),
+                ),
+            )
+            .await?;
+        Ok(post_ctx.content)
+    }
+    .await;
 
     if let Some(emitter) = status_emitter {
         let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallEnd, request_id, model);
         ev.round = round;
-        ev.metadata
-            .insert("tool_name".to_string(), tc.function.name.clone());
-        ev.metadata.insert(
-            "result".to_string(),
-            truncate_tool_event_metadata(&post_ctx.content),
-        );
+        ev.metadata.insert("tool_name".to_string(), tool_name.clone());
+        match &exec_result {
+            Ok(content) => {
+                ev.metadata.insert(
+                    "result".to_string(),
+                    truncate_tool_event_metadata(content),
+                );
+            }
+            Err(err) => {
+                ev.error_type = Some(err.to_string());
+                ev.metadata.insert(
+                    "result".to_string(),
+                    truncate_tool_event_metadata(&err.to_string()),
+                );
+            }
+        }
         emit_safe(Some(emitter), ev).await;
     }
 
+    let content = exec_result?;
     Ok(ChatMessage {
         role: "tool".to_string(),
-        content: Some(MessageContent::Text(post_ctx.content)),
+        content: Some(MessageContent::Text(content)),
         tool_calls: None,
         tool_call_id: Some(tc.id.clone()),
-        name: Some(tc.function.name.clone()),
+        name: Some(tool_name),
         refusal: None,
     })
 }
@@ -993,6 +1005,7 @@ pub async fn complete_with_tools(
                         &request_id,
                         api_calls,
                         &options.model,
+                        true,
                     )
                 }),
             )
@@ -1692,6 +1705,7 @@ where
                         &request_id,
                         api_calls,
                         &options.model,
+                        true,
                     )
                 }),
             )
