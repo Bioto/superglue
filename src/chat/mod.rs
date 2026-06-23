@@ -644,6 +644,22 @@ async fn invoke_with_policy(
     }
 }
 
+/// Cap tool result/argument payload size in process-event metadata (UI / observability).
+const TOOL_EVENT_METADATA_MAX_CHARS: usize = 16_384;
+
+fn truncate_tool_event_metadata(value: &str) -> String {
+    if value.chars().count() <= TOOL_EVENT_METADATA_MAX_CHARS {
+        return value.to_string();
+    }
+    format!(
+        "{}…",
+        value
+            .chars()
+            .take(TOOL_EVENT_METADATA_MAX_CHARS)
+            .collect::<String>()
+    )
+}
+
 /// Dispatch a single `"function"` tool call through the full pre/post hook pipeline.
 ///
 /// Returns the [`ChatMessage`] with `role="tool"` that should be appended to the
@@ -667,6 +683,10 @@ pub(crate) async fn dispatch_one(
         ev.round = round;
         ev.metadata
             .insert("tool_name".to_string(), tc.function.name.clone());
+        ev.metadata.insert(
+            "arguments".to_string(),
+            truncate_tool_event_metadata(tc.function.arguments.trim()),
+        );
         emit_safe(Some(emitter), ev).await;
     }
 
@@ -707,6 +727,10 @@ pub(crate) async fn dispatch_one(
         ev.round = round;
         ev.metadata
             .insert("tool_name".to_string(), tc.function.name.clone());
+        ev.metadata.insert(
+            "result".to_string(),
+            truncate_tool_event_metadata(&post_ctx.content),
+        );
         emit_safe(Some(emitter), ev).await;
     }
 
