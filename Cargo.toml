@@ -33,7 +33,7 @@ grpc = ["dep:tonic", "dep:tokio-stream"]
 prometheus = ["dep:metrics-exporter-prometheus"]
 # Enables the OTLP span exporter via tracing-opentelemetry.
 otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
-mcp = ["dep:rmcp"]
+mcp = ["dep:rmcp", "dep:http", "dep:chrono"]
 
 [build-dependencies]
 prost-build = "0.13"
@@ -74,6 +74,8 @@ opentelemetry = { version = "0.28", optional = true }
 opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.28", default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"], optional = true }
 rmcp = { version = "0.16", optional = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
+http = { version = "1", optional = true }
+chrono = { version = "0.4", optional = true, default-features = false, features = ["clock", "std"] }
 base64 = "0.22"
 
 [[example]]
@@ -86,3 +88,4 @@ assert_cmd = "2"
 predicates = "3"
 tokio = { version = "1", features = ["test-util"] }
 wiremock = "0.6"
+tempfile = "3"

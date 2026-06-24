@@ -1202,6 +1202,8 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientCon
     let session = match runtime().block_on(McpSession::connect_http(McpHttpConfig {
         url,
         label: prefix.clone(),
+        auth_header: None,
+        custom_headers: Default::default(),
     })) {
         Ok(s) => s,
         Err(e) => {

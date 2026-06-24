@@ -1,5 +1,20 @@
 //! MCP client bridge — connect MCP servers and register tools into [`ToolRegistry`].
 
+pub mod config;
+pub mod runtime;
+
+pub use config::{
+    default_mcp_servers, enabled_servers, ensure_servers_file, format_config_status,
+    load_servers_file, load_servers_file_or_default, load_status_file, record_server_status,
+    resolve_env_value, resolve_headers, save_servers_file, save_status_file, McpAuthKind,
+    McpServerEntry, McpServerStatus, McpServersFile, McpServersStatusFile, McpToolPolicy,
+    DEFAULT_CONTEXT7_MCP_URL, DEFAULT_GMAIL_MCP_URL,
+};
+pub use runtime::{
+    connect_enabled_servers, McpConnectOptions, McpConnectSummary, McpConnections,
+    McpOAuthProvider,
+};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -7,7 +22,8 @@ use async_trait::async_trait;
 use rmcp::model::{CallToolRequestParams, CallToolResult, Content, JsonObject};
 use rmcp::service::{RoleClient, RunningService, ServiceError};
 use rmcp::transport::{
-    ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess,
+    streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
+    StreamableHttpClientTransport, TokioChildProcess,
 };
 use rmcp::{ServiceExt, model::Tool as McpToolDef};
 use serde_json::{json, Map, Value};
@@ -39,10 +55,14 @@ pub struct McpStdioConfig {
 }
 
 /// HTTP (streamable) MCP server URL.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct McpHttpConfig {
     pub url: String,
     pub label: Option<String>,
+    /// Bearer token sent as `Authorization` on MCP HTTP requests.
+    pub auth_header: Option<String>,
+    /// Additional HTTP headers (e.g. `CONTEXT7_API_KEY`).
+    pub custom_headers: HashMap<String, String>,
 }
 
 /// Active MCP session; disconnect via [`McpSession::close`] or on drop.
@@ -92,7 +112,23 @@ impl McpSession {
             .label
             .clone()
             .unwrap_or_else(|| "mcp_http".to_string());
-        let transport = StreamableHttpClientTransport::from_uri(config.url.clone());
+        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.clone());
+        if let Some(token) = config.auth_header {
+            transport_config = transport_config.auth_header(token);
+        }
+        if !config.custom_headers.is_empty() {
+            use http::{HeaderName, HeaderValue};
+            let mut headers = HashMap::new();
+            for (name, value) in config.custom_headers {
+                let name = HeaderName::from_bytes(name.as_bytes())
+                    .map_err(|e| McpError::Connect(format!("invalid header name {name}: {e}")))?;
+                let value = HeaderValue::from_str(&value)
+                    .map_err(|e| McpError::Connect(format!("invalid header value for {name}: {e}")))?;
+                headers.insert(name, value);
+            }
+            transport_config = transport_config.custom_headers(headers);
+        }
+        let transport = StreamableHttpClientTransport::from_config(transport_config);
         let client = ()
             .serve(transport)
             .await
@@ -115,6 +151,16 @@ impl McpSession {
         registry: &ToolRegistry,
         prefix: Option<&str>,
     ) -> Result<Vec<String>, McpError> {
+        self.register_tools_if(registry, prefix, |_| true).await
+    }
+
+    /// Register MCP tools whose server-side name passes `include`.
+    pub async fn register_tools_if(
+        self: &Arc<Self>,
+        registry: &ToolRegistry,
+        prefix: Option<&str>,
+        include: impl Fn(&str) -> bool,
+    ) -> Result<Vec<String>, McpError> {
         let tools = {
             let guard = self.inner.lock().await;
             guard.list_all_tools().await?
@@ -122,7 +168,11 @@ impl McpSession {
         let prefix = prefix.unwrap_or(&self.label);
         let mut registered = Vec::new();
         for tool in tools {
-            let reg_name = prefixed_tool_name(prefix, tool.name.as_ref());
+            let mcp_name = tool.name.as_ref();
+            if !include(mcp_name) {
+                continue;
+            }
+            let reg_name = prefixed_tool_name(prefix, mcp_name);
             let mcp_tool = McpTool {
                 session: Arc::clone(self),
                 registered_name: reg_name.clone(),
@@ -250,6 +300,24 @@ mod tests {
     fn prefixed_tool_name_avoids_collisions() {
         assert_eq!(prefixed_tool_name("srv", "echo"), "srv__echo");
         assert_eq!(prefixed_tool_name("a", "b"), "a__b");
+    }
+
+    #[test]
+    fn mcp_http_config_carries_auth_header() {
+        let config = McpHttpConfig {
+            url: "https://example.com/mcp".into(),
+            label: Some("gmail".into()),
+            auth_header: Some("access-token".into()),
+            custom_headers: HashMap::new(),
+        };
+        assert_eq!(config.auth_header.as_deref(), Some("access-token"));
+        let transport_config =
+            StreamableHttpClientTransportConfig::with_uri(config.url.clone())
+                .auth_header(config.auth_header.unwrap());
+        assert_eq!(
+            transport_config.auth_header.as_deref(),
+            Some("access-token")
+        );
     }
 
     #[test]

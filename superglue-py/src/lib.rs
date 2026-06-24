@@ -1637,6 +1637,8 @@ impl PyClient {
             .block_on(McpSession::connect_http(McpHttpConfig {
                 url,
                 label: prefix.clone(),
+                auth_header: None,
+                custom_headers: Default::default(),
             }))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         runtime()

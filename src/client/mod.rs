@@ -644,6 +644,8 @@ impl Client {
         let session = crate::mcp::McpSession::connect_http(crate::mcp::McpHttpConfig {
             url: url.into(),
             label: prefix.clone(),
+            auth_header: None,
+            custom_headers: HashMap::new(),
         })
         .await?;
         session

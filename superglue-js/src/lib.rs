@@ -1243,6 +1243,8 @@ impl Client {
         let session = McpSession::connect_http(McpHttpConfig {
             url,
             label: prefix.clone(),
+            auth_header: None,
+            custom_headers: Default::default(),
         })
         .await
         .map_err(|e| Error::from_reason(e.to_string()))?;
