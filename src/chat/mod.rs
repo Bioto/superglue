@@ -10,7 +10,7 @@ pub use conversation::Conversation;
 
 use futures_util::StreamExt;
 use secrecy::ExposeSecret;
-use serde_json::Value;
+use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::time::{Duration, sleep};
 use tracing::instrument;
@@ -588,7 +588,7 @@ fn http_error_type(err: &ChatError) -> String {
 /// Returns either:
 /// - `Ok(value)` — tool succeeded (possibly after retries).
 /// - `Err(ToolInvokeError)` — policy dictates fail-fast (after all retries exhausted).
-/// - `Ok(Value::String("<error text>"))` — policy is [`OnToolError::Skip`].
+/// - `Ok(json!({"ok": false, "error": message}))` — policy is [`OnToolError::Skip`].
 async fn invoke_with_policy(
     registry: &ToolRegistry,
     name: &str,
@@ -608,7 +608,10 @@ async fn invoke_with_policy(
                 OnToolError::FailFast => Err(result.unwrap_err()),
                 OnToolError::Skip => {
                     tracing::warn!(tool = name, error = %message, "tool failed (skip policy)");
-                    Ok(Value::String(format!("Tool error (skipped): {message}")))
+                    Ok(json!({
+                        "ok": false,
+                        "error": message,
+                    }))
                 }
                 OnToolError::Retry {
                     max,
