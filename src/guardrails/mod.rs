@@ -441,3 +441,101 @@ impl GuardrailHandler for PiiRedactGuardrail {
         GuardrailOutcome::Allow(result)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Built-in: SecretRedactGuardrail
+// ---------------------------------------------------------------------------
+
+/// Guardrail that redacts common secret/credential patterns in text.
+///
+/// Always allow-with-transform — never blocks.
+pub struct SecretRedactGuardrail {
+    patterns: Vec<Regex>,
+    stages: HashSet<GuardrailStage>,
+}
+
+impl SecretRedactGuardrail {
+    pub fn new() -> Self {
+        let raw = [
+            // OpenAI / generic API keys
+            r"\bsk-[a-zA-Z0-9]{20,}\b",
+            r"\bsk-proj-[a-zA-Z0-9_-]{20,}\b",
+            // AWS
+            r"\bAKIA[0-9A-Z]{16}\b",
+            // GitHub
+            r"\bghp_[a-zA-Z0-9]{36,}\b",
+            r"\bgithub_pat_[a-zA-Z0-9_]{20,}\b",
+            // Slack
+            r"\bxox[baprs]-[a-zA-Z0-9-]{10,}\b",
+            // Bearer tokens
+            r"(?i)\bBearer\s+[A-Za-z0-9\-._~+/]+=*\b",
+            // PEM private keys
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+            // api_key= style assignments
+            r#"(?i)(api[_-]?key|secret|token|password)\s*=\s*[^\s&"']+"#,
+        ];
+        let patterns = raw
+            .iter()
+            .filter_map(|p| {
+                Regex::new(p)
+                    .map_err(|e| warn!("secret pattern compile error: {e}"))
+                    .ok()
+            })
+            .collect();
+        let mut stages = HashSet::new();
+        stages.insert(GuardrailStage::Input);
+        stages.insert(GuardrailStage::Output);
+        SecretRedactGuardrail { patterns, stages }
+    }
+
+    pub fn for_stages(mut self, stages: impl IntoIterator<Item = GuardrailStage>) -> Self {
+        self.stages = stages.into_iter().collect();
+        self
+    }
+}
+
+impl Default for SecretRedactGuardrail {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl GuardrailHandler for SecretRedactGuardrail {
+    async fn check(&self, stage: GuardrailStage, content: &str) -> GuardrailOutcome {
+        if !self.stages.contains(&stage) {
+            return GuardrailOutcome::Allow(content.to_string());
+        }
+        let mut result = content.to_string();
+        for pat in &self.patterns {
+            result = pat.replace_all(&result, "[REDACTED]").into_owned();
+        }
+        GuardrailOutcome::Allow(result)
+    }
+}
+
+#[cfg(test)]
+mod secret_redact_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn redacts_openai_key() {
+        let g = SecretRedactGuardrail::new();
+        let (outcome, _) = match g.check(GuardrailStage::Output, "key sk-abcdefghijklmnopqrstuvwxyz123456").await {
+            GuardrailOutcome::Allow(s) => (s, ()),
+            GuardrailOutcome::Block(r) => panic!("unexpected block: {r}"),
+        };
+        assert!(outcome.contains("[REDACTED]"));
+        assert!(!outcome.contains("sk-abc"));
+    }
+
+    #[tokio::test]
+    async fn leaves_prose_intact() {
+        let g = SecretRedactGuardrail::new();
+        let text = "Use cargo test to run the suite.";
+        match g.check(GuardrailStage::Output, text).await {
+            GuardrailOutcome::Allow(s) => assert_eq!(s, text),
+            GuardrailOutcome::Block(r) => panic!("unexpected block: {r}"),
+        }
+    }
+}

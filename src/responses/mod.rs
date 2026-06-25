@@ -34,6 +34,7 @@ impl From<ResponseError> for ChatError {
             ResponseError::NoOutput => ChatError::NoChoice,
             ResponseError::MaxToolRounds(n) => ChatError::MaxToolRounds(n),
             ResponseError::Cancelled => ChatError::Cancelled,
+            ResponseError::StreamFailed(msg) => ChatError::Api(msg),
         }
     }
 }
@@ -53,6 +54,8 @@ pub enum ResponseError {
     MaxToolRounds(u32),
     #[error("request cancelled")]
     Cancelled,
+    #[error("response stream failed: {0}")]
+    StreamFailed(String),
 }
 
 impl From<ChatError> for ResponseError {
@@ -576,6 +579,7 @@ where
     let mut response_id = String::new();
     let model_used = options.model.clone();
     let mut usage: Option<proto::Usage> = None;
+    let mut stream_error: Option<String> = None;
 
     futures_util::pin_mut!(stream);
     while let Some(chunk) = stream.next().await {
@@ -590,11 +594,8 @@ where
                 continue;
             }
             let v: Value = serde_json::from_str(data).unwrap_or(Value::Null);
-            let event_type = v
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or_default();
-            match event_type {
+            let event_type = resolve_sse_event_type(event.event.as_deref(), &v);
+            match event_type.as_str() {
                 "response.created" | "response.in_progress" => {
                     if let Some(id) = v
                         .pointer("/response/id")
@@ -612,6 +613,28 @@ where
                     {
                         content.push_str(delta);
                         on_delta(delta.to_string());
+                    }
+                }
+                "response.output_text.done" => {
+                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                        if content.is_empty() {
+                            on_delta(text.to_string());
+                        }
+                        content = text.to_string();
+                    }
+                }
+                "response.content_part.done" => {
+                    let part_type = v
+                        .pointer("/part/type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default();
+                    if part_type == "output_text"
+                        && let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str())
+                    {
+                        if content.is_empty() {
+                            on_delta(text.to_string());
+                        }
+                        content = text.to_string();
                     }
                 }
                 "response.completed" => {
@@ -635,9 +658,25 @@ where
                         response_id = id.to_string();
                     }
                 }
+                "error" | "response.error" | "response.failed" => {
+                    if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
+                        response_id = id.to_string();
+                    }
+                    if let Some(msg) = extract_sse_error_message(&v) {
+                        tracing::warn!(event_type = %event_type, error = %msg, "responses: stream error event");
+                        stream_error = Some(msg);
+                    } else {
+                        stream_error = Some(format!("{event_type} (no details)"));
+                    }
+                }
                 _ => {}
             }
         }
+    }
+
+    if let Some(err) = stream_error {
+        emit_llm_call_error(options.status_emitter.as_ref(), &request_id, &model_used, 1);
+        return Err(ResponseError::StreamFailed(err));
     }
 
     if !guardrails.output_is_empty().await {
@@ -734,6 +773,38 @@ struct ResponsesStreamRound {
     response_id: String,
     usage: Option<proto::Usage>,
     raw_output: Vec<ResponseOutputItem>,
+    stream_error: Option<String>,
+}
+
+fn format_sse_error_object(err: &Value) -> Option<String> {
+    let code = err
+        .get("code")
+        .or_else(|| err.get("type"))
+        .and_then(|c| c.as_str())
+        .filter(|c| !c.is_empty());
+    let message = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.is_empty());
+    match (code, message) {
+        (Some(c), Some(m)) => Some(format!("{c}: {m}")),
+        (Some(c), None) => Some(c.to_string()),
+        (None, Some(m)) => Some(m.to_string()),
+        _ => None,
+    }
+}
+
+fn extract_sse_error_message(v: &Value) -> Option<String> {
+    if let Some(err) = v.pointer("/response/error").and_then(format_sse_error_object) {
+        return Some(err);
+    }
+    if let Some(err) = v.get("error").and_then(format_sse_error_object) {
+        return Some(err);
+    }
+    v.get("message")
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
 }
 
 fn extract_stream_delta(v: &Value) -> Option<String> {
@@ -795,6 +866,100 @@ fn function_calls_from_output(output: &[ResponseOutputItem]) -> Vec<StreamedFunc
         .collect()
 }
 
+fn resolve_sse_event_type(sse_event: Option<&str>, v: &Value) -> String {
+    if let Some(t) = v.get("type").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
+        return t.to_string();
+    }
+    sse_event
+        .filter(|e| !e.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn deliver_output_text_if_needed(
+    round_state: &mut ResponsesStreamRound,
+    on_delta: &mut impl FnMut(String),
+    text: String,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let was_empty = round_state.content.is_empty();
+    round_state.content = text.clone();
+    if was_empty {
+        on_delta(text);
+    }
+}
+
+fn parse_response_output_items(output: &Value) -> Vec<ResponseOutputItem> {
+    let Some(arr) = output.as_array() else {
+        return Vec::new();
+    };
+    if arr.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(parsed) =
+        serde_json::from_value::<Vec<ResponseOutputItem>>(Value::Array(arr.clone()))
+    {
+        return parsed;
+    }
+    tracing::debug!("responses: batch output parse failed, falling back per-item");
+    arr.iter()
+        .filter_map(|item| serde_json::from_value::<ResponseOutputItem>(item.clone()).ok())
+        .collect()
+}
+
+async fn ingest_stream_output_item(
+    parsed: ResponseOutputItem,
+    round_state: &mut ResponsesStreamRound,
+    on_delta: &mut impl FnMut(String),
+    status_emitter: Option<&Arc<StatusEmitter>>,
+    request_id: &str,
+    round: u32,
+    model: &str,
+) {
+    round_state.raw_output.push(parsed.clone());
+    match parsed {
+        ResponseOutputItem::FunctionCall {
+            call_id,
+            name,
+            arguments,
+        } if !name.is_empty() => {
+            let call = StreamedFunctionCall {
+                call_id: call_id.clone(),
+                name: name.clone(),
+                arguments: arguments.clone(),
+            };
+            if !round_state
+                .function_calls
+                .iter()
+                .any(|c| c.call_id == call.call_id)
+            {
+                round_state.function_calls.push(call);
+                if let Some(emitter) = status_emitter {
+                    let mut ev =
+                        ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
+                    ev.round = round;
+                    ev.metadata.insert("tool_name".to_string(), name);
+                    ev.metadata.insert(
+                        "arguments".to_string(),
+                        crate::chat::truncate_tool_event_metadata(arguments.trim()),
+                    );
+                    emit_safe(Some(emitter), ev).await;
+                }
+            }
+        }
+        item => {
+            if round_state.content.is_empty()
+                && let Some(text) = extract_output_text(&[item])
+            {
+                round_state.content = text.clone();
+                on_delta(text);
+            }
+        }
+    }
+}
+
 async fn apply_responses_stream_event(
     v: &Value,
     event_type: &str,
@@ -833,6 +998,22 @@ async fn apply_responses_stream_event(
             if let Some(delta) = extract_stream_delta(v) {
                 round_state.content.push_str(&delta);
                 on_delta(delta);
+            }
+        }
+        "response.output_text.done" => {
+            if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
+                deliver_output_text_if_needed(round_state, on_delta, text.to_string());
+            }
+        }
+        "response.content_part.done" => {
+            let part_type = v
+                .pointer("/part/type")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default();
+            if part_type == "output_text"
+                && let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str())
+            {
+                deliver_output_text_if_needed(round_state, on_delta, text.to_string());
             }
         }
         "response.function_call_arguments.done" => {
@@ -874,6 +1055,24 @@ async fn apply_responses_stream_event(
                 }
             }
         }
+        "response.output_item.done" => {
+            if let Some(item) = v.get("item") {
+                if let Ok(parsed) = serde_json::from_value::<ResponseOutputItem>(item.clone()) {
+                    ingest_stream_output_item(
+                        parsed,
+                        round_state,
+                        on_delta,
+                        status_emitter,
+                        request_id,
+                        round,
+                        model,
+                    )
+                    .await;
+                } else {
+                    tracing::debug!("responses: failed to parse output_item.done item");
+                }
+            }
+        }
         "response.completed" => {
             if let Some(u) = v.pointer("/response/usage") {
                 round_state.usage = Some(proto::Usage {
@@ -895,12 +1094,13 @@ async fn apply_responses_stream_event(
                 round_state.response_id = id.to_string();
             }
             if let Some(output) = v.pointer("/response/output") {
-                if let Some(arr) = output.as_array() {
-                    if let Ok(parsed) = serde_json::from_value::<Vec<ResponseOutputItem>>(
-                        Value::Array(arr.clone()),
-                    ) {
-                        round_state.raw_output = parsed;
-                    }
+                let parsed = parse_response_output_items(output);
+                if !parsed.is_empty() {
+                    round_state.raw_output = parsed;
+                } else if output.as_array().is_some_and(|a| !a.is_empty()) {
+                    tracing::debug!(
+                        "responses: response.completed output present but no items parsed"
+                    );
                 }
                 if round_state.reasoning.is_empty()
                     && let Some(text) = extract_reasoning_summaries_from_output(output)
@@ -915,9 +1115,32 @@ async fn apply_responses_stream_event(
                         emit_safe(Some(emitter), ev).await;
                     }
                 }
+                if round_state.content.is_empty()
+                    && let Some(text) = extract_output_text(&round_state.raw_output)
+                {
+                    round_state.content = text.clone();
+                    on_delta(text);
+                }
             }
         }
-        _ => {}
+        "error" | "response.error" | "response.failed" => {
+            if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
+                round_state.response_id = id.to_string();
+            }
+            if let Some(msg) = extract_sse_error_message(v) {
+                tracing::warn!(event_type, error = %msg, "responses: stream error event");
+                round_state.stream_error = Some(msg);
+            } else {
+                tracing::warn!(
+                    event_type,
+                    "responses: stream error event without parseable message"
+                );
+                round_state.stream_error = Some(format!("{event_type} (no details)"));
+            }
+        }
+        other => {
+            tracing::debug!(event_type = other, "responses: unhandled SSE event");
+        }
     }
 }
 
@@ -964,13 +1187,10 @@ where
                 continue;
             }
             let v: Value = serde_json::from_str(data).unwrap_or(Value::Null);
-            let event_type = v
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or_default();
+            let event_type = resolve_sse_event_type(event.event.as_deref(), &v);
             apply_responses_stream_event(
                 &v,
-                event_type,
+                &event_type,
                 &mut round_state,
                 &mut on_delta,
                 &mut on_reasoning_delta,
@@ -981,6 +1201,11 @@ where
             )
             .await;
         }
+    }
+
+    if let Some(err) = round_state.stream_error {
+        emit_llm_call_error(options.status_emitter.as_ref(), request_id, &options.model, round);
+        return Err(ResponseError::StreamFailed(err));
     }
 
     Ok((round_state, model_used))
@@ -1296,4 +1521,369 @@ where
     );
 
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn completed_event_with_message(text: &str) -> Value {
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_test",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            { "type": "output_text", "text": text }
+                        ]
+                    }
+                ]
+            }
+        })
+    }
+
+    fn output_item_done_event(text: &str) -> Value {
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    { "type": "output_text", "text": text }
+                ]
+            }
+        })
+    }
+
+    fn output_item_done_function_call() -> Value {
+        json!({
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "echo",
+                "arguments": "{\"x\":1}"
+            }
+        })
+    }
+
+    fn content_part_done_event(text: &str) -> Value {
+        json!({
+            "type": "response.content_part.done",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "part": {
+                "type": "output_text",
+                "text": text,
+                "annotations": []
+            }
+        })
+    }
+
+    fn output_text_done_event(text: &str) -> Value {
+        json!({
+            "type": "response.output_text.done",
+            "item_id": "msg_1",
+            "output_index": 0,
+            "content_index": 0,
+            "text": text
+        })
+    }
+
+    #[tokio::test]
+    async fn completed_event_recovers_message_text_when_no_deltas() {
+        let v = completed_event_with_message("# Hello\n\n- **bold** item");
+        let mut round_state = ResponsesStreamRound::default();
+        let mut deltas = Vec::new();
+
+        apply_responses_stream_event(
+            &v,
+            "response.completed",
+            &mut round_state,
+            &mut |d| deltas.push(d),
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(round_state.content, "# Hello\n\n- **bold** item");
+        assert_eq!(deltas, vec!["# Hello\n\n- **bold** item".to_string()]);
+        assert_eq!(round_state.response_id, "resp_test");
+    }
+
+    #[tokio::test]
+    async fn completed_event_does_not_override_streamed_content() {
+        let v = completed_event_with_message("from completed event");
+        let mut round_state = ResponsesStreamRound {
+            content: "already streamed".into(),
+            ..Default::default()
+        };
+        let mut deltas = Vec::new();
+
+        apply_responses_stream_event(
+            &v,
+            "response.completed",
+            &mut round_state,
+            &mut |d| deltas.push(d),
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(round_state.content, "already streamed");
+        assert!(deltas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn output_item_done_recovers_message_text() {
+        let v = output_item_done_event("hello from item done");
+        let mut round_state = ResponsesStreamRound::default();
+        let mut deltas = Vec::new();
+
+        apply_responses_stream_event(
+            &v,
+            "response.output_item.done",
+            &mut round_state,
+            &mut |d| deltas.push(d),
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(round_state.content, "hello from item done");
+        assert_eq!(deltas, vec!["hello from item done".to_string()]);
+        assert_eq!(round_state.raw_output.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn output_item_done_does_not_duplicate_streamed_content() {
+        let v = output_item_done_event("from item done");
+        let mut round_state = ResponsesStreamRound {
+            content: "already streamed".into(),
+            ..Default::default()
+        };
+        let mut deltas = Vec::new();
+
+        apply_responses_stream_event(
+            &v,
+            "response.output_item.done",
+            &mut round_state,
+            &mut |d| deltas.push(d),
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(round_state.content, "already streamed");
+        assert!(deltas.is_empty());
+    }
+
+    #[tokio::test]
+    async fn output_item_done_recovers_function_call() {
+        let v = output_item_done_function_call();
+        let mut round_state = ResponsesStreamRound::default();
+
+        apply_responses_stream_event(
+            &v,
+            "response.output_item.done",
+            &mut round_state,
+            &mut |_delta| {},
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(round_state.function_calls.len(), 1);
+        assert_eq!(round_state.function_calls[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn completed_event_parses_output_per_item_on_batch_failure() {
+        let v = json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_test",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            { "type": "output_text", "text": "recovered" }
+                        ]
+                    },
+                    { "type": "unknown_future_type", "data": 1 }
+                ]
+            }
+        });
+        let mut round_state = ResponsesStreamRound::default();
+        let mut deltas = Vec::new();
+
+        apply_responses_stream_event(
+            &v,
+            "response.completed",
+            &mut round_state,
+            &mut |d| deltas.push(d),
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(round_state.content, "recovered");
+        assert_eq!(deltas, vec!["recovered".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn content_part_done_recovers_message_text() {
+        let v = content_part_done_event("hello from content part");
+        let mut round_state = ResponsesStreamRound::default();
+        let mut deltas = Vec::new();
+
+        apply_responses_stream_event(
+            &v,
+            "response.content_part.done",
+            &mut round_state,
+            &mut |d| deltas.push(d),
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(round_state.content, "hello from content part");
+        assert_eq!(deltas, vec!["hello from content part".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn output_text_done_recovers_message_text() {
+        let v = output_text_done_event("hello from output_text.done");
+        let mut round_state = ResponsesStreamRound::default();
+        let mut deltas = Vec::new();
+
+        apply_responses_stream_event(
+            &v,
+            "response.output_text.done",
+            &mut round_state,
+            &mut |d| deltas.push(d),
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(round_state.content, "hello from output_text.done");
+        assert_eq!(deltas, vec!["hello from output_text.done".to_string()]);
+    }
+
+    #[test]
+    fn resolve_sse_event_type_prefers_json_then_sse_line() {
+        let with_json = json!({"type": "response.completed"});
+        assert_eq!(
+            resolve_sse_event_type(Some("response.output_item.done"), &with_json),
+            "response.completed"
+        );
+        let without_json = json!({"item": {}});
+        assert_eq!(
+            resolve_sse_event_type(Some("response.output_item.done"), &without_json),
+            "response.output_item.done"
+        );
+    }
+
+    #[test]
+    fn extract_sse_error_message_from_response_failed() {
+        let v = json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_fail",
+                "status": "failed",
+                "error": {
+                    "code": "invalid_request_error",
+                    "message": "context length exceeded"
+                }
+            }
+        });
+        assert_eq!(
+            extract_sse_error_message(&v),
+            Some("invalid_request_error: context length exceeded".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_sse_error_message_from_error_event() {
+        let v = json!({
+            "type": "error",
+            "error": {
+                "type": "rate_limit_error",
+                "message": "Rate limit reached"
+            }
+        });
+        assert_eq!(
+            extract_sse_error_message(&v),
+            Some("rate_limit_error: Rate limit reached".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn response_failed_sets_stream_error_on_round_state() {
+        let v = json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_fail",
+                "status": "failed",
+                "error": {
+                    "code": "server_error",
+                    "message": "Internal server error"
+                }
+            }
+        });
+        let mut round_state = ResponsesStreamRound::default();
+
+        apply_responses_stream_event(
+            &v,
+            "response.failed",
+            &mut round_state,
+            &mut |_delta| {},
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+
+        assert_eq!(
+            round_state.stream_error,
+            Some("server_error: Internal server error".to_string())
+        );
+        assert_eq!(round_state.response_id, "resp_fail");
+    }
 }

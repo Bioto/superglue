@@ -284,6 +284,8 @@ pub enum ChatError {
     Credentials(#[from] crate::providers::CredentialsError),
     #[error("unsupported provider for this API: {0}")]
     UnsupportedProvider(crate::providers::ProviderId),
+    #[error("API response failed: {0}")]
+    Api(String),
 }
 
 /// Resolve credentials from options (multi-provider map or legacy single OpenAI key).
