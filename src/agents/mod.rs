@@ -47,22 +47,25 @@ use crate::tools::ToolRegistry;
 /// Declarative configuration for an agent.
 ///
 /// An `AgentSpec` captures who the agent is (persona), what it aims to do
-/// (goals), and what it must not do (constraints). Calling
+/// (goals), detailed workflow instructions (e.g. investigation steps, output
+/// format), and what it must not do (constraints). Calling
 /// [`AgentSpec::compile_system_prompt`] converts these into a structured
 /// system prompt that is prepended to every LLM call.
 ///
 /// If you want full control over the system prompt text, set
-/// [`AgentSpec::system_prompt_override`] instead — the persona/goals/constraints
-/// fields are then ignored during compilation.
+/// [`AgentSpec::system_prompt_override`] instead — the persona/goals/
+/// instructions/constraints fields are then ignored during compilation.
 #[derive(Debug, Clone)]
 pub struct AgentSpec {
     /// Unique identifier for this agent (used in logs and traces).
     pub name: String,
     /// Personality and role description. Becomes the opening sentence of the
-    /// compiled system prompt: "You are {persona}."
+    /// compiled system prompt: "You are {persona}." Do not prefix with "You are".
     pub persona: String,
     /// High-level objectives the agent should pursue.
     pub goals: Vec<String>,
+    /// Detailed workflow instructions (e.g. investigation steps, output format).
+    pub instructions: Vec<String>,
     /// Hard rules the agent must not violate.
     pub constraints: Vec<String>,
     /// LLM model to use (e.g. `"gpt-5.4-nano-2026-03-17-mini"`).
@@ -86,6 +89,7 @@ impl AgentSpec {
             name: name.into(),
             persona: persona.into(),
             goals: Vec::new(),
+            instructions: Vec::new(),
             constraints: Vec::new(),
             model: String::new(),
             max_tool_rounds: 16,
@@ -98,6 +102,15 @@ impl AgentSpec {
     /// Append a goal (chainable).
     pub fn with_goal(mut self, goal: impl Into<String>) -> Self {
         self.goals.push(goal.into());
+        self
+    }
+
+    /// Append a workflow instruction (chainable).
+    ///
+    /// Instruction blocks are rendered as prose under an `## Instructions`
+    /// section, suitable for multi-step workflows and output templates.
+    pub fn with_instructions(mut self, instruction: impl Into<String>) -> Self {
+        self.instructions.push(instruction.into());
         self
     }
 
@@ -125,8 +138,8 @@ impl AgentSpec {
         self
     }
 
-    /// Compile the agent's persona, goals, and constraints into a structured
-    /// system prompt string.
+    /// Compile the agent's persona, goals, instructions, and constraints into a
+    /// structured system prompt string.
     ///
     /// If [`system_prompt_override`](AgentSpec::system_prompt_override) is set,
     /// that value is returned unchanged.
@@ -139,6 +152,9 @@ impl AgentSpec {
     /// ## Goals
     /// - {goal_1}
     /// - {goal_2}
+    ///
+    /// ## Instructions
+    /// {instruction_block_1}
     ///
     /// ## Constraints
     /// - {constraint_1}
@@ -157,8 +173,16 @@ impl AgentSpec {
             }
         }
 
+        if !self.instructions.is_empty() {
+            out.push_str("\n\n## Instructions\n\n");
+            for i in &self.instructions {
+                out.push_str(i.trim());
+                out.push_str("\n\n");
+            }
+        }
+
         if !self.constraints.is_empty() {
-            out.push_str("\n## Constraints\n");
+            out.push_str("## Constraints\n");
             for c in &self.constraints {
                 let _ = writeln!(out, "- {c}");
             }
@@ -320,6 +344,23 @@ mod tests {
         assert!(prompt.contains("- Cite sources"), "{prompt}");
         assert!(prompt.contains("## Constraints"), "{prompt}");
         assert!(prompt.contains("- Never speculate"), "{prompt}");
+    }
+
+    #[test]
+    fn compile_prompt_with_instructions() {
+        let spec = AgentSpec::new("bot", "a planner")
+            .with_goal("Deliver actionable plans")
+            .with_instructions("Step 1: investigate.\nStep 2: write the plan.")
+            .with_constraint("Do not implement");
+        let prompt = spec.compile_system_prompt();
+        assert!(prompt.contains("## Instructions"), "{prompt}");
+        assert!(prompt.contains("Step 1: investigate."), "{prompt}");
+        assert!(prompt.contains("Step 2: write the plan."), "{prompt}");
+        let goals_pos = prompt.find("## Goals").unwrap();
+        let instructions_pos = prompt.find("## Instructions").unwrap();
+        let constraints_pos = prompt.find("## Constraints").unwrap();
+        assert!(goals_pos < instructions_pos);
+        assert!(instructions_pos < constraints_pos);
     }
 
     #[test]
