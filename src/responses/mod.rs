@@ -124,7 +124,10 @@ pub enum ResponseOutputItem {
         content: Option<Vec<OutputContentPart>>,
     },
     FunctionCall {
-        #[serde(alias = "id")]
+        /// Responses output item id (`fc_...`) when the API also sends `call_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default)]
         call_id: String,
         name: String,
         arguments: String,
@@ -251,17 +254,27 @@ fn extract_output_text(output: &[ResponseOutputItem]) -> Option<String> {
     }
 }
 
+fn effective_function_call_id(call_id: &str, id: &Option<String>) -> String {
+    if !call_id.is_empty() {
+        call_id.to_string()
+    } else {
+        id.clone().unwrap_or_default()
+    }
+}
+
 fn function_calls(output: &[ResponseOutputItem]) -> Vec<(String, String, String)> {
     output
         .iter()
         .filter_map(|item| {
             if let ResponseOutputItem::FunctionCall {
+                id,
                 call_id,
                 name,
                 arguments,
             } = item
             {
-                Some((call_id.clone(), name.clone(), arguments.clone()))
+                let resolved = effective_function_call_id(call_id, id);
+                Some((resolved, name.clone(), arguments.clone()))
             } else {
                 None
             }
@@ -854,13 +867,14 @@ fn function_calls_from_output(output: &[ResponseOutputItem]) -> Vec<StreamedFunc
         .iter()
         .filter_map(|item| {
             if let ResponseOutputItem::FunctionCall {
+                id,
                 call_id,
                 name,
                 arguments,
             } = item
             {
                 Some(StreamedFunctionCall {
-                    call_id: call_id.clone(),
+                    call_id: effective_function_call_id(call_id, id),
                     name: name.clone(),
                     arguments: arguments.clone(),
                 })
@@ -926,12 +940,14 @@ async fn ingest_stream_output_item(
     round_state.raw_output.push(parsed.clone());
     match parsed {
         ResponseOutputItem::FunctionCall {
+            id,
             call_id,
             name,
             arguments,
         } if !name.is_empty() => {
+            let resolved_call_id = effective_function_call_id(&call_id, &id);
             let call = StreamedFunctionCall {
-                call_id: call_id.clone(),
+                call_id: resolved_call_id.clone(),
                 name: name.clone(),
                 arguments: arguments.clone(),
             };
@@ -1068,6 +1084,7 @@ async fn apply_responses_stream_event(
             let call_id = v
                 .get("call_id")
                 .or_else(|| v.get("id"))
+                .or_else(|| v.get("item_id"))
                 .or_else(|| v.pointer("/item/call_id"))
                 .or_else(|| v.pointer("/item/id"))
                 .and_then(|x| x.as_str())
@@ -1953,11 +1970,14 @@ mod tests {
         let parsed: ResponseOutputItem = serde_json::from_value(item).expect("parse");
         match parsed {
             ResponseOutputItem::FunctionCall {
+                id,
                 call_id,
                 name,
                 arguments,
             } => {
-                assert_eq!(call_id, "call_alias");
+                assert_eq!(id.as_deref(), Some("call_alias"));
+                assert!(call_id.is_empty());
+                assert_eq!(effective_function_call_id(&call_id, &id), "call_alias");
                 assert_eq!(name, "echo");
                 assert_eq!(arguments, "{\"x\":1}");
             }
@@ -1983,5 +2003,33 @@ mod tests {
         ));
         assert_eq!(round_state.content, "hello");
         assert_eq!(deltas, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn function_call_with_item_id_and_call_id_deserializes() {
+        let j = json!({
+            "id": "fc_abc",
+            "type": "function_call",
+            "status": "completed",
+            "arguments": "{\"path\":\".\"}",
+            "call_id": "call_xyz",
+            "name": "list_dir"
+        });
+        let parsed = serde_json::from_value::<ResponseOutputItem>(j.clone());
+        assert!(parsed.is_ok(), "parse failed: {:?}", parsed.err());
+        match parsed.unwrap() {
+            ResponseOutputItem::FunctionCall {
+                id,
+                call_id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id.as_deref(), Some("fc_abc"));
+                assert_eq!(call_id, "call_xyz");
+                assert_eq!(name, "list_dir");
+                assert_eq!(arguments, "{\"path\":\".\"}");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 }
