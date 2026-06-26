@@ -185,6 +185,7 @@ impl From<ToolSpec> for ChatTool {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolCall {
+    #[serde(default)]
     pub id: String,
     #[serde(rename = "type")]
     pub kind: String,
@@ -503,6 +504,7 @@ pub struct ChatChoice {
 /// One SSE payload from a `stream: true` chat completion response.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatCompletionChunk {
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub object: String,
@@ -548,6 +550,7 @@ pub struct DeltaMessage {
 #[derive(Debug, Clone, Deserialize)]
 pub struct StreamToolCallDelta {
     /// Index of the tool call being accumulated (stable across chunks for the same call).
+    #[serde(default)]
     pub index: u32,
     /// Only present in the first chunk for a given tool call.
     #[serde(default)]

@@ -2,7 +2,7 @@
 
 mod conversation;
 pub mod reasoning;
-mod stream_tools;
+pub(crate) mod stream_tools;
 
 use std::sync::Arc;
 

@@ -11,9 +11,10 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::chat::{
-    conversation_messages_for_client, credentials_for, post_json_with_model_fallback, ChatError,
-    ChatOptions, dispatch_one, observation_hook_ctx, StreamToolOutcome,
+    conversation_messages_for_client, credentials_for, post_json_with_model_fallback, stream_tools,
+    ChatError, ChatOptions, dispatch_one, observation_hook_ctx, StreamToolOutcome,
 };
+use crate::openai::ChatCompletionChunk;
 use crate::costing::estimate_model_call_cost_usd;
 use crate::events::{emit_safe, ProcessEvent, ProcessEventKind, StatusEmitter};
 use crate::guardrails::{
@@ -123,6 +124,7 @@ pub enum ResponseOutputItem {
         content: Option<Vec<OutputContentPart>>,
     },
     FunctionCall {
+        #[serde(alias = "id")]
         call_id: String,
         name: String,
         arguments: String,
@@ -195,6 +197,7 @@ struct ResponseTool {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ResponseObject {
+    #[serde(default)]
     id: String,
     #[serde(default)]
     output: Vec<ResponseOutputItem>,
@@ -774,6 +777,8 @@ struct ResponsesStreamRound {
     usage: Option<proto::Usage>,
     raw_output: Vec<ResponseOutputItem>,
     stream_error: Option<String>,
+    chat_tool_accumulator: stream_tools::ToolCallAccumulator,
+    chat_finish_reason: Option<String>,
 }
 
 fn format_sse_error_object(err: &Value) -> Option<String> {
@@ -960,6 +965,49 @@ async fn ingest_stream_output_item(
     }
 }
 
+fn merge_chat_tool_accumulator(round_state: &mut ResponsesStreamRound) {
+    if round_state.function_calls.is_empty() {
+        for tc in round_state.chat_tool_accumulator.finish() {
+            if tc.function.name.is_empty() {
+                continue;
+            }
+            round_state.function_calls.push(StreamedFunctionCall {
+                call_id: tc.id,
+                name: tc.function.name,
+                arguments: tc.function.arguments,
+            });
+        }
+    }
+}
+
+fn apply_chat_completion_chunk_event(
+    v: &Value,
+    round_state: &mut ResponsesStreamRound,
+    on_delta: &mut impl FnMut(String),
+) -> bool {
+    if !v.get("choices").is_some_and(|choices| choices.is_array()) {
+        return false;
+    }
+    let Ok(chunk) = serde_json::from_value::<ChatCompletionChunk>(v.clone()) else {
+        return false;
+    };
+    if !chunk.id.is_empty() {
+        round_state.response_id = chunk.id.clone();
+    }
+    let prev_len = round_state.content.len();
+    stream_tools::apply_openai_chunk(
+        &chunk,
+        &mut round_state.content,
+        &mut round_state.chat_tool_accumulator,
+        &mut round_state.chat_finish_reason,
+        &mut round_state.usage,
+    );
+    if round_state.content.len() > prev_len {
+        on_delta(round_state.content[prev_len..].to_string());
+    }
+    true
+}
+
 async fn apply_responses_stream_event(
     v: &Value,
     event_type: &str,
@@ -1019,7 +1067,9 @@ async fn apply_responses_stream_event(
         "response.function_call_arguments.done" => {
             let call_id = v
                 .get("call_id")
+                .or_else(|| v.get("id"))
                 .or_else(|| v.pointer("/item/call_id"))
+                .or_else(|| v.pointer("/item/id"))
                 .and_then(|x| x.as_str())
                 .unwrap_or_default()
                 .to_string();
@@ -1187,6 +1237,9 @@ where
                 continue;
             }
             let v: Value = serde_json::from_str(data).unwrap_or(Value::Null);
+            if apply_chat_completion_chunk_event(&v, &mut round_state, &mut on_delta) {
+                continue;
+            }
             let event_type = resolve_sse_event_type(event.event.as_deref(), &v);
             apply_responses_stream_event(
                 &v,
@@ -1207,6 +1260,8 @@ where
         emit_llm_call_error(options.status_emitter.as_ref(), request_id, &options.model, round);
         return Err(ResponseError::StreamFailed(err));
     }
+
+    merge_chat_tool_accumulator(&mut round_state);
 
     Ok((round_state, model_used))
 }
@@ -1885,5 +1940,48 @@ mod tests {
             Some("server_error: Internal server error".to_string())
         );
         assert_eq!(round_state.response_id, "resp_fail");
+    }
+
+    #[test]
+    fn function_call_output_item_accepts_id_alias() {
+        let item = json!({
+            "type": "function_call",
+            "id": "call_alias",
+            "name": "echo",
+            "arguments": "{\"x\":1}"
+        });
+        let parsed: ResponseOutputItem = serde_json::from_value(item).expect("parse");
+        match parsed {
+            ResponseOutputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(call_id, "call_alias");
+                assert_eq!(name, "echo");
+                assert_eq!(arguments, "{\"x\":1}");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_completion_chunk_without_id_is_accepted() {
+        let chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": { "content": "hello" },
+                "finish_reason": null
+            }]
+        });
+        let mut round_state = ResponsesStreamRound::default();
+        let mut deltas = Vec::new();
+        assert!(apply_chat_completion_chunk_event(
+            &chunk,
+            &mut round_state,
+            &mut |d| deltas.push(d),
+        ));
+        assert_eq!(round_state.content, "hello");
+        assert_eq!(deltas, vec!["hello".to_string()]);
     }
 }
