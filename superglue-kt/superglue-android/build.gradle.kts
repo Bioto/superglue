@@ -40,6 +40,7 @@ android {
     compileSdk = 36
 
     // Kept in sync with projects/Cargo.toml via scripts/sync-superglue-versions.sh
+    @Suppress("UNUSED_VARIABLE")
     val superglueLibraryVersion = "0.1.0"
 
     defaultConfig {
