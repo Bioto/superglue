@@ -70,6 +70,18 @@ impl ToolRegistry {
         map.get(name).map(|(_, p)| p.clone()).unwrap_or_default()
     }
 
+    /// Unregister tools by name. Returns the number of tools actually removed.
+    pub async fn unregister(&self, names: &[String]) -> usize {
+        let mut map = self.tools.write().await;
+        let mut removed = 0;
+        for name in names {
+            if map.remove(name).is_some() {
+                removed += 1;
+            }
+        }
+        removed
+    }
+
     /// Invoke a tool by name.
     #[instrument(skip(self, arguments), fields(tool = name))]
     pub async fn invoke(&self, name: &str, arguments: Value) -> Result<Value, ToolInvokeError> {
@@ -83,5 +95,80 @@ impl ToolRegistry {
             });
         };
         tool.call(arguments).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    struct EchoTool {
+        name: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for EchoTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.name.clone(),
+                description: Some("echo".into()),
+                parameters_schema: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        async fn call(&self, arguments: Value) -> Result<Value, ToolInvokeError> {
+            Ok(arguments)
+        }
+    }
+
+    fn make_tool(name: &str) -> Arc<dyn Tool> {
+        Arc::new(EchoTool { name: name.into() })
+    }
+
+    #[tokio::test]
+    async fn unregister_removes_tools() {
+        let registry = ToolRegistry::new();
+        registry.register(make_tool("foo")).await.unwrap();
+        registry.register(make_tool("bar")).await.unwrap();
+
+        let removed = registry
+            .unregister(&["foo".into(), "bar".into()])
+            .await;
+        assert_eq!(removed, 2);
+
+        let specs = registry.list_specs().await;
+        assert!(specs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unregister_invoke_returns_unknown_tool() {
+        let registry = ToolRegistry::new();
+        registry.register(make_tool("foo")).await.unwrap();
+        registry.unregister(&["foo".into()]).await;
+
+        let result = registry.invoke("foo", json!({})).await;
+        assert!(matches!(result, Err(ToolInvokeError::UnknownTool { name }) if name == "foo"));
+    }
+
+    #[tokio::test]
+    async fn unregister_unknown_name_returns_zero() {
+        let registry = ToolRegistry::new();
+        let removed = registry.unregister(&["nonexistent".into()]).await;
+        assert_eq!(removed, 0);
+    }
+
+    #[tokio::test]
+    async fn unregister_partial_names() {
+        let registry = ToolRegistry::new();
+        registry.register(make_tool("a")).await.unwrap();
+        registry.register(make_tool("b")).await.unwrap();
+
+        let removed = registry.unregister(&["a".into(), "missing".into()]).await;
+        assert_eq!(removed, 1);
+
+        let specs = registry.list_specs().await;
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].name, "b");
     }
 }
