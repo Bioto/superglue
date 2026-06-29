@@ -713,7 +713,32 @@ pub(crate) async fn dispatch_one(
                 ),
             )
             .await?;
-        let args: Value = serde_json::from_str(pre_ctx.content.trim())?;
+        // If the LLM's argument JSON was truncated (e.g. by token limits), return a
+        // soft error as a tool result so the model can retry rather than killing the turn.
+        // An empty arguments string is treated as `{}` because some models omit braces for
+        // no-parameter tools.
+        let args: Value = {
+            let raw = pre_ctx.content.trim();
+            if raw.is_empty() {
+                Value::Object(Default::default())
+            } else {
+                match serde_json::from_str(raw) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %tc.function.name,
+                            error = %e,
+                            "malformed tool-call JSON — returning error to model"
+                        );
+                        return Ok(serde_json::to_string(&serde_json::json!({
+                            "ok": false,
+                            "error": format!("tool call arguments were not valid JSON ({e}). \
+                                Please retry with complete, well-formed JSON arguments.")
+                        }))?);
+                    }
+                }
+            }
+        };
         let policy = registry.policy_for(&tc.function.name).await;
         let result = invoke_with_policy(registry, &tc.function.name, args, &policy).await?;
         let result_json = serde_json::to_string(&result)?;
@@ -1699,6 +1724,41 @@ where
 
         if !round.tool_calls.is_empty() {
             messages.push(msg.clone());
+
+            // If the model's output was cut short by the token limit, the tool-call
+            // arguments are truncated and cannot be parsed. Return a soft error for
+            // each pending call so the model knows to retry with smaller arguments.
+            if round.finish_reason.as_deref() == Some("length") {
+                let function_tcs: Vec<_> = round
+                    .tool_calls
+                    .iter()
+                    .filter(|tc| tc.kind == "function")
+                    .collect();
+                for tc in function_tcs {
+                    let error_content = serde_json::to_string(&serde_json::json!({
+                        "ok": false,
+                        "error": format!(
+                            "Your output was cut off by the model's token limit before the \
+                             tool-call arguments were complete. The tool '{}' did not run. \
+                             Please retry using smaller arguments — write one file at a time, \
+                             use edit_file for large changes, or split large content into \
+                             multiple smaller write_file calls.",
+                            tc.function.name
+                        )
+                    }))
+                    .unwrap_or_else(|_| r#"{"ok":false,"error":"output truncated"}"#.to_string());
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(MessageContent::Text(error_content)),
+                        tool_calls: None,
+                        tool_call_id: Some(tc.id.clone()),
+                        name: Some(tc.function.name.clone()),
+                        refusal: None,
+                    });
+                }
+                continue;
+            }
+
             let function_tcs: Vec<_> = round
                 .tool_calls
                 .iter()

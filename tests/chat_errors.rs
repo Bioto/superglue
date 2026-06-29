@@ -66,6 +66,26 @@ fn tool_call_response(tool: &str, args: &str) -> serde_json::Value {
     })
 }
 
+fn tool_call_response_length_truncated(tool: &str, args: &str) -> serde_json::Value {
+    json!({
+        "id": "chatcmpl-tool-trunc",
+        "model": "mock",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_trunc",
+                    "type": "function",
+                    "function": {"name": tool, "arguments": args}
+                }]
+            },
+            "finish_reason": "length"
+        }]
+    })
+}
+
 struct EchoTool;
 
 #[async_trait]
@@ -259,7 +279,14 @@ async fn empty_choices_returns_no_choice_error() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn malformed_tool_args_returns_serde_error() {
+async fn malformed_tool_args_returns_error_to_model_not_turn_failure() {
+    // When the LLM emits malformed tool-call JSON the error is returned as a
+    // soft tool-result message so the model can retry, rather than killing the
+    // turn immediately with ChatError::Serde.
+    //
+    // Since the mock always returns the same bad call the loop exhausts its
+    // rounds, but the turn should NOT fail with Serde — it fails with MaxToolRounds
+    // (or a text reply if the model recovers), never with a Serde parse error.
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -273,7 +300,7 @@ async fn malformed_tool_args_returns_serde_error() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let reg = ToolRegistry::new();
     reg.register(Arc::new(EchoTool)).await.unwrap();
-    let err = complete_with_tools(
+    let result = complete_with_tools(
         &http,
         &reg,
         &HookRegistry::new(),
@@ -281,11 +308,15 @@ async fn malformed_tool_args_returns_serde_error() {
         vec![ChatMessage::text("user", "call echo")],
         &default_opts(server.uri()),
     )
-    .await
-    .unwrap_err();
+    .await;
     assert!(
-        matches!(err, ChatError::Serde(_)),
-        "expected Serde error for bad JSON args, got {err:?}"
+        !matches!(result, Err(ChatError::Serde(_))),
+        "malformed tool args should not propagate as ChatError::Serde; got {result:?}"
+    );
+    // The mock keeps returning bad args so the run exhausts rounds.
+    assert!(
+        matches!(result, Err(ChatError::MaxToolRounds(_))) || result.is_ok(),
+        "expected MaxToolRounds or success (model recovers), got {result:?}"
     );
 }
 
@@ -569,6 +600,47 @@ async fn finish_reason_length_surfaced() {
     .await
     .unwrap();
     assert_eq!(out.finish_reason.as_deref(), Some("length"));
+}
+
+// When a tool call is truncated (finish_reason=="length"), the streaming loop
+// must NOT try to parse the incomplete JSON. Instead it returns a soft error
+// to the model, which then recovers with a text reply.
+#[tokio::test]
+async fn finish_reason_length_with_tool_call_returns_truncation_error_to_model() {
+    let server = MockServer::start().await;
+
+    // First call: truncated tool-call (finish_reason=length, incomplete args)
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            tool_call_response_length_truncated("echo", r#"{"input": "he"#),
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    // Second call: model recovers with a text reply
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(text_response("I'll retry")))
+        .mount(&server)
+        .await;
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    let reg = ToolRegistry::new();
+    reg.register(Arc::new(EchoTool)).await.unwrap();
+    let out = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        vec![ChatMessage::text("user", "echo something")],
+        &default_opts(server.uri()),
+    )
+    .await
+    .expect("should not fail — truncation must be soft-errored to model, not kill the turn");
+
+    assert_eq!(out.content.as_deref(), Some("I'll retry"));
 }
 
 // ---------------------------------------------------------------------------
