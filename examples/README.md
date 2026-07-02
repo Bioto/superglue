@@ -49,6 +49,9 @@ Set `OPENAI_BASE_URL` for Ollama or other OpenAI-compatible hosts (`08_custom_ba
 | 29 | multi-provider `provider:model` | `29_multi_provider` |
 | 30 | streaming with tool rounds | `30_streaming_tools` |
 | 31 | file upload / inline attachment | `31_file_upload` |
+| 32 | context optimization (GlueLLM) | `32_context_optimization` |
+| 33 | context optimization benchmark (wiremock) | `33_context_optimization_benchmark` |
+| 34 | context optimization benchmark (live API) | `34_context_optimization_live_benchmark` |
 | demo | quick demo | `demo` |
 
 Run with: `cargo run --example <name>` (no `.rs` suffix).

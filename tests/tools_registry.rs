@@ -17,6 +17,7 @@ impl Tool for EchoTool {
             name: "echo".to_string(),
             description: None,
             parameters_schema: json!({"type": "object"}),
+                    static_tool: false,
         }
     }
 
@@ -34,6 +35,7 @@ impl Tool for FailTool {
             name: "fail".to_string(),
             description: None,
             parameters_schema: json!({}),
+                    static_tool: false,
         }
     }
 

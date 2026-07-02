@@ -38,6 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     name: "broken_tool".into(),
                     description: Some("A tool that always fails.".into()),
                     parameters_schema: json!({"type": "object", "properties": {}}),
+                    static_tool: false,
                 },
                 |_| Err("Something went wrong inside the tool!".to_string()),
             )

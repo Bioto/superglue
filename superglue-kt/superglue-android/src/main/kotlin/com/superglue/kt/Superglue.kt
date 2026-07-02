@@ -103,6 +103,24 @@ public data class ClientConfig(
     public val requestsPerSecondFor: Map<String, Int>? = null,
     @SerialName("maxUploadBytes")
     public val maxUploadBytes: Int? = null,
+    @SerialName("toolMode")
+    public val toolMode: String = "standard",
+    @SerialName("toolRouteModel")
+    public val toolRouteModel: String? = null,
+    @SerialName("condenseToolMessages")
+    public val condenseToolMessages: Boolean = false,
+    @SerialName("aaakToolCondensing")
+    public val aaakToolCondensing: Boolean = false,
+    @SerialName("summarizeContextEnabled")
+    public val summarizeContextEnabled: Boolean = false,
+    @SerialName("summarizeContextThreshold")
+    public val summarizeContextThreshold: Int = 20,
+    @SerialName("summarizeContextKeepRecent")
+    public val summarizeContextKeepRecent: Int = 6,
+    @SerialName("aaakCompressionEnabled")
+    public val aaakCompressionEnabled: Boolean = false,
+    @SerialName("aaakCompressionModel")
+    public val aaakCompressionModel: String? = null,
 ) {
     public fun toConfigJsonString(): String = configJson.encodeToString(this)
 }
@@ -501,8 +519,9 @@ public class SuperglueClient
             description: String,
             parametersJson: String,
             callback: JsonCallback,
+            staticTool: Boolean = false,
         ) {
-            SuperglueNativeJni.clientRegisterTool(handle, name, description, parametersJson, callback)
+            SuperglueNativeJni.clientRegisterTool(handle, name, description, parametersJson, staticTool, callback)
         }
 
         public fun cancel() {
@@ -651,8 +670,9 @@ public class SuperglueAgentEngine
             description: String,
             parametersJson: String,
             callback: JsonCallback,
+            staticTool: Boolean = false,
         ) {
-            SuperglueNativeJni.agentEngineRegisterTool(handle, name, description, parametersJson, callback)
+            SuperglueNativeJni.agentEngineRegisterTool(handle, name, description, parametersJson, staticTool, callback)
         }
 
         public fun registerHook(

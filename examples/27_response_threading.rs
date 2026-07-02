@@ -18,6 +18,7 @@ impl Tool for EchoTool {
             name: "echo".to_string(),
             description: Some("Echo JSON arguments".into()),
             parameters_schema: json!({"type": "object"}),
+            static_tool: false,
         }
     }
 

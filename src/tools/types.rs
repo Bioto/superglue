@@ -13,6 +13,33 @@ pub struct ToolSpec {
     pub parameters_schema: Value,
     /// Optional human-readable description shown to the model.
     pub description: Option<String>,
+    /// When true, always included in dynamic tool mode (GlueLLM `@static_tool` parity).
+    #[serde(default)]
+    pub static_tool: bool,
+}
+
+impl ToolSpec {
+    #[must_use]
+    pub fn new(name: impl Into<String>, parameters_schema: Value) -> Self {
+        Self {
+            name: name.into(),
+            parameters_schema,
+            description: None,
+            static_tool: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_static_tool(mut self, static_tool: bool) -> Self {
+        self.static_tool = static_tool;
+        self
+    }
 }
 
 /// Single tool call emitted by an assistant/model (simulated in the harness).
@@ -30,6 +57,7 @@ impl From<proto::ToolSpec> for ToolSpec {
             name: p.name,
             parameters_schema,
             description: p.description,
+            static_tool: p.static_tool,
         }
     }
 }

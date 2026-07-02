@@ -18,6 +18,7 @@ pub enum ProcessEventKind {
     LlmCallError,
     ToolCallStart,
     ToolCallEnd,
+    ToolRoute,
     ReasoningDelta,
 }
 
@@ -30,6 +31,7 @@ impl ProcessEventKind {
             Self::LlmCallError => "llm_call_error",
             Self::ToolCallStart => "tool_call_start",
             Self::ToolCallEnd => "tool_call_end",
+            Self::ToolRoute => "tool_route",
             Self::ReasoningDelta => "reasoning_delta",
         }
     }

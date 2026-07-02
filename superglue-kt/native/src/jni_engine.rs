@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use jni::objects::{JClass, JObject, JString, JValue};
-use jni::sys::{jlong, jstring};
+use jni::sys::{jboolean, jlong, jstring};
 use jni::JNIEnv;
 use serde_json::Value;
 use superglue::agents::AgentEngine as SgAgentEngine;
@@ -65,6 +65,7 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_agentEngi
     name: JString,
     desc: JString,
     parameters_json: JString,
+    static_tool: jboolean,
     callback: JObject,
 ) {
     let jvm = ensure_jvm(&mut env);
@@ -96,6 +97,7 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_agentEngi
         name,
         description: Some(d),
         parameters_schema: parameters,
+        static_tool: static_tool != 0,
     };
     let tool: Arc<dyn Tool> = Arc::new(KotlinJsonTool {
         spec,

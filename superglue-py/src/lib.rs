@@ -731,6 +731,15 @@ impl PyClient {
         api_keys = None,
         requests_per_second_for = None,
         max_upload_bytes = None,
+        tool_mode = "standard",
+        tool_route_model = None,
+        condense_tool_messages = false,
+        aaak_tool_condensing = false,
+        summarize_context_enabled = false,
+        summarize_context_threshold = 20usize,
+        summarize_context_keep_recent = 6usize,
+        aaak_compression_enabled = false,
+        aaak_compression_model = None,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -755,6 +764,15 @@ impl PyClient {
         api_keys: Option<Bound<'_, PyDict>>,
         requests_per_second_for: Option<Bound<'_, PyDict>>,
         max_upload_bytes: Option<usize>,
+        tool_mode: &str,
+        tool_route_model: Option<String>,
+        condense_tool_messages: bool,
+        aaak_tool_condensing: bool,
+        summarize_context_enabled: bool,
+        summarize_context_threshold: usize,
+        summarize_context_keep_recent: usize,
+        aaak_compression_enabled: bool,
+        aaak_compression_model: Option<String>,
     ) -> PyResult<Self> {
         let api_keys_map = api_keys
             .map(|d| py_str_dict(&d))
@@ -814,8 +832,24 @@ impl PyClient {
         })
         .map_err(|e: ClientBuildError| PyRuntimeError::new_err(e.to_string()))?;
 
+        let mut options = bootstrap.options;
+        options.tool_mode = match tool_mode {
+            "dynamic" => superglue::tools::ToolMode::Dynamic,
+            _ => superglue::tools::ToolMode::Standard,
+        };
+        options.tool_route_model = tool_route_model;
+        options.condense_tool_messages = condense_tool_messages;
+        options.aaak_tool_condensing = aaak_tool_condensing;
+        options.summarize_context = superglue::context::SummarizeContextConfig {
+            enabled: summarize_context_enabled,
+            threshold: summarize_context_threshold,
+            keep_recent: summarize_context_keep_recent,
+        };
+        options.aaak_compression_enabled = aaak_compression_enabled;
+        options.aaak_compression_model = aaak_compression_model;
+
         Ok(Self {
-            options: bootstrap.options,
+            options,
             registry: Arc::new(ToolRegistry::new()),
             hooks: Arc::new(HookRegistry::new()),
             guardrails: Arc::new(
@@ -887,7 +921,7 @@ impl PyClient {
     ///   description (str): Human-readable description shown to the model.
     ///   parameters (dict): JSON Schema dict describing the tool's parameters.
     ///   fn (callable): Python function `def fn(args: dict) -> dict`.
-    #[pyo3(signature = (name, description, parameters, r#fn))]
+    #[pyo3(signature = (name, description, parameters, r#fn, static_tool = false))]
     fn register_tool(
         &self,
         py: Python<'_>,
@@ -895,6 +929,7 @@ impl PyClient {
         description: String,
         parameters: Bound<'_, PyAny>,
         r#fn: Py<PyAny>,
+        static_tool: bool,
     ) -> PyResult<()> {
         // Convert Python dict → JSON string → serde_json::Value
         let json_mod = py.import("json")?;
@@ -906,6 +941,7 @@ impl PyClient {
             name,
             description: Some(description),
             parameters_schema,
+            static_tool,
         };
         let callback = Arc::new(r#fn.clone_ref(py));
         let tool = Arc::new(PythonDictTool { spec, callback }) as Arc<dyn Tool>;
@@ -2253,7 +2289,7 @@ impl PyAgentEngine {
 
     // --- Tool registration (same API as PyClient) ---
 
-    #[pyo3(signature = (name, description, parameters, r#fn))]
+    #[pyo3(signature = (name, description, parameters, r#fn, static_tool = false))]
     fn register_tool(
         &self,
         py: Python<'_>,
@@ -2261,6 +2297,7 @@ impl PyAgentEngine {
         description: String,
         parameters: Bound<'_, PyAny>,
         r#fn: Py<PyAny>,
+        static_tool: bool,
     ) -> PyResult<()> {
         let json_mod = py.import("json")?;
         let params_json: String = json_mod.call_method1("dumps", (&parameters,))?.extract()?;
@@ -2270,6 +2307,7 @@ impl PyAgentEngine {
             name,
             description: Some(description),
             parameters_schema,
+            static_tool,
         };
         let callback = Arc::new(r#fn.clone_ref(py));
         let tool = Arc::new(PythonDictTool { spec, callback }) as Arc<dyn Tool>;

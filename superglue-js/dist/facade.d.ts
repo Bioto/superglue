@@ -26,6 +26,7 @@ export interface ToolDefinition {
     description: string;
     parameters: Record<string, unknown>;
     execute: (args: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>;
+    staticTool?: boolean;
 }
 /** Constructor option bag matching the native `Client` constructor parameter order. */
 export interface ClientOptions {
@@ -50,6 +51,15 @@ export interface ClientOptions {
     apiKeys?: Record<string, string> | null;
     requestsPerSecondFor?: Record<string, number> | null;
     maxUploadBytes?: number | null;
+    toolMode?: string | null;
+    toolRouteModel?: string | null;
+    condenseToolMessages?: boolean | null;
+    aaakToolCondensing?: boolean | null;
+    summarizeContextEnabled?: boolean | null;
+    summarizeContextThreshold?: number | null;
+    summarizeContextKeepRecent?: number | null;
+    aaakCompressionEnabled?: boolean | null;
+    aaakCompressionModel?: string | null;
 }
 export declare function createClient(options: ClientOptions): Client;
 /** Build a chat message JSON object with inline file bytes. */

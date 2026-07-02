@@ -46,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "properties": { "ticker": { "type": "string" } },
                         "required": ["ticker"]
                     }),
+                    static_tool: false,
                 },
                 |args| {
                     let t = args
@@ -74,6 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "properties": { "ticker": { "type": "string" } },
                         "required": ["ticker"]
                     }),
+                    static_tool: false,
                 },
                 |args| {
                     let t = args

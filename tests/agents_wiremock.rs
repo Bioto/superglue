@@ -214,6 +214,7 @@ impl Tool for AddTool {
                 },
                 "required": ["a", "b"]
             }),
+            static_tool: false,
         }
     }
 

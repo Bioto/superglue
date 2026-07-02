@@ -111,6 +111,7 @@ impl Tool for EchoTool {
             name: "echo".into(),
             description: Some("Echo the input.".into()),
             parameters_schema: json!({"type":"object","properties":{"x":{"type":"number"}},"required":["x"]}),
+            static_tool: false,
         }
     }
 
@@ -263,6 +264,7 @@ impl Tool for RecordingTool {
             name: "echo".into(),
             description: Some("Echo.".into()),
             parameters_schema: json!({"type":"object","properties":{"x":{"type":"number"}},"required":["x"]}),
+            static_tool: false,
         }
     }
 

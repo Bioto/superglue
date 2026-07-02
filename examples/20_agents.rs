@@ -83,6 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "properties": { "city": { "type": "string" } },
                         "required": ["city"]
                     }),
+                    static_tool: false,
                 },
                 |args| {
                     let city = args

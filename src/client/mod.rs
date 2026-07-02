@@ -18,6 +18,7 @@ use crate::chat::{
     complete_with_tools, stream_complete, stream_complete_with_tools, ChatError, ChatOptions,
     CompletionOutcome, Conversation, StreamOutcome,
 };
+use crate::context::SummarizeContextConfig;
 use crate::fallback::{FallbackPolicy, ModelFallbackChain};
 use crate::responses::{
     complete_with_tools as complete_response_with_tools, stream_response as stream_response_api,
@@ -31,7 +32,7 @@ use crate::guardrails::{
 use crate::hooks::{HookConfig, HookRegistry, HookStage};
 use crate::http::{Error as HttpError, HttpClient};
 use crate::openai::ChatMessage;
-use crate::tools::{Tool, ToolRegistry};
+use crate::tools::{Tool, ToolMode, ToolRegistry};
 
 pub use bootstrap::{
     bootstrap_from_parts, provider_id_from_str, BindingBootstrap, BindingBootstrapConfig,
@@ -101,6 +102,13 @@ pub struct ClientBuilder {
     provider_credentials: Option<crate::providers::ProviderCredentials>,
     provider_qps: HashMap<crate::providers::ProviderId, u32>,
     max_upload_bytes: usize,
+    tool_mode: ToolMode,
+    tool_route_model: Option<String>,
+    condense_tool_messages: bool,
+    aaak_tool_condensing: bool,
+    summarize_context: SummarizeContextConfig,
+    aaak_compression_enabled: bool,
+    aaak_compression_model: Option<String>,
 }
 
 impl Default for ClientBuilder {
@@ -127,6 +135,13 @@ impl Default for ClientBuilder {
             provider_credentials: None,
             provider_qps: HashMap::new(),
             max_upload_bytes: crate::files::default_max_upload_bytes(),
+            tool_mode: ToolMode::default(),
+            tool_route_model: None,
+            condense_tool_messages: false,
+            aaak_tool_condensing: false,
+            summarize_context: SummarizeContextConfig::default(),
+            aaak_compression_enabled: false,
+            aaak_compression_model: None,
         }
     }
 }
@@ -252,6 +267,42 @@ impl ClientBuilder {
         self
     }
 
+    /// Dynamic tool routing mode (`standard` or `dynamic`; GlueLLM parity).
+    pub fn tool_mode(mut self, mode: ToolMode) -> Self {
+        self.tool_mode = mode;
+        self
+    }
+
+    pub fn tool_route_model(mut self, model: impl Into<String>) -> Self {
+        self.tool_route_model = Some(model.into());
+        self
+    }
+
+    pub fn condense_tool_messages(mut self, enabled: bool) -> Self {
+        self.condense_tool_messages = enabled;
+        self
+    }
+
+    pub fn aaak_tool_condensing(mut self, enabled: bool) -> Self {
+        self.aaak_tool_condensing = enabled;
+        self
+    }
+
+    pub fn summarize_context(mut self, config: SummarizeContextConfig) -> Self {
+        self.summarize_context = config;
+        self
+    }
+
+    pub fn aaak_compression_enabled(mut self, enabled: bool) -> Self {
+        self.aaak_compression_enabled = enabled;
+        self
+    }
+
+    pub fn aaak_compression_model(mut self, model: impl Into<String>) -> Self {
+        self.aaak_compression_model = Some(model.into());
+        self
+    }
+
     /// Ordered model fallback chain (primary first). Applied after per-request HTTP retries.
     pub fn model_fallback_chain(
         mut self,
@@ -299,10 +350,18 @@ impl ClientBuilder {
             max_upload_bytes: self.max_upload_bytes,
         })?;
         let max_output_retries = self.max_output_retries;
+        let mut options = bootstrap.options;
+        options.tool_mode = self.tool_mode;
+        options.tool_route_model = self.tool_route_model;
+        options.condense_tool_messages = self.condense_tool_messages;
+        options.aaak_tool_condensing = self.aaak_tool_condensing;
+        options.summarize_context = self.summarize_context;
+        options.aaak_compression_enabled = self.aaak_compression_enabled;
+        options.aaak_compression_model = self.aaak_compression_model;
 
         Ok(Client {
             inner: Arc::new(ClientInner {
-                options: bootstrap.options,
+                options,
                 registry: Arc::new(ToolRegistry::new()),
                 hooks: Arc::new(HookRegistry::new()),
                 guardrails: Arc::new(

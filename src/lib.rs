@@ -11,6 +11,7 @@
 //!          [`http::download`] throttling, per-tool policies, [`audit`] run recording,
 //!          and optional [`grpc`] server.
 
+pub mod context;
 pub mod agents;
 pub mod audit;
 pub mod batch;

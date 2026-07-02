@@ -3,6 +3,7 @@
 mod conversation;
 pub mod reasoning;
 pub(crate) mod stream_tools;
+mod context_ops;
 
 use std::sync::Arc;
 
@@ -27,8 +28,15 @@ use crate::openai::{
     ChatCompletionChunk, ChatMessage, MessageContent, ResponseFormat, StopSequence, ToolCall,
     ToolChoice,
 };
+use self::context_ops::{
+    condense_tool_round, maybe_summarize_messages, resolve_tool_route, user_context_for_route,
+};
+use crate::context::SummarizeContextConfig;
 use crate::proto;
-use crate::tools::{OnToolError, ToolInvokeError, ToolRegistry, ToolRetryPolicy};
+use crate::tools::{
+    ActiveToolSet, OnToolError, ToolInvokeError, ToolMode, ToolRegistry, ToolRetryPolicy,
+    DEFAULT_TOOL_ROUTE_MODEL, is_router_call, router_query_from_calls,
+};
 
 /// Provider and model settings for [`complete_with_tools`].
 ///
@@ -108,6 +116,15 @@ pub struct ChatOptions {
 
     /// Multi-provider API keys (when set, used instead of legacy `api_key` / `base_url` alone).
     pub provider_credentials: Option<Arc<crate::providers::ProviderCredentials>>,
+
+    // --- Context optimization (GlueLLM parity) ---
+    pub tool_mode: ToolMode,
+    pub tool_route_model: Option<String>,
+    pub condense_tool_messages: bool,
+    pub aaak_tool_condensing: bool,
+    pub summarize_context: SummarizeContextConfig,
+    pub aaak_compression_enabled: bool,
+    pub aaak_compression_model: Option<String>,
 }
 
 impl Default for ChatOptions {
@@ -141,6 +158,13 @@ impl Default for ChatOptions {
             cancel: None,
             model_fallback: None,
             provider_credentials: None,
+            tool_mode: ToolMode::default(),
+            tool_route_model: None,
+            condense_tool_messages: false,
+            aaak_tool_condensing: false,
+            summarize_context: SummarizeContextConfig::default(),
+            aaak_compression_enabled: false,
+            aaak_compression_model: None,
         }
     }
 }
@@ -207,7 +231,27 @@ impl From<proto::ChatOptions> for ChatOptions {
             cancel: None,
             model_fallback: None,
             provider_credentials: None,
+            tool_mode: parse_tool_mode(p.tool_mode.as_deref()),
+            tool_route_model: p.tool_route_model,
+            condense_tool_messages: p.condense_tool_messages.unwrap_or(false),
+            aaak_tool_condensing: p.aaak_tool_condensing.unwrap_or(false),
+            summarize_context: SummarizeContextConfig {
+                enabled: p.summarize_context_enabled.unwrap_or(false),
+                threshold: usize::try_from(p.summarize_context_threshold.unwrap_or(20))
+                    .unwrap_or(20),
+                keep_recent: usize::try_from(p.summarize_context_keep_recent.unwrap_or(6))
+                    .unwrap_or(6),
+            },
+            aaak_compression_enabled: p.aaak_compression_enabled.unwrap_or(false),
+            aaak_compression_model: p.aaak_compression_model,
         }
+    }
+}
+
+fn parse_tool_mode(s: Option<&str>) -> ToolMode {
+    match s {
+        Some("dynamic") => ToolMode::Dynamic,
+        _ => ToolMode::Standard,
     }
 }
 
@@ -866,6 +910,13 @@ pub async fn complete_with_tools(
     let mut api_calls: u32 = 0;
     let mut model_used;
 
+    let all_specs = registry.list_specs().await;
+    let mut active_set = ActiveToolSet::new(all_specs, options.tool_mode);
+    let route_model = options
+        .tool_route_model
+        .as_deref()
+        .unwrap_or(DEFAULT_TOOL_ROUTE_MODEL);
+
     let outcome = loop {
         if api_calls >= options.max_tool_rounds {
             metrics::counter!(crate::telemetry::metrics::COMPLETIONS_ERRORS, "model" => options.model.clone(), "error_kind" => "max_tool_rounds").increment(1);
@@ -891,13 +942,26 @@ pub async fn complete_with_tools(
                 HookStage::PreCompletion,
                 observation_hook_ctx(
                     HookStage::PreCompletion,
-                    last_user,
+                    last_user.clone(),
                     &request_id,
                     api_calls,
                     &options.model,
                 ),
             )
             .await?;
+
+        maybe_summarize_messages(
+            http,
+            &credentials,
+            &mut messages,
+            &options.summarize_context,
+            options.aaak_compression_enabled,
+            options.aaak_compression_model.as_deref(),
+            &options.model,
+            options,
+            &request_id,
+        )
+        .await?;
 
         emit_safe(
             options.status_emitter.as_ref(),
@@ -913,12 +977,7 @@ pub async fn complete_with_tools(
         )
         .await;
 
-        let specs = registry.list_specs().await;
-        let tool_specs = if specs.is_empty() {
-            None
-        } else {
-            Some(specs.as_slice())
-        };
+        let tool_specs = active_set.specs_for_llm();
 
         let (val, model_ref) = match provider_chat_post(
             http,
@@ -1016,14 +1075,59 @@ pub async fn complete_with_tools(
             .await?;
 
         if !normalized.tool_calls.is_empty() {
-            messages.push(msg.clone());
-
-            // Run tool handlers concurrently on this process (order of `tool` messages follows `tool_calls`).
             let function_tcs: Vec<_> = normalized
                 .tool_calls
                 .iter()
                 .filter(|tc| tc.kind == "function")
                 .collect();
+
+            if active_set.has_router() && is_router_call(&normalized.tool_calls) {
+                let query = router_query_from_calls(&normalized.tool_calls)
+                    .unwrap_or_else(|| last_user.clone());
+                let user_context = user_context_for_route(&messages, &query);
+                let matched = resolve_tool_route(
+                    http,
+                    &credentials,
+                    &user_context,
+                    active_set.dynamic_specs(),
+                    route_model,
+                    options,
+                    &request_id,
+                )
+                .await;
+                active_set.apply_route(matched);
+                let matched_names: Vec<String> = active_set
+                    .specs_for_llm()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|s| !s.static_tool && s.name != crate::tools::ROUTER_TOOL_NAME)
+                    .map(|s| s.name.clone())
+                    .collect();
+                emit_safe(
+                    options.status_emitter.as_ref(),
+                    {
+                        let mut ev = ProcessEvent::new(
+                            ProcessEventKind::ToolRoute,
+                            &request_id,
+                            route_model,
+                        );
+                        ev.round = api_calls;
+                        ev.metadata
+                            .insert("route_query".to_string(), query.clone());
+                        ev.metadata.insert(
+                            "matched_tools".to_string(),
+                            matched_names.join(","),
+                        );
+                        ev
+                    },
+                )
+                .await;
+                continue;
+            }
+
+            messages.push(msg.clone());
+
+            // Run tool handlers concurrently on this process (order of `tool` messages follows `tool_calls`).
             tracing::info!(
                 count = function_tcs.len(),
                 request_id = %request_id,
@@ -1046,6 +1150,10 @@ pub async fn complete_with_tools(
             .await;
             for r in results {
                 messages.push(r?); // first Err propagates, respects FailFast / Retry / Skip
+            }
+
+            if options.condense_tool_messages {
+                condense_tool_round(&mut messages, options.aaak_tool_condensing);
             }
             continue;
         }
@@ -1546,6 +1654,13 @@ where
     let mut api_calls: u32 = 0;
     let mut model_used;
 
+    let all_specs = registry.list_specs().await;
+    let mut active_set = ActiveToolSet::new(all_specs, options.tool_mode);
+    let route_model = options
+        .tool_route_model
+        .as_deref()
+        .unwrap_or(DEFAULT_TOOL_ROUTE_MODEL);
+
     loop {
         if api_calls >= options.max_tool_rounds {
             return Err(ChatError::MaxToolRounds(options.max_tool_rounds));
@@ -1564,13 +1679,26 @@ where
                 HookStage::PreCompletion,
                 observation_hook_ctx(
                     HookStage::PreCompletion,
-                    last_user,
+                    last_user.clone(),
                     &request_id,
                     api_calls,
                     &options.model,
                 ),
             )
             .await?;
+
+        maybe_summarize_messages(
+            http,
+            &credentials,
+            &mut messages,
+            &options.summarize_context,
+            options.aaak_compression_enabled,
+            options.aaak_compression_model.as_deref(),
+            &options.model,
+            options,
+            &request_id,
+        )
+        .await?;
 
         emit_safe(
             options.status_emitter.as_ref(),
@@ -1586,12 +1714,7 @@ where
         )
         .await;
 
-        let specs = registry.list_specs().await;
-        let tool_specs = if specs.is_empty() {
-            None
-        } else {
-            Some(specs.as_slice())
-        };
+        let tool_specs = active_set.specs_for_llm();
 
         let (mut byte_stream, model_ref) = provider_chat_stream(
             http,
@@ -1723,6 +1846,50 @@ where
         };
 
         if !round.tool_calls.is_empty() {
+            if active_set.has_router() && is_router_call(&round.tool_calls) {
+                let query = router_query_from_calls(&round.tool_calls)
+                    .unwrap_or_else(|| last_user.clone());
+                let user_context = user_context_for_route(&messages, &query);
+                let matched = resolve_tool_route(
+                    http,
+                    &credentials,
+                    &user_context,
+                    active_set.dynamic_specs(),
+                    route_model,
+                    options,
+                    &request_id,
+                )
+                .await;
+                active_set.apply_route(matched);
+                let matched_names: Vec<String> = active_set
+                    .specs_for_llm()
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter(|s| !s.static_tool && s.name != crate::tools::ROUTER_TOOL_NAME)
+                    .map(|s| s.name.clone())
+                    .collect();
+                emit_safe(
+                    options.status_emitter.as_ref(),
+                    {
+                        let mut ev = ProcessEvent::new(
+                            ProcessEventKind::ToolRoute,
+                            &request_id,
+                            route_model,
+                        );
+                        ev.round = api_calls;
+                        ev.metadata
+                            .insert("route_query".to_string(), query.clone());
+                        ev.metadata.insert(
+                            "matched_tools".to_string(),
+                            matched_names.join(","),
+                        );
+                        ev
+                    },
+                )
+                .await;
+                continue;
+            }
+
             messages.push(msg.clone());
 
             // If the model's output was cut short by the token limit, the tool-call
@@ -1781,6 +1948,10 @@ where
             .await;
             for r in results {
                 messages.push(r?);
+            }
+
+            if options.condense_tool_messages {
+                condense_tool_round(&mut messages, options.aaak_tool_condensing);
             }
             continue;
         }

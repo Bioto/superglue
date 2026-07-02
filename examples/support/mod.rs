@@ -1,5 +1,7 @@
 //! Shared helpers for numbered `cargo run --example` binaries.
 
+pub mod context_tools;
+
 use std::process;
 use std::sync::Arc;
 
@@ -9,7 +11,7 @@ use superglue::chat::CompletionOutcome;
 use superglue::{Client, ClientBuildError};
 use superglue::tools::{Tool, ToolInvokeError, ToolSpec};
 
-pub const DEFAULT_MODEL: &str = "gpt-5.4-nano-2026-03-17-mini";
+pub const DEFAULT_MODEL: &str = "gpt-5.4-nano";
 
 pub fn require_api_key() -> String {
     match std::env::var("OPENAI_API_KEY") {
@@ -34,6 +36,8 @@ pub fn base_url() -> String {
     }
 }
 
+/// Default client from `OPENAI_*` env vars; not every example uses this helper.
+#[allow(dead_code)]
 pub fn client_from_env() -> Result<Client, ClientBuildError> {
     Client::builder()
         .api_key(require_api_key())
@@ -42,6 +46,8 @@ pub fn client_from_env() -> Result<Client, ClientBuildError> {
         .build()
 }
 
+/// Usage summary for example output; not every example calls this.
+#[allow(dead_code)]
 pub fn usage_line(outcome: &CompletionOutcome) -> String {
     match &outcome.usage {
         Some(u) => format!(
@@ -52,7 +58,8 @@ pub fn usage_line(outcome: &CompletionOutcome) -> String {
     }
 }
 
-/// Simple JSON tool backed by a Rust closure.
+/// Simple JSON tool backed by a Rust closure (used by examples 03–20, not all binaries).
+#[allow(dead_code)]
 pub struct FnTool<F>
 where
     F: Fn(Value) -> Result<Value, String> + Send + Sync,
@@ -61,6 +68,7 @@ where
     callback: F,
 }
 
+#[allow(dead_code)]
 impl<F> FnTool<F>
 where
     F: Fn(Value) -> Result<Value, String> + Send + Sync + 'static,
@@ -75,6 +83,7 @@ where
 }
 
 #[async_trait]
+#[allow(dead_code)]
 impl<F> Tool for FnTool<F>
 where
     F: Fn(Value) -> Result<Value, String> + Send + Sync + 'static,

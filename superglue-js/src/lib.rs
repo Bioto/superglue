@@ -572,6 +572,15 @@ impl Client {
         api_keys: Option<HashMap<String, String>>,
         requests_per_second_for: Option<HashMap<String, u32>>,
         max_upload_bytes: Option<u32>,
+        #[napi(ts_arg_type = "string | undefined")] tool_mode: Option<String>,
+        tool_route_model: Option<String>,
+        condense_tool_messages: Option<bool>,
+        aaak_tool_condensing: Option<bool>,
+        summarize_context_enabled: Option<bool>,
+        summarize_context_threshold: Option<u32>,
+        summarize_context_keep_recent: Option<u32>,
+        aaak_compression_enabled: Option<bool>,
+        aaak_compression_model: Option<String>,
     ) -> Result<Self> {
         let max_retries = max_retries.unwrap_or(3);
         let retry_initial_delay_ms = retry_initial_delay_ms.unwrap_or(50);
@@ -619,9 +628,25 @@ impl Client {
         })
         .map_err(|e: ClientBuildError| Error::from_reason(e.to_string()))?;
 
+        let mut options = bootstrap.options;
+        options.tool_mode = match tool_mode.as_deref() {
+            Some("dynamic") => superglue::tools::ToolMode::Dynamic,
+            _ => superglue::tools::ToolMode::Standard,
+        };
+        options.tool_route_model = tool_route_model;
+        options.condense_tool_messages = condense_tool_messages.unwrap_or(false);
+        options.aaak_tool_condensing = aaak_tool_condensing.unwrap_or(false);
+        options.summarize_context = superglue::context::SummarizeContextConfig {
+            enabled: summarize_context_enabled.unwrap_or(false),
+            threshold: summarize_context_threshold.unwrap_or(20) as usize,
+            keep_recent: summarize_context_keep_recent.unwrap_or(6) as usize,
+        };
+        options.aaak_compression_enabled = aaak_compression_enabled.unwrap_or(false);
+        options.aaak_compression_model = aaak_compression_model;
+
         Ok(Self {
             inner: Arc::new(ClientState {
-                options: bootstrap.options,
+                options,
                 registry: Arc::new(ToolRegistry::new()),
                 hooks: Arc::new(HookRegistry::new()),
                 guardrails: Arc::new(
@@ -686,11 +711,13 @@ impl Client {
         description: String,
         parameters: Value,
         callback: JsonCallback,
+        static_tool: Option<bool>,
     ) -> Result<()> {
         let spec = ToolSpec {
             name,
             description: Some(description),
             parameters_schema: parameters,
+            static_tool: static_tool.unwrap_or(false),
         };
         let tool = Arc::new(JsDictTool { spec, callback }) as Arc<dyn Tool>;
         self.inner
@@ -1520,11 +1547,13 @@ impl JsAgentEngine {
         description: String,
         parameters: Value,
         callback: JsonCallback,
+        static_tool: Option<bool>,
     ) -> Result<()> {
         let spec = ToolSpec {
             name,
             description: Some(description),
             parameters_schema: parameters,
+            static_tool: static_tool.unwrap_or(false),
         };
         let tool = Arc::new(JsDictTool { spec, callback }) as Arc<dyn Tool>;
         self.registry.register(tool).await.map_err(tool_error_to_napi)

@@ -13,6 +13,8 @@ message ToolSpec {
   string parameters_schema_json = 2;
   /// Optional human-readable description shown to the model.
   optional string description = 3;
+  /// Always available in dynamic tool mode (GlueLLM @static_tool parity).
+  bool static_tool = 4;
 }
 
 /// A tool call emitted by the model (function-call style).
@@ -88,6 +90,18 @@ message ChatOptions {
 
   /// JSON-encoded overrides for any field not covered above (merged into the request body).
   optional string extra_json = 19;
+
+  // --- Context optimization (GlueLLM parity) ---
+  /// "standard" | "dynamic"
+  optional string tool_mode = 20;
+  optional string tool_route_model = 21;
+  optional bool condense_tool_messages = 22;
+  optional bool aaak_tool_condensing = 23;
+  optional bool summarize_context_enabled = 24;
+  optional uint32 summarize_context_threshold = 25;
+  optional uint32 summarize_context_keep_recent = 26;
+  optional bool aaak_compression_enabled = 27;
+  optional string aaak_compression_model = 28;
 }
 
 message CompletionRequest {

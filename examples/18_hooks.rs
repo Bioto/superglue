@@ -107,6 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                         "required": ["city"]
                     }),
+                    static_tool: false,
                 },
                 |args| {
                     let city = args

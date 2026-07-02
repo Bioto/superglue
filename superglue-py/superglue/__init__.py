@@ -332,6 +332,15 @@ class Client:
         api_keys: dict[str, str] | None = None,
         requests_per_second_for: dict[str, int] | None = None,
         max_upload_bytes: int | None = None,
+        tool_mode: str = "standard",
+        tool_route_model: str | None = None,
+        condense_tool_messages: bool = False,
+        aaak_tool_condensing: bool = False,
+        summarize_context_enabled: bool = False,
+        summarize_context_threshold: int = 20,
+        summarize_context_keep_recent: int = 6,
+        aaak_compression_enabled: bool = False,
+        aaak_compression_model: str | None = None,
     ) -> None:
         self._rust = _RustClient(
             api_key=api_key,
@@ -355,6 +364,15 @@ class Client:
             api_keys=api_keys,
             requests_per_second_for=requests_per_second_for,
             max_upload_bytes=max_upload_bytes,
+            tool_mode=tool_mode,
+            tool_route_model=tool_route_model,
+            condense_tool_messages=condense_tool_messages,
+            aaak_tool_condensing=aaak_tool_condensing,
+            summarize_context_enabled=summarize_context_enabled,
+            summarize_context_threshold=summarize_context_threshold,
+            summarize_context_keep_recent=summarize_context_keep_recent,
+            aaak_compression_enabled=aaak_compression_enabled,
+            aaak_compression_model=aaak_compression_model,
         )
 
     def upload_file(
@@ -387,6 +405,7 @@ class Client:
         name: str | None = None,
         description: str | None = None,
         parameters: dict | None = None,
+        static_tool: bool = False,
     ) -> None:
         """Register a callable as a tool.
 
@@ -453,6 +472,7 @@ class Client:
             description=resolved_desc,
             parameters=resolved_params,
             fn=rust_fn,
+            static_tool=static_tool,
         )
 
     # ------------------------------------------------------------------
@@ -1186,6 +1206,7 @@ class Agent:
         name: str | None = None,
         description: str | None = None,
         parameters: dict | None = None,
+        static_tool: bool = False,
     ) -> None:
         """Register a Python callable as a tool.
 
@@ -1216,6 +1237,7 @@ class Agent:
             description=resolved_desc,
             parameters=resolved_params,
             fn=rust_fn,
+            static_tool=static_tool,
         )
 
     def register_hook(

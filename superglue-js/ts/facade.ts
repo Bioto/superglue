@@ -56,6 +56,7 @@ export interface ToolDefinition {
   execute: (
     args: Record<string, unknown>,
   ) => Record<string, unknown> | Promise<Record<string, unknown>>;
+  staticTool?: boolean;
 }
 
 /** Constructor option bag matching the native `Client` constructor parameter order. */
@@ -81,6 +82,15 @@ export interface ClientOptions {
   apiKeys?: Record<string, string> | null;
   requestsPerSecondFor?: Record<string, number> | null;
   maxUploadBytes?: number | null;
+  toolMode?: string | null;
+  toolRouteModel?: string | null;
+  condenseToolMessages?: boolean | null;
+  aaakToolCondensing?: boolean | null;
+  summarizeContextEnabled?: boolean | null;
+  summarizeContextThreshold?: number | null;
+  summarizeContextKeepRecent?: number | null;
+  aaakCompressionEnabled?: boolean | null;
+  aaakCompressionModel?: string | null;
 }
 
 function envOpenAiModel(): string | undefined {
@@ -113,6 +123,15 @@ export function createClient(options: ClientOptions): Client {
     options.apiKeys ?? undefined,
     options.requestsPerSecondFor ?? undefined,
     options.maxUploadBytes ?? undefined,
+    options.toolMode ?? undefined,
+    options.toolRouteModel ?? undefined,
+    options.condenseToolMessages ?? undefined,
+    options.aaakToolCondensing ?? undefined,
+    options.summarizeContextEnabled ?? undefined,
+    options.summarizeContextThreshold ?? undefined,
+    options.summarizeContextKeepRecent ?? undefined,
+    options.aaakCompressionEnabled ?? undefined,
+    options.aaakCompressionModel ?? undefined,
   );
 }
 
@@ -137,9 +156,9 @@ export async function registerTool(
     def.name,
     def.description,
     def.parameters,
-    // CalleeHandled threadsafe fn is invoked as (err, args). First arg is null on success.
     async (_err: unknown, args: unknown) =>
       def.execute((args ?? {}) as Record<string, unknown>),
+    def.staticTool ?? undefined,
   );
 }
 

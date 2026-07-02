@@ -52,6 +52,22 @@ pub struct ClientCreateJson {
     #[serde(default)]
     pub requests_per_second_for: Option<std::collections::HashMap<String, u32>>,
     pub max_upload_bytes: Option<u32>,
+    #[serde(default = "default_tool_mode")]
+    pub tool_mode: String,
+    pub tool_route_model: Option<String>,
+    #[serde(default)]
+    pub condense_tool_messages: bool,
+    #[serde(default)]
+    pub aaak_tool_condensing: bool,
+    #[serde(default)]
+    pub summarize_context_enabled: bool,
+    #[serde(default = "default_u16_20")]
+    pub summarize_context_threshold: u32,
+    #[serde(default = "default_u16_6")]
+    pub summarize_context_keep_recent: u32,
+    #[serde(default)]
+    pub aaak_compression_enabled: bool,
+    pub aaak_compression_model: Option<String>,
 }
 
 fn default_model() -> String {
@@ -83,6 +99,15 @@ fn default_i64_30() -> i64 {
 }
 fn default_u16_50_pool() -> u32 {
     50
+}
+fn default_u16_20() -> u32 {
+    20
+}
+fn default_u16_6() -> u32 {
+    6
+}
+fn default_tool_mode() -> String {
+    "standard".to_string()
 }
 
 /// Parse and build [`ClientState`] (same as `superglue-js` `Client::new`).
@@ -145,6 +170,22 @@ pub fn build_client_state(json: &str) -> Result<ClientState, String> {
     })
     .map_err(|e| e.to_string())?;
 
+    let mut options = bootstrap.options;
+    options.tool_mode = match c.tool_mode.as_str() {
+        "dynamic" => superglue::tools::ToolMode::Dynamic,
+        _ => superglue::tools::ToolMode::Standard,
+    };
+    options.tool_route_model = c.tool_route_model.clone();
+    options.condense_tool_messages = c.condense_tool_messages;
+    options.aaak_tool_condensing = c.aaak_tool_condensing;
+    options.summarize_context = superglue::context::SummarizeContextConfig {
+        enabled: c.summarize_context_enabled,
+        threshold: c.summarize_context_threshold as usize,
+        keep_recent: c.summarize_context_keep_recent as usize,
+    };
+    options.aaak_compression_enabled = c.aaak_compression_enabled;
+    options.aaak_compression_model = c.aaak_compression_model.clone();
+
     use superglue::guardrails::GuardrailRegistry;
     use superglue::hooks::HookRegistry;
     use superglue::tools::ToolRegistry;
@@ -153,7 +194,7 @@ pub fn build_client_state(json: &str) -> Result<ClientState, String> {
     let (cancel_tx, _cancel_rx) = watch::channel(0_u64);
 
     Ok(ClientState {
-        options: bootstrap.options,
+        options,
         registry: std::sync::Arc::new(ToolRegistry::new()),
         hooks: std::sync::Arc::new(HookRegistry::new()),
         guardrails: std::sync::Arc::new(

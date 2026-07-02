@@ -27,6 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 "required": ["location"]
             }),
+            static_tool: false,
         },
         |args| {
             let location = args

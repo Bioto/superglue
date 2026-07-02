@@ -12,8 +12,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(Py_GIL_DISABLED)'] }
 name = "superglue_py"
 crate-type = ["cdylib"]
 
-build = "build.rs"
-
 [dependencies]
 async-trait = "0.1"
 prost = "0.13"

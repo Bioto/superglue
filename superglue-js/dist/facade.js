@@ -39,16 +39,14 @@ function envOpenAiModel() {
 }
 function createClient(options) {
     const model = options.model ?? envOpenAiModel();
-    return new index_js_1.Client(options.apiKey, model, options.baseUrl, options.systemPrompt ?? undefined, options.maxToolRounds ?? undefined, options.maxRetries ?? undefined, options.retryInitialDelayMs ?? undefined, options.retryMaxDelayMs ?? undefined, options.retryMultiplier ?? undefined, options.requestsPerSecond ?? undefined, options.timeoutSecs ?? undefined, options.connectTimeoutSecs ?? undefined, options.maxOutputRetries ?? undefined, options.poolMaxIdlePerHost ?? undefined, options.poolIdleTimeoutSecs ?? undefined, options.reasoningEffort ?? undefined, options.statusEmitter ?? undefined, options.modelFallbackModels ?? undefined, options.apiKeys ?? undefined, options.requestsPerSecondFor ?? undefined, options.maxUploadBytes ?? undefined);
+    return new index_js_1.Client(options.apiKey, model, options.baseUrl, options.systemPrompt ?? undefined, options.maxToolRounds ?? undefined, options.maxRetries ?? undefined, options.retryInitialDelayMs ?? undefined, options.retryMaxDelayMs ?? undefined, options.retryMultiplier ?? undefined, options.requestsPerSecond ?? undefined, options.timeoutSecs ?? undefined, options.connectTimeoutSecs ?? undefined, options.maxOutputRetries ?? undefined, options.poolMaxIdlePerHost ?? undefined, options.poolIdleTimeoutSecs ?? undefined, options.reasoningEffort ?? undefined, options.statusEmitter ?? undefined, options.modelFallbackModels ?? undefined, options.apiKeys ?? undefined, options.requestsPerSecondFor ?? undefined, options.maxUploadBytes ?? undefined, options.toolMode ?? undefined, options.toolRouteModel ?? undefined, options.condenseToolMessages ?? undefined, options.aaakToolCondensing ?? undefined, options.summarizeContextEnabled ?? undefined, options.summarizeContextThreshold ?? undefined, options.summarizeContextKeepRecent ?? undefined, options.aaakCompressionEnabled ?? undefined, options.aaakCompressionModel ?? undefined);
 }
 /** Build a chat message JSON object with inline file bytes. */
 function messageWithFileBytes(filename, fileBytes, text) {
     return index_js_1.Client.messageWithFileBytes(filename, fileBytes, text ?? undefined);
 }
 async function registerTool(client, def) {
-    return client.registerTool(def.name, def.description, def.parameters, 
-    // CalleeHandled threadsafe fn is invoked as (err, args). First arg is null on success.
-    async (_err, args) => def.execute((args ?? {})));
+    return client.registerTool(def.name, def.description, def.parameters, async (_err, args) => def.execute((args ?? {})), def.staticTool ?? undefined);
 }
 /** Normalize native callback args to `[stage, content]` strings. */
 function guardrailStageContent(a, b) {

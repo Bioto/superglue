@@ -35,6 +35,7 @@ impl Tool for AlwaysFailTool {
             name: "always_fail".into(),
             description: None,
             parameters_schema: json!({}),
+                    static_tool: false,
         }
     }
     async fn call(&self, _: Value) -> Result<Value, ToolInvokeError> {
@@ -56,6 +57,7 @@ impl Tool for FlakeyTool {
             name: self.name.clone(),
             description: None,
             parameters_schema: json!({}),
+                    static_tool: false,
         }
     }
     async fn call(&self, _: Value) -> Result<Value, ToolInvokeError> {

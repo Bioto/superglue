@@ -95,6 +95,7 @@ impl Tool for EchoTool {
             name: "echo".into(),
             description: None,
             parameters_schema: json!({"type": "object"}),
+                    static_tool: false,
         }
     }
     async fn call(&self, args: Value) -> Result<Value, ToolInvokeError> {
@@ -111,6 +112,7 @@ impl Tool for ErrorTool {
             name: "error_tool".into(),
             description: None,
             parameters_schema: json!({}),
+                    static_tool: false,
         }
     }
     async fn call(&self, _: Value) -> Result<Value, ToolInvokeError> {

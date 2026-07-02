@@ -30,6 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     name: "counter_tool".into(),
                     description: Some("Increment a counter and return whether to continue.".into()),
                     parameters_schema: json!({"type": "object", "properties": {}}),
+                    static_tool: false,
                 },
                 |_| {
                     let count = CALL_COUNT.fetch_add(1, Ordering::SeqCst) + 1;

@@ -25,6 +25,7 @@ public final class SuperglueNativeJni {
         String name,
         String description,
         String parametersJson,
+        boolean staticTool,
         JsonCallback callback
     );
 
@@ -182,6 +183,7 @@ public final class SuperglueNativeJni {
         String name,
         String description,
         String parametersJson,
+        boolean staticTool,
         JsonCallback callback
     );
 

@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                         "required": ["a", "b"]
                     }),
+                    static_tool: false,
                 },
                 |args| {
                     let a = args.get("a").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -54,6 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                         "required": ["a", "b"]
                     }),
+                    static_tool: false,
                 },
                 |args| {
                     let a = args.get("a").and_then(|v| v.as_i64()).unwrap_or(0);

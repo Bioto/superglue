@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "properties": { "location": { "type": "string" } },
                             "required": ["location"]
                         }),
+                        static_tool: false,
                     },
                     |args| {
                         let loc = args
@@ -68,6 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "properties": { "location": { "type": "string" } },
                         "required": ["location"]
                     }),
+                    static_tool: false,
                 },
                 |args| {
                     let loc = args

@@ -237,6 +237,7 @@ fn mcp_tool_to_spec(tool: &McpToolDef, registered_name: &str) -> ToolSpec {
         name: registered_name.to_string(),
         description: tool.description.as_ref().map(|d| d.to_string()),
         parameters_schema: Value::Object(tool.input_schema.as_ref().clone()),
+        static_tool: false,
     }
 }
 

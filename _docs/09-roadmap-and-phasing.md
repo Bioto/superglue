@@ -52,7 +52,8 @@
 - ✅ Per-tool error policies (FailFast / Skip / Retry with exponential back-off).
 - ✅ Cooperative cancellation (`CancellationToken`) in batch and chat loops.
 - ✅ Throttled downloads (`governor` bandwidth limiter with progress callback).
-- 🔲 Migration guide from Python GlueLLM.
+- ✅ Context optimization (GlueLLM parity): dynamic tool routing, tool-round condensing, AAAK encoding, history compression — see [Context optimization](11-context-optimization.md).
+- 🔲 Migration guide from Python GlueLLM (partial: context optimization flags documented in [11-context-optimization.md](11-context-optimization.md)).
 
 ## Continuous cross-cutting work
 

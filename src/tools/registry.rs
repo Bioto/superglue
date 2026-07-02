@@ -114,6 +114,7 @@ mod tests {
                 name: self.name.clone(),
                 description: Some("echo".into()),
                 parameters_schema: serde_json::json!({"type": "object", "properties": {}}),
+                static_tool: false,
             }
         }
 

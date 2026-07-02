@@ -291,7 +291,8 @@ fn request_with_tools_present() {
         name: "search".into(),
         description: Some("Search the web".into()),
         parameters_schema: json!({"type": "object"}),
-    });
+                static_tool: false,
+        });
     let req = ChatCompletionRequest::new(
         "gpt-5.4-nano-2026-03-17".into(),
         vec![ChatMessage::text("user", "search for Rust")],
@@ -499,6 +500,7 @@ fn chat_tool_from_spec_with_description() {
         name: "get_time".into(),
         description: Some("Returns the current UTC time.".into()),
         parameters_schema: json!({"type": "object", "properties": {}}),
+        static_tool: false,
     };
     let tool = ChatTool::from(spec);
     let v = serde_json::to_value(&tool).unwrap();
@@ -518,7 +520,8 @@ fn chat_tool_from_spec_no_description_omitted() {
         name: "noop".into(),
         description: None,
         parameters_schema: json!({}),
-    };
+                static_tool: false,
+        };
     let tool = ChatTool::from(spec);
     let v = serde_json::to_value(&tool).unwrap();
     assert!(v["function"].get("description").is_none());
