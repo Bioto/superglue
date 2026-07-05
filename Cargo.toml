@@ -48,9 +48,9 @@ bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 governor = "0.8"
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
-    "rustls-tls",
+    "rustls",
     "stream",
     "multipart",
 ] }
