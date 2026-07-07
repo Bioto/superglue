@@ -40,6 +40,9 @@ pub use client::{CallOptions, Client, ClientBuilder, ClientBuildError, ClientCon
 #[cfg(feature = "grpc")]
 pub mod grpc;
 
+#[cfg(feature = "gateway")]
+pub mod gateway;
+
 /// Returns a short version string for the crate.
 #[must_use]
 pub fn version() -> &'static str {

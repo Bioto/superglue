@@ -538,6 +538,57 @@ pub(crate) async fn provider_chat_stream(
     )))
 }
 
+/// Gateway-facing wrapper around [`provider_chat_post`].
+#[cfg(feature = "gateway")]
+pub async fn proxy_chat_post(
+    http: &HttpClient,
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    tool_specs: Option<&[crate::tools::ToolSpec]>,
+    options: &ChatOptions,
+    request_id: &str,
+) -> Result<(Value, crate::providers::ModelRef), ChatError> {
+    provider_chat_post(
+        http,
+        credentials,
+        messages,
+        tool_specs,
+        options,
+        request_id,
+        1,
+        false,
+    )
+    .await
+}
+
+/// Gateway-facing wrapper around [`provider_chat_stream`].
+#[cfg(feature = "gateway")]
+pub async fn proxy_chat_stream(
+    http: &HttpClient,
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    tool_specs: Option<&[crate::tools::ToolSpec]>,
+    options: &ChatOptions,
+    request_id: &str,
+) -> Result<
+    (
+        impl futures_util::Stream<Item = Result<bytes::Bytes, HttpError>> + Send + use<>,
+        crate::providers::ModelRef,
+    ),
+    ChatError,
+> {
+    provider_chat_stream(
+        http,
+        credentials,
+        messages,
+        tool_specs,
+        options,
+        request_id,
+        1,
+    )
+    .await
+}
+
 /// POST JSON with per-model HTTP retries and optional model fallback chain.
 pub(crate) async fn post_json_with_model_fallback(
     http: &HttpClient,

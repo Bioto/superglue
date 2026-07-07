@@ -16,6 +16,7 @@ These documents describe **intent, tradeoffs, and current implementation status*
 8. [Operations: throttled downloads](08-operations-throttled-downloads.md) — rate-limited artifact fetch.
 9. [Roadmap and phasing](09-roadmap-and-phasing.md) — incremental delivery plan with current status.
 10. [Ecosystem reference](10-ecosystem-reference.md) — Rust crates in use and prior art.
+11. [LLM Gateway](12-llm-gateway.md) — HTTP proxy with keys, budgets, and usage tracking (`gateway` feature).
 
 ## Current implementation status
 
@@ -45,6 +46,7 @@ These documents describe **intent, tradeoffs, and current implementation status*
 | Audit trail (`RunStore` + `RunRecorder`) | ✅ shipped |
 | Process events (`StatusEmitter` + cost estimation) | ✅ shipped |
 | gRPC server (`tonic`, `grpc` feature) | ✅ shipped |
+| LLM gateway (`axum`, `gateway` feature) | ✅ shipped |
 | Node.js binding (`napi-rs`) | 🔲 planned |
 | Proto-generated language client stubs | 🔲 planned |
 | Replay / run-resume from audit trail | 🔲 planned |

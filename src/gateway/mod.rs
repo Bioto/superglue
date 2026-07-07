@@ -1,0 +1,107 @@
+//! LLM gateway server — OpenAI-compatible proxy with keys, budgets, and usage tracking.
+
+mod auth;
+mod budget;
+pub mod cli;
+mod config;
+mod db;
+mod error;
+mod model_access;
+mod proxy;
+mod routes;
+
+pub use routes::router;
+
+pub use config::GatewayConfig;
+pub use error::GatewayError;
+pub use cli::{DbArgs, GatewayCommand, OutputFormat};
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tracing::info;
+
+use crate::gateway::auth::hash_key;
+use crate::gateway::db::Database;
+use crate::http::{ClientConfig, HttpClient};
+use crate::providers::ProviderCredentials;
+
+/// Shared state for all gateway HTTP handlers.
+pub struct GatewayState {
+    pub config: GatewayConfig,
+    pub db: Database,
+    pub http: Arc<HttpClient>,
+    pub credentials: Arc<ProviderCredentials>,
+    pub master_key_hash: [u8; 32],
+}
+
+impl GatewayState {
+    /// Build gateway state from configuration, opening the database and loading provider credentials.
+    pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
+        Self::with_credentials(config, ProviderCredentials::from_env())
+    }
+
+    /// Build gateway state with explicit provider credentials (used in tests).
+    pub fn with_credentials(
+        config: GatewayConfig,
+        credentials: ProviderCredentials,
+    ) -> Result<Self, GatewayError> {
+        let db = Database::open(&config.db_path)?;
+        let http = Arc::new(
+            HttpClient::new(ClientConfig::default())
+                .map_err(|e| GatewayError::Internal(e.to_string()))?,
+        );
+        let master_key_hash = hash_key(config.master_key_exposed());
+        Ok(Self {
+            config,
+            db,
+            http,
+            credentials: Arc::new(credentials),
+            master_key_hash,
+        })
+    }
+}
+
+/// Start the axum HTTP server on the configured listen address.
+pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
+    let state = Arc::new(GatewayState::new(config)?);
+    let addr: SocketAddr = state
+        .config
+        .listen_addr
+        .parse()
+        .map_err(|e| GatewayError::Internal(format!("invalid listen address: {e}")))?;
+    let app = router(state.clone());
+
+    info!(%addr, "superglue gateway server starting");
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| GatewayError::Internal(format!("failed to bind: {e}")))?;
+    axum::serve(listener, app)
+        .await
+        .map_err(|e| GatewayError::Internal(format!("server error: {e}")))?;
+    Ok(())
+}
+
+/// Build test gateway state with a temporary database (integration tests).
+pub fn test_state(master_key: &str, db_path: &std::path::Path) -> Arc<GatewayState> {
+    let config = GatewayConfig::new("127.0.0.1:0", db_path.to_path_buf(), master_key);
+    Arc::new(GatewayState::new(config).expect("test gateway state"))
+}
+
+/// Test state with OpenAI credentials pointed at a mock server.
+pub fn test_state_with_openai(
+    master_key: &str,
+    db_path: &std::path::Path,
+    base_url: &str,
+    api_key: &str,
+) -> Arc<GatewayState> {
+    use crate::providers::{ProviderCredentials, ProviderId};
+    let config = GatewayConfig::new("127.0.0.1:0", db_path.to_path_buf(), master_key);
+    let mut credentials = ProviderCredentials::new();
+    credentials.insert_key(ProviderId::OpenAi, api_key);
+    credentials.insert_base_url(ProviderId::OpenAi, base_url);
+    Arc::new(
+        GatewayState::with_credentials(config, credentials).expect("test gateway state"),
+    )
+}
