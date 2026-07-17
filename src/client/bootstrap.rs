@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
-use secrecy::Secret;
+use secrecy::SecretString;
 
 use crate::chat::ChatOptions;
 use crate::fallback::ModelFallbackChain;
@@ -117,7 +117,7 @@ pub fn bootstrap_from_parts(config: BindingBootstrapConfig) -> Result<BindingBoo
     let http = HttpClient::new(http_cfg)?;
 
     let options = ChatOptions {
-        api_key: Secret::new(api_key),
+        api_key: SecretString::from(api_key),
         model: config.model,
         base_url: config.base_url,
         system_prompt: config.system_prompt,

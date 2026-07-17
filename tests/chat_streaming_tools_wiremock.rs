@@ -125,7 +125,7 @@ async fn stream_tool_round_then_text() {
     reg.register(Arc::new(EchoTool)).await.unwrap();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "openai:mock".into(),
         max_tool_rounds: 4,
         ..Default::default()

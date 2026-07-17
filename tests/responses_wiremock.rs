@@ -22,7 +22,7 @@ fn http_client() -> HttpClient {
 fn opts(base_url: String) -> ChatOptions {
     ChatOptions {
         base_url,
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()

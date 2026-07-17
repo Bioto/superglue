@@ -84,7 +84,7 @@ async fn completion_text_only_no_tools() {
     let reg = ToolRegistry::new();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()
@@ -131,7 +131,7 @@ async fn completion_tool_then_assistant_text() {
     reg.register(std::sync::Arc::new(EchoTool)).await.unwrap();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()
@@ -170,7 +170,7 @@ async fn max_tool_rounds_returns_error() {
     reg.register(std::sync::Arc::new(EchoTool)).await.unwrap();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 2,
         ..Default::default()
@@ -202,7 +202,7 @@ async fn system_prompt_is_prepended() {
     let reg = ToolRegistry::new();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         system_prompt: Some("You are helpful.".into()),
@@ -237,7 +237,7 @@ async fn conversation_accumulates_two_user_turns() {
     let reg = ToolRegistry::new();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()
@@ -349,7 +349,7 @@ async fn stream_complete_delivers_tokens() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let options = superglue::chat::ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("test".to_string()),
+        api_key: secrecy::SecretString::from("test".to_string()),
         model: "mock".into(),
         ..Default::default()
     };
@@ -441,7 +441,7 @@ async fn parallel_tool_calls_complete_in_one_round() {
 
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 8,
         ..Default::default()

@@ -112,7 +112,7 @@ fn text_response(text: &str) -> Value {
 fn chat_options(base_url: &str) -> ChatOptions {
     ChatOptions {
         base_url: base_url.to_string(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 8,
         ..Default::default()

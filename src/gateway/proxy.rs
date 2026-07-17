@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
-use secrecy::Secret;
+use secrecy::SecretString;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -36,7 +36,7 @@ pub struct GatewayCompletionBody {
 pub fn chat_options_from_request(req: &ChatCompletionRequest, request_id: &str) -> ChatOptions {
     let mut options = ChatOptions {
         base_url: "https://api.openai.com".into(),
-        api_key: Secret::new(String::new()),
+        api_key: SecretString::from(String::new()),
         model: req.model.clone(),
         max_tool_rounds: 0,
         system_prompt: None,

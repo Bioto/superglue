@@ -6,7 +6,7 @@ fn main() {
     if std::env::var("CARGO_FEATURE_GRPC").is_ok() {
         // When the `grpc` feature is enabled, tonic_build generates both the prost message
         // types AND the service trait + server/client stubs in one pass.
-        tonic_build::configure()
+        tonic_prost_build::configure()
             .build_server(true)
             .build_client(false)
             .compile_protos(&["proto/superglue.proto"], &["proto/"])

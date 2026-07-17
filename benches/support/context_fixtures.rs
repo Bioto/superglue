@@ -305,7 +305,7 @@ pub async fn run_scenario(
 
     let mut opts = opts;
     opts.base_url = server.uri();
-    opts.api_key = secrecy::Secret::new("sk-test".to_string());
+    opts.api_key = secrecy::SecretString::from("sk-test".to_string());
     opts.model = "mock".into();
     opts.max_tool_rounds = 12;
     if dynamic {

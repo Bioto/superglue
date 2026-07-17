@@ -13,7 +13,7 @@ use napi::Status;
 use napi_derive::napi;
 
 type StdResult<T, E> = std::result::Result<T, E>;
-use secrecy::Secret;
+use secrecy::SecretString;
 use serde_json::{json, Value};
 use superglue::agents::{AgentEngine as SgAgentEngine, AgentSpec};
 use superglue::batch::{BatchConfig, BatchRequest, ErrorStrategy, batch_complete};

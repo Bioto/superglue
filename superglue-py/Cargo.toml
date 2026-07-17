@@ -14,9 +14,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 async-trait = "0.1"
-prost = "0.13"
-pyo3 = { version = "0.28", features = ["extension-module"] }
-secrecy = "0.8"
+prost = "0.14"
+pyo3 = { version = "0.29", features = ["extension-module"] }
+secrecy = "0.10"
 serde_json = "1"
 superglue = { path = "..", features = ["mcp"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

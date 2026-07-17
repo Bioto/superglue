@@ -2,14 +2,14 @@
 
 use std::path::PathBuf;
 
-use secrecy::{ExposeSecret, Secret};
+use secrecy::{ExposeSecret, SecretString};
 
 /// Runtime configuration for the LLM gateway server.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub listen_addr: String,
     pub db_path: PathBuf,
-    pub master_key: Secret<String>,
+    pub master_key: SecretString,
 }
 
 impl GatewayConfig {
@@ -18,7 +18,7 @@ impl GatewayConfig {
         Self {
             listen_addr: listen_addr.into(),
             db_path,
-            master_key: Secret::new(master_key.into()),
+            master_key: SecretString::from(master_key.into()),
         }
     }
 

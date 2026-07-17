@@ -54,7 +54,7 @@ async fn fallback_on_429_uses_secondary_model() {
     let chain = ModelFallbackChain::new(vec!["primary".into(), "backup".into()]);
     let options = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "primary".into(),
         max_tool_rounds: 4,
         model_fallback: Some(chain),
@@ -88,7 +88,7 @@ async fn default_policy_does_not_fallback_on_401() {
     let chain = ModelFallbackChain::new(vec!["primary".into(), "backup".into()]);
     let options = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-bad".to_string()),
+        api_key: secrecy::SecretString::from("sk-bad".to_string()),
         model: "primary".into(),
         max_tool_rounds: 4,
         model_fallback: Some(chain),
@@ -132,7 +132,7 @@ async fn custom_policy_fallback_on_401() {
         });
     let options = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "primary".into(),
         max_tool_rounds: 4,
         model_fallback: Some(chain),

@@ -191,7 +191,7 @@ async fn dynamic_routing_selects_tools_then_executes() {
 
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 8,
         tool_mode: ToolMode::Dynamic,
@@ -241,7 +241,7 @@ async fn condense_tool_messages_collapses_tool_round() {
 
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         condense_tool_messages: true,

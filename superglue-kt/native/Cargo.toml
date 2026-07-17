@@ -13,8 +13,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 async-trait = "0.1"
-jni = "0.21"
-secrecy = "0.8"
+jni = "0.22"
+secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 superglue = { path = "../..", features = ["mcp"] }

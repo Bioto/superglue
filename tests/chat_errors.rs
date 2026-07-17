@@ -25,7 +25,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 fn default_opts(base_url: String) -> ChatOptions {
     ChatOptions {
         base_url,
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 8,
         ..Default::default()
@@ -417,7 +417,7 @@ async fn temperature_forwarded_to_request() {
     let reg = ToolRegistry::new();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("test".to_string()),
+        api_key: secrecy::SecretString::from("test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         temperature: Some(0.42),
@@ -505,7 +505,7 @@ async fn system_prompt_prepended_as_first_message() {
     let reg = ToolRegistry::new();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("test".to_string()),
+        api_key: secrecy::SecretString::from("test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         system_prompt: Some("Be concise.".into()),

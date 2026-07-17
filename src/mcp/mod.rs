@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rmcp::model::{CallToolRequestParams, CallToolResult, Content, JsonObject};
+use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject};
 use rmcp::service::{RoleClient, RunningService, ServiceError};
 use rmcp::transport::{
     streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
@@ -208,11 +208,9 @@ impl McpSession {
                 other,
             )])),
         };
-        let params = CallToolRequestParams {
-            meta: None,
-            name: mcp_name.to_string().into(),
-            arguments: args_obj,
-            task: None,
+        let params = match args_obj {
+            Some(args) => CallToolRequestParams::new(mcp_name.to_string()).with_arguments(args),
+            None => CallToolRequestParams::new(mcp_name.to_string()),
         };
         let guard = self.inner.lock().await;
         guard.peer().call_tool(params).await.map_err(McpError::from)
@@ -260,10 +258,10 @@ fn call_tool_result_to_value(result: CallToolResult) -> Result<Value, McpError> 
     }
 }
 
-fn content_to_text(content: &[Content]) -> String {
+fn content_to_text(content: &[ContentBlock]) -> String {
     content
         .iter()
-        .filter_map(|c| c.as_text().map(|t| t.text.as_ref()))
+        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
         .collect::<Vec<_>>()
         .join("")
 }

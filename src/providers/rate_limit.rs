@@ -77,18 +77,18 @@ impl RateLimitRegistry {
 mod tests {
     use super::*;
     use crate::providers::api_key_id;
-    use secrecy::Secret;
+    use secrecy::SecretString;
 
     #[tokio::test]
     async fn different_keys_use_independent_buckets() {
         let registry = RateLimitRegistry::new(NonZeroU32::new(10).unwrap());
         let k1 = RateLimitKey {
             provider: ProviderId::OpenAi,
-            key_id: api_key_id(&Secret::new("key-a".into())),
+            key_id: api_key_id(&SecretString::from("key-a")),
         };
         let k2 = RateLimitKey {
             provider: ProviderId::OpenAi,
-            key_id: api_key_id(&Secret::new("key-b".into())),
+            key_id: api_key_id(&SecretString::from("key-b")),
         };
         registry.acquire(k1).await;
         registry.acquire(k2).await;
@@ -99,7 +99,7 @@ mod tests {
     #[tokio::test]
     async fn same_key_shares_bucket() {
         let registry = RateLimitRegistry::new(NonZeroU32::new(10).unwrap());
-        let secret = Secret::new("same-key".into());
+        let secret = SecretString::from("same-key");
         let k = RateLimitKey {
             provider: ProviderId::OpenAi,
             key_id: api_key_id(&secret),

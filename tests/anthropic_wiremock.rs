@@ -68,7 +68,7 @@ fn anthropic_opts(server_uri: &str) -> ChatOptions {
     creds.insert_base_url(superglue::providers::ProviderId::Anthropic, server_uri);
     ChatOptions {
         base_url: server_uri.to_string(),
-        api_key: secrecy::Secret::new("legacy".into()),
+        api_key: secrecy::SecretString::from("legacy"),
         model: "anthropic:claude-sonnet-4-20250514".into(),
         max_tool_rounds: 4,
         provider_credentials: Some(std::sync::Arc::new(creds)),

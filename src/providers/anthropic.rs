@@ -40,7 +40,7 @@ impl LlmProvider for AnthropicProvider {
             .key_for(ProviderId::Anthropic)
             .expect("credentials checked before build");
         let headers = vec![
-            ("x-api-key".to_string(), api_key.expose_secret().clone()),
+            ("x-api-key".to_string(), api_key.expose_secret().to_string()),
             (
                 "anthropic-version".to_string(),
                 ANTHROPIC_VERSION.to_string(),

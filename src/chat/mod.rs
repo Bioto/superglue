@@ -46,8 +46,8 @@ use crate::tools::{
 pub struct ChatOptions {
     /// e.g. `https://api.openai.com` (no trailing slash required).
     pub base_url: String,
-    /// API key. Stored as [`secrecy::Secret`] — never appears in `Debug` output or logs.
-    pub api_key: secrecy::Secret<String>,
+    /// API key. Stored as [`secrecy::SecretString`] — never appears in `Debug` output or logs.
+    pub api_key: secrecy::SecretString,
     pub model: String,
     /// Maximum **HTTP completion** calls (each can include tool follow-up rounds).
     pub max_tool_rounds: u32,
@@ -131,7 +131,7 @@ impl Default for ChatOptions {
     fn default() -> Self {
         ChatOptions {
             base_url: String::new(),
-            api_key: secrecy::Secret::new(String::new()),
+            api_key: secrecy::SecretString::from(String::new()),
             model: String::new(),
             max_tool_rounds: 0,
             system_prompt: None,
@@ -177,7 +177,7 @@ impl ChatOptions {
     ) -> Self {
         ChatOptions {
             base_url: base_url.into(),
-            api_key: secrecy::Secret::new(api_key.into()),
+            api_key: secrecy::SecretString::from(api_key.into()),
             model: model.into(),
             max_tool_rounds: 16,
             ..Default::default()
@@ -193,7 +193,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             } else {
                 p.base_url
             },
-            api_key: secrecy::Secret::new(p.api_key),
+            api_key: secrecy::SecretString::from(p.api_key),
             model: if p.model.is_empty() {
                 "gpt-5.4-nano-2026-03-17-mini".to_string()
             } else {

@@ -159,7 +159,7 @@ async fn responses_stream_tool_then_text() {
 
     let opts = superglue::chat::ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "openai:mock".into(),
         max_tool_rounds: 4,
         reasoning_effort: Some("medium".into()),
@@ -207,7 +207,7 @@ async fn responses_stream_output_item_done_only_text() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let opts = superglue::chat::ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "openai:mock".into(),
         max_tool_rounds: 4,
         ..Default::default()
@@ -247,7 +247,7 @@ async fn responses_stream_content_part_done_only_text() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let opts = superglue::chat::ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "openai:mock".into(),
         max_tool_rounds: 4,
         ..Default::default()
@@ -315,7 +315,7 @@ async fn responses_stream_response_failed_returns_error() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let opts = superglue::chat::ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "openai:mock".into(),
         max_tool_rounds: 4,
         ..Default::default()

@@ -28,7 +28,7 @@ fn http() -> HttpClient {
 fn opts(base_url: String, emitter: Arc<StatusEmitter>) -> ChatOptions {
     ChatOptions {
         base_url,
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "gpt-5.4-nano-2026-03-17-mini".into(),
         max_tool_rounds: 4,
         status_emitter: Some(emitter),

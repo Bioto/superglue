@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use secrecy::{ExposeSecret, Secret};
+use secrecy::{ExposeSecret, SecretString};
 use thiserror::Error;
 
 use super::provider_id::ProviderId;
@@ -15,7 +15,7 @@ pub enum CredentialsError {
 
 #[derive(Debug, Clone, Default)]
 pub struct ProviderCredentials {
-    keys: HashMap<ProviderId, Secret<String>>,
+    keys: HashMap<ProviderId, SecretString>,
     base_urls: HashMap<ProviderId, String>,
 }
 
@@ -26,7 +26,7 @@ impl ProviderCredentials {
     }
 
     pub fn insert_key(&mut self, provider: ProviderId, key: impl Into<String>) {
-        self.keys.insert(provider, Secret::new(key.into()));
+        self.keys.insert(provider, SecretString::from(key.into()));
     }
 
     pub fn insert_base_url(&mut self, provider: ProviderId, url: impl Into<String>) {
@@ -65,7 +65,7 @@ impl ProviderCredentials {
         }
     }
 
-    pub fn key_for(&self, provider: ProviderId) -> Result<Secret<String>, CredentialsError> {
+    pub fn key_for(&self, provider: ProviderId) -> Result<SecretString, CredentialsError> {
         self.keys
             .get(&provider)
             .cloned()
@@ -91,7 +91,7 @@ impl ProviderCredentials {
 pub struct ApiKeyId(pub u64);
 
 #[must_use]
-pub fn api_key_id(key: &Secret<String>) -> ApiKeyId {
+pub fn api_key_id(key: &SecretString) -> ApiKeyId {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     key.expose_secret().hash(&mut hasher);

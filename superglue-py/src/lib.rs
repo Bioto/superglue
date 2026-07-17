@@ -33,7 +33,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use secrecy::Secret;
+use secrecy::SecretString;
 
 use async_trait::async_trait;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -2272,7 +2272,7 @@ impl PyAgentEngine {
         Ok(PyAgentEngine {
             spec: spec.inner.clone(),
             base_options: ChatOptions {
-                api_key: Secret::new(api_key),
+                api_key: SecretString::from(api_key),
                 model: effective_model,
                 base_url: base_url.to_string(),
                 max_tool_rounds: spec.inner.max_tool_rounds,

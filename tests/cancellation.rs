@@ -68,7 +68,7 @@ async fn chat_options_pre_cancelled_returns_cancelled() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         cancel: Some(token),
@@ -111,7 +111,7 @@ async fn batch_pre_cancelled_returns_cancelled() {
     let http = Arc::new(HttpClient::new(ClientConfig::default()).unwrap());
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()
@@ -158,7 +158,7 @@ async fn batch_without_cancel_completes_normally() {
     let http = Arc::new(HttpClient::new(ClientConfig::default()).unwrap());
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("sk-test".to_string()),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
         model: "mock".into(),
         max_tool_rounds: 4,
         ..Default::default()

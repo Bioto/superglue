@@ -65,7 +65,7 @@ async fn anthropic_inline_document_in_request() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let opts = ChatOptions {
         base_url: server.uri(),
-        api_key: secrecy::Secret::new("legacy".into()),
+        api_key: secrecy::SecretString::from("legacy"),
         model: "anthropic:claude-sonnet-4-20250514".into(),
         max_tool_rounds: 1,
         provider_credentials: Some(std::sync::Arc::new(creds)),

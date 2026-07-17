@@ -263,7 +263,7 @@ pub async fn run_multiturn_wiremock(cfg: &BenchConfig) -> Result<MultiTurnMetric
 
     let mut opts = chat_options_for_multiturn(cfg);
     opts.base_url = server.uri();
-    opts.api_key = secrecy::Secret::new("sk-test".to_string());
+    opts.api_key = secrecy::SecretString::from("sk-test".to_string());
     opts.model = "mock".into();
     if dynamic {
         opts.tool_route_model = Some("mock".into());
