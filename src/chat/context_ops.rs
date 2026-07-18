@@ -229,7 +229,7 @@ pub async fn maybe_summarize_messages(
             ChatMessage::text("user", format!("{SUMMARIZE_USER_PREFIX}{transcript}")),
         ];
 
-        let mut sum_options = auxiliary_chat_options(options, summarize_model);
+        let sum_options = auxiliary_chat_options(options, summarize_model);
 
         let (val, _) = provider_chat_post(
             http,

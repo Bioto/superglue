@@ -275,26 +275,40 @@ impl HttpClient {
         headers: &[(&str, &str)],
         rate_limit_key: Option<RateLimitKey>,
     ) -> Result<impl Stream<Item = Result<Bytes, Error>> + Send + use<>, Error> {
-        self.acquire_rate_limit(rate_limit_key).await;
-        let mut req = self.inner.post(url);
-        for (k, v) in headers {
-            req = req.header(*k, *v);
+        let mut attempt: u32 = 0;
+        loop {
+            self.acquire_rate_limit(rate_limit_key).await;
+            let mut req = self.inner.post(url);
+            for (k, v) in headers {
+                req = req.header(*k, *v);
+            }
+            req = req.json(body);
+            let resp = req.send().await?;
+            let status = resp.status();
+            let retry_after = parse_retry_after(resp.headers());
+            if !status.is_success() {
+                let body_bytes = resp.bytes().await.unwrap_or_default();
+                let err = Error::unsuccessful(status, &body_bytes, retry_after);
+                if err.is_retryable_post() && attempt < self.config.retry.max_retries {
+                    let delay = retry_delay_ms(&self.config.retry, attempt, &err);
+                    warn_http_retry("POST_STREAM", url, attempt, delay, &err);
+                    sleep(Duration::from_millis(delay)).await;
+                    attempt += 1;
+                    continue;
+                }
+                if err.is_retryable_post() {
+                    return Err(Self::retries_exhausted(&err, attempt));
+                }
+                warn!(
+                    status = %status,
+                    url = %url,
+                    body_len = body_bytes.len(),
+                    "POST stream request failed (non-success status)"
+                );
+                return Err(err);
+            }
+            return Ok(resp.bytes_stream().map(|r| r.map_err(Error::from)));
         }
-        req = req.json(body);
-        let resp = req.send().await?;
-        let status = resp.status();
-        let retry_after = parse_retry_after(resp.headers());
-        if !status.is_success() {
-            let body_bytes = resp.bytes().await.unwrap_or_default();
-            warn!(
-                status = %status,
-                url = %url,
-                body_len = body_bytes.len(),
-                "POST stream request failed (non-success status)"
-            );
-            return Err(Error::unsuccessful(status, &body_bytes, retry_after));
-        }
-        Ok(resp.bytes_stream().map(|r| r.map_err(Error::from)))
     }
 
     /// `POST` multipart form (e.g. file uploads). Retries like [`Self::post_json_with_headers`].

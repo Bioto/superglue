@@ -73,16 +73,16 @@ impl ProviderCredentials {
     }
 
     #[must_use]
+    pub fn has_key(&self, provider: ProviderId) -> bool {
+        self.keys.contains_key(&provider)
+    }
+
+    #[must_use]
     pub fn base_url_for(&self, provider: ProviderId) -> String {
         self.base_urls
             .get(&provider)
             .cloned()
             .unwrap_or_else(|| provider.default_base_url().to_string())
-    }
-
-    #[must_use]
-    pub fn has_key(&self, provider: ProviderId) -> bool {
-        self.keys.contains_key(&provider)
     }
 }
 

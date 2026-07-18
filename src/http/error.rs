@@ -76,6 +76,15 @@ impl Error {
         }
     }
 
+    /// Parse a provider JSON error body when present.
+    #[must_use]
+    pub fn provider_message(&self) -> Option<String> {
+        let Self::Unsuccessful { preview, .. } = self else {
+            return None;
+        };
+        parse_provider_error_message(preview)
+    }
+
     /// When the server returned `429` with `Retry-After: N` (seconds), prefer this wait duration.
     #[must_use]
     pub fn retry_after_hint(&self) -> Option<Duration> {
@@ -87,5 +96,32 @@ impl Error {
             } if *status == StatusCode::TOO_MANY_REQUESTS => *retry_after,
             _ => None,
         }
+    }
+}
+
+fn parse_provider_error_message(body: &str) -> Option<String> {
+    let start = body.find('{')?;
+    let value: serde_json::Value = serde_json::from_str(&body[start..]).ok()?;
+    let err = value.get("error")?;
+    let ty = err.get("type").and_then(|v| v.as_str())?;
+    let msg = err
+        .get("message")
+        .and_then(|v| v.as_str())
+        .filter(|m| !m.is_empty())
+        .unwrap_or("request failed");
+    Some(format!("{ty}: {msg}"))
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn parses_anthropic_error_json() {
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limit reached"}}"#;
+        assert_eq!(
+            parse_provider_error_message(body),
+            Some("rate_limit_error: Rate limit reached".to_string())
+        );
     }
 }

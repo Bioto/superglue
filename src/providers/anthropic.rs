@@ -85,7 +85,9 @@ impl LlmProvider for AnthropicProvider {
             body["stream"] = json!(true);
         }
 
-        if let Some(temp) = ctx.options.temperature {
+        if anthropic_supports_sampling_params(&ctx.model_ref.model)
+            && let Some(temp) = ctx.options.temperature
+        {
             body["temperature"] = json!(temp);
         }
 
@@ -314,5 +316,39 @@ fn infer_media_type(filename: Option<&str>) -> &'static str {
         Some(f) if f.ends_with(".gif") => "image/gif",
         Some(f) if f.ends_with(".webp") => "image/webp",
         _ => "application/octet-stream",
+    }
+}
+
+/// Newer Anthropic models reject `temperature` / `top_p` / `top_k` entirely.
+fn anthropic_supports_sampling_params(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    if model.contains("sonnet-5") {
+        return false;
+    }
+    if model.contains("opus-4-7") || model.contains("opus-4-8") {
+        return false;
+    }
+    if model.contains("fable") {
+        return false;
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sonnet_5_rejects_sampling_params() {
+        assert!(!anthropic_supports_sampling_params("claude-sonnet-5"));
+        assert!(!anthropic_supports_sampling_params(
+            "anthropic:claude-sonnet-5@20260203"
+        ));
+    }
+
+    #[test]
+    fn older_sonnet_keeps_sampling_params() {
+        assert!(anthropic_supports_sampling_params("claude-sonnet-4-6"));
+        assert!(anthropic_supports_sampling_params("claude-3-5-sonnet-20241022"));
     }
 }

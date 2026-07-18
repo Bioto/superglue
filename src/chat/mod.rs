@@ -4,6 +4,7 @@ mod conversation;
 pub mod reasoning;
 pub(crate) mod stream_tools;
 mod context_ops;
+mod tool_summary;
 
 pub(crate) use context_ops::{condense_tool_round, maybe_summarize_messages};
 
@@ -882,6 +883,10 @@ pub(crate) async fn dispatch_one(
         );
         match &exec_result {
             Ok(content) => {
+                if let Some(summary) = tool_summary::tool_result_summary(&tool_name, content) {
+                    ev.metadata
+                        .insert("result_summary".to_string(), summary);
+                }
                 ev.metadata.insert(
                     "result".to_string(),
                     truncate_tool_event_metadata(content),
@@ -1537,6 +1542,9 @@ where
 
     let credentials = credentials_for(options);
     let model_ref = crate::providers::parse_model_ref(&options.model);
+    credentials
+        .key_for(model_ref.provider)
+        .map_err(ChatError::Credentials)?;
     let provider = crate::providers::resolve_provider(&model_ref);
     let ctx = crate::providers::ProviderRequestContext {
         model_ref: &model_ref,
