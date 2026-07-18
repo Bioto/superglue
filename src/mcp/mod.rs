@@ -185,6 +185,20 @@ impl McpSession {
         Ok(registered)
     }
 
+    /// Invoke a tool on this MCP session (for lazy proxy wrappers).
+    pub async fn invoke_tool(
+        &self,
+        mcp_name: &str,
+        arguments: Value,
+    ) -> Result<Value, crate::tools::ToolInvokeError> {
+        let result = self
+            .call_mcp_tool(mcp_name, arguments)
+            .await
+            .map_err(|e| crate::tools::ToolInvokeError::handler(e.to_string(), None))?;
+        call_tool_result_to_value(result)
+            .map_err(|e| crate::tools::ToolInvokeError::handler(e.to_string(), None))
+    }
+
     /// Gracefully close the MCP connection.
     pub async fn close(&self) -> Result<(), McpError> {
         let mut guard = self.inner.lock().await;
