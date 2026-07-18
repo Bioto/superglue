@@ -56,6 +56,16 @@ impl Default for ClientConfig {
     }
 }
 
+impl ClientConfig {
+    /// Timeouts suited for LLM streaming (reasoning models may not emit bytes for minutes).
+    pub fn for_llm() -> Self {
+        Self {
+            timeout: Duration::from_secs(600),
+            ..Self::default()
+        }
+    }
+}
+
 /// Thin `reqwest` wrapper with optional [`Governor`](governor)-style QPS cap, GET retries, and JSON POST.
 #[derive(Clone)]
 pub struct HttpClient {
