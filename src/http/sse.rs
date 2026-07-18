@@ -102,4 +102,15 @@ mod tests {
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].data, "a");
     }
+
+    #[test]
+    fn parses_error_event_type() {
+        let mut p = SseParser::new();
+        let evs = p
+            .push_str("event: error\ndata: {\"error\":\"boom\"}\n\n")
+            .unwrap();
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].event.as_deref(), Some("error"));
+        assert_eq!(evs[0].data, "{\"error\":\"boom\"}");
+    }
 }

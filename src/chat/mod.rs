@@ -320,6 +320,10 @@ pub enum ChatError {
     Guardrail(#[from] GuardrailError),
     #[error("completion response contained no choices")]
     NoChoice,
+    /// Provider finished a round with neither assistant text nor tool calls.
+    /// Common intermittent failure on weaker models / some Groq tool-calling streams.
+    #[error("model returned an empty response (no text, no tool calls)")]
+    EmptyResponse,
     #[error("exceeded max tool rounds ({0})")]
     MaxToolRounds(u32),
     #[error("request cancelled")]
@@ -964,6 +968,8 @@ pub async fn complete_with_tools(
 
     let mut api_calls: u32 = 0;
     let mut model_used;
+    // One automatic re-request when a provider returns a blank round (Groq flake).
+    let mut empty_round_retries: u32 = 0;
 
     let all_specs = registry.list_specs().await;
     let mut active_set = ActiveToolSet::new(all_specs, options.tool_mode);
@@ -1214,6 +1220,32 @@ pub async fn complete_with_tools(
         }
 
         // --- Terminal response: extract content ---
+        let content_empty = normalized
+            .content
+            .as_ref()
+            .is_none_or(|s| s.trim().is_empty());
+        if content_empty {
+            if empty_round_retries < 1 {
+                empty_round_retries += 1;
+                // Don't burn a max_tool_rounds slot on a blank provider response.
+                api_calls = api_calls.saturating_sub(1);
+                tracing::warn!(
+                    request_id = %request_id,
+                    model = %model_used,
+                    finish_reason = ?normalized.finish_reason,
+                    "empty LLM round (no content, no tool calls) — retrying once"
+                );
+                continue;
+            }
+            tracing::warn!(
+                request_id = %request_id,
+                model = %model_used,
+                finish_reason = ?normalized.finish_reason,
+                "empty LLM round after retry — failing turn"
+            );
+            return Err(ChatError::EmptyResponse);
+        }
+
         let usage = usage_proto;
         let content = normalized.content.clone();
         let finish_reason = normalized.finish_reason.clone();
@@ -1549,6 +1581,12 @@ where
 
         for event in events {
             event_count += 1;
+            if event.event.as_deref() == Some("error") {
+                return Err(ChatError::Api(format!(
+                    "stream error event: {}",
+                    event.data.trim()
+                )));
+            }
             let data = event.data.trim();
             tracing::trace!(
                 event_count,
@@ -1558,6 +1596,9 @@ where
             if data == "[DONE]" {
                 tracing::trace!("stream_complete received [DONE]");
                 break;
+            }
+            if data.is_empty() {
+                continue;
             }
             let chunk: ChatCompletionChunk = match serde_json::from_str(data) {
                 Ok(c) => c,
@@ -1708,6 +1749,8 @@ where
 
     let mut api_calls: u32 = 0;
     let mut model_used;
+    // One automatic re-request when a provider returns a blank round (Groq flake).
+    let mut empty_round_retries: u32 = 0;
 
     let all_specs = registry.list_specs().await;
     let mut active_set = ActiveToolSet::new(all_specs, options.tool_mode);
@@ -1805,9 +1848,18 @@ where
                 .map_err(|e| ChatError::Http(HttpError::InvalidJson(e.to_string())))?;
 
             for event in events {
+                if event.event.as_deref() == Some("error") {
+                    return Err(ChatError::Api(format!(
+                        "stream error event: {}",
+                        event.data.trim()
+                    )));
+                }
                 let data = event.data.trim();
                 if data == "[DONE]" {
                     break;
+                }
+                if data.is_empty() {
+                    continue;
                 }
                 if is_anthropic {
                     if let Some(delta) = anthropic_acc.apply_sse_data(data).map_err(ChatError::Serde)?
@@ -1882,6 +1934,30 @@ where
                 ),
             )
             .await?;
+
+        // Groq (and some weaker models) intermittently finish with stop + empty
+        // content and no tool_calls. Retry the same messages once before failing.
+        if round.content.trim().is_empty() && round.tool_calls.is_empty() {
+            if empty_round_retries < 1 {
+                empty_round_retries += 1;
+                // Don't burn a max_tool_rounds slot on a blank provider response.
+                api_calls = api_calls.saturating_sub(1);
+                tracing::warn!(
+                    request_id = %request_id,
+                    model = %model_used,
+                    finish_reason = ?round.finish_reason,
+                    "empty LLM round (no content, no tool calls) — retrying once"
+                );
+                continue;
+            }
+            tracing::warn!(
+                request_id = %request_id,
+                model = %model_used,
+                finish_reason = ?round.finish_reason,
+                "empty LLM round after retry — failing turn"
+            );
+            return Err(ChatError::EmptyResponse);
+        }
 
         let msg = ChatMessage {
             role: "assistant".to_string(),
