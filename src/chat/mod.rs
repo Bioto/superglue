@@ -856,6 +856,10 @@ pub(crate) async fn dispatch_one(
         let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallEnd, request_id, model);
         ev.round = round;
         ev.metadata.insert("tool_name".to_string(), tool_name.clone());
+        ev.metadata.insert(
+            "arguments".to_string(),
+            truncate_tool_event_metadata(tc.function.arguments.trim()),
+        );
         match &exec_result {
             Ok(content) => {
                 ev.metadata.insert(
