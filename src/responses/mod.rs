@@ -11,8 +11,9 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::chat::{
-    conversation_messages_for_client, credentials_for, post_json_with_model_fallback, stream_tools,
-    ChatError, ChatOptions, dispatch_one, observation_hook_ctx, StreamToolOutcome,
+    condense_tool_round, conversation_messages_for_client, credentials_for,
+    maybe_summarize_messages, post_json_with_model_fallback, stream_tools, ChatError, ChatOptions,
+    dispatch_one, observation_hook_ctx, StreamToolOutcome,
 };
 use crate::openai::ChatCompletionChunk;
 use crate::costing::estimate_model_call_cost_usd;
@@ -475,6 +476,7 @@ pub async fn complete_with_tools(
                     api_calls,
                     &model_used,
                     true,
+                    options.tool_result_max_chars,
                 )
             }))
             .await;
@@ -1372,6 +1374,7 @@ where
     let mut api_calls = 0u32;
     let mut previous_response_id: Option<String> = None;
     let mut tool_input: Option<Vec<ResponseInputItem>> = None;
+    let credentials = credentials_for(options);
 
     let outcome = loop {
         if api_calls >= options.max_tool_rounds {
@@ -1398,6 +1401,24 @@ where
                 ),
             )
             .await?;
+
+        let messages_json_before = serde_json::to_vec(&messages).ok();
+        maybe_summarize_messages(
+            http,
+            &credentials,
+            &mut messages,
+            &options.summarize_context,
+            options.aaak_compression_enabled,
+            options.aaak_compression_model.as_deref(),
+            &options.model,
+            options,
+            &request_id,
+        )
+        .await
+        .map_err(ResponseError::from)?;
+        if serde_json::to_vec(&messages).ok() != messages_json_before {
+            reset_chain_after_context_mutation(&mut previous_response_id, &mut tool_input);
+        }
 
         emit_safe(
             options.status_emitter.as_ref(),
@@ -1517,6 +1538,7 @@ where
                     api_calls,
                     &model_used,
                     false,
+                    options.tool_result_max_chars,
                 )
             }))
             .await;
@@ -1534,6 +1556,15 @@ where
                     call_id: tc.id.clone(),
                     output: out_text.to_string(),
                 });
+            }
+
+            if options.condense_tool_messages {
+                let len_before = messages.len();
+                condense_tool_round(&mut messages, options.aaak_tool_condensing);
+                if messages.len() != len_before {
+                    reset_chain_after_context_mutation(&mut previous_response_id, &mut tool_input);
+                    continue;
+                }
             }
             tool_input = Some(outputs);
             continue;
@@ -1595,10 +1626,31 @@ where
     Ok(outcome)
 }
 
+/// Clear Responses API chaining when local message history was rewritten.
+fn reset_chain_after_context_mutation(
+    previous_response_id: &mut Option<String>,
+    tool_input: &mut Option<Vec<ResponseInputItem>>,
+) {
+    *previous_response_id = None;
+    *tool_input = None;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reset_chain_clears_previous_response_and_tool_input() {
+        let mut prev = Some("resp_123".into());
+        let mut tool_input = Some(vec![ResponseInputItem::FunctionCallOutput {
+            call_id: "call_1".into(),
+            output: "{}".into(),
+        }]);
+        reset_chain_after_context_mutation(&mut prev, &mut tool_input);
+        assert!(prev.is_none());
+        assert!(tool_input.is_none());
+    }
 
     fn completed_event_with_message(text: &str) -> Value {
         json!({

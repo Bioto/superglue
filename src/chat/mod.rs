@@ -5,6 +5,8 @@ pub mod reasoning;
 pub(crate) mod stream_tools;
 mod context_ops;
 
+pub(crate) use context_ops::{condense_tool_round, maybe_summarize_messages};
+
 use std::sync::Arc;
 
 pub use conversation::Conversation;
@@ -28,9 +30,7 @@ use crate::openai::{
     ChatCompletionChunk, ChatMessage, MessageContent, ResponseFormat, StopSequence, ToolCall,
     ToolChoice,
 };
-use self::context_ops::{
-    condense_tool_round, maybe_summarize_messages, resolve_tool_route, user_context_for_route,
-};
+use self::context_ops::{resolve_tool_route, user_context_for_route};
 use crate::context::SummarizeContextConfig;
 use crate::proto;
 use crate::tools::{
@@ -61,6 +61,8 @@ pub struct ChatOptions {
 
     // --- Token limits ---
     pub max_completion_tokens: Option<u32>,
+    /// Maximum characters per tool-result message in chat history (`0` = no cap).
+    pub tool_result_max_chars: usize,
 
     // --- Penalties ---
     pub presence_penalty: Option<f32>,
@@ -139,6 +141,7 @@ impl Default for ChatOptions {
             top_p: None,
             n: None,
             max_completion_tokens: None,
+            tool_result_max_chars: 32_000,
             presence_penalty: None,
             frequency_penalty: None,
             stop: None,
@@ -209,6 +212,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             top_p: p.top_p,
             n: None,
             max_completion_tokens: p.max_completion_tokens,
+            tool_result_max_chars: 32_000,
             presence_penalty: p.presence_penalty,
             frequency_penalty: p.frequency_penalty,
             stop: p.stop.map(StopSequence::One),
@@ -768,6 +772,17 @@ pub(crate) fn truncate_tool_event_metadata(value: &str) -> String {
     )
 }
 
+/// Truncate tool-result text before it is appended to chat history.
+pub(crate) fn truncate_tool_result(content: String, max_chars: usize) -> String {
+    if max_chars == 0 || content.chars().count() <= max_chars {
+        return content;
+    }
+    format!(
+        "{}…\n[truncated]",
+        content.chars().take(max_chars).collect::<String>()
+    )
+}
+
 /// Dispatch a single `"function"` tool call through the full pre/post hook pipeline.
 ///
 /// Returns the [`ChatMessage`] with `role="tool"` that should be appended to the
@@ -786,6 +801,7 @@ pub(crate) async fn dispatch_one(
     round: u32,
     model: &str,
     emit_start: bool,
+    tool_result_max_chars: usize,
 ) -> Result<ChatMessage, ChatError> {
     let tool_name = tc.function.name.clone();
     if emit_start && let Some(emitter) = status_emitter {
@@ -882,7 +898,7 @@ pub(crate) async fn dispatch_one(
         emit_safe(Some(emitter), ev).await;
     }
 
-    let content = exec_result?;
+    let content = truncate_tool_result(exec_result?, tool_result_max_chars);
     Ok(ChatMessage {
         role: "tool".to_string(),
         content: Some(MessageContent::Text(content)),
@@ -1205,6 +1221,7 @@ pub async fn complete_with_tools(
                         api_calls,
                         &options.model,
                         true,
+                        options.tool_result_max_chars,
                     )
                 }),
             )
@@ -2073,6 +2090,7 @@ where
                         api_calls,
                         &options.model,
                         true,
+                        options.tool_result_max_chars,
                     )
                 }),
             )
@@ -2128,5 +2146,25 @@ where
             "stream_complete_with_tools finished"
         );
         return Ok(outcome);
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_tool_result;
+
+    #[test]
+    fn truncate_tool_result_appends_marker() {
+        let content = "x".repeat(100);
+        let out = truncate_tool_result(content.clone(), 50);
+        assert!(out.contains("…\n[truncated]"));
+        assert!(out.chars().count() <= 50 + "…\n[truncated]".chars().count());
+    }
+
+    #[test]
+    fn truncate_tool_result_zero_disables() {
+        let content = "x".repeat(10_000);
+        let out = truncate_tool_result(content.clone(), 0);
+        assert_eq!(out, content);
     }
 }
