@@ -148,6 +148,19 @@ opinions or filler — just the essential content, in plain prose.";
 const SUMMARIZE_USER_PREFIX: &str = "Summarize the following conversation history concisely so it can be used as \
 context for continuing the conversation:\n\n";
 
+/// Options for auxiliary LLM calls (summarize / compress) that must not inherit
+/// sampling parameters the parent model rejects (e.g. reasoning models + temperature).
+fn auxiliary_chat_options(base: &ChatOptions, model: &str) -> ChatOptions {
+    let mut opts = base.clone();
+    opts.model = model.to_string();
+    opts.temperature = None;
+    opts.top_p = None;
+    opts.presence_penalty = None;
+    opts.frequency_penalty = None;
+    opts.reasoning_effort = None;
+    opts
+}
+
 /// Compress old messages when over threshold; mutates `messages` in place.
 pub async fn maybe_summarize_messages(
     http: &HttpClient,
@@ -216,8 +229,7 @@ pub async fn maybe_summarize_messages(
             ChatMessage::text("user", format!("{SUMMARIZE_USER_PREFIX}{transcript}")),
         ];
 
-        let mut sum_options = options.clone();
-        sum_options.model = summarize_model.to_string();
+        let mut sum_options = auxiliary_chat_options(options, summarize_model);
 
         let (val, _) = provider_chat_post(
             http,
@@ -293,8 +305,7 @@ async fn compress_messages_aaak(
         ChatMessage::text("user", format!("{COMPRESS_USER_PREFIX}{transcript}")),
     ];
 
-    let mut compress_options = options.clone();
-    compress_options.model = compress_model.to_string();
+    let mut compress_options = auxiliary_chat_options(options, compress_model);
     compress_options.max_completion_tokens = Some(512);
 
     let (val, _) = provider_chat_post(
