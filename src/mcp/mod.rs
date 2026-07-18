@@ -8,11 +8,10 @@ pub use config::{
     load_servers_file, load_servers_file_or_default, load_status_file, record_server_status,
     resolve_env_value, resolve_headers, save_servers_file, save_status_file, McpAuthKind,
     McpServerEntry, McpServerStatus, McpServersFile, McpServersStatusFile, McpToolPolicy,
-    DEFAULT_CONTEXT7_MCP_URL, DEFAULT_GMAIL_MCP_URL,
+    DEFAULT_CONTEXT7_MCP_URL,
 };
 pub use runtime::{
     connect_enabled_servers, McpConnectOptions, McpConnectSummary, McpConnections,
-    McpOAuthProvider,
 };
 
 use std::collections::HashMap;
@@ -319,7 +318,7 @@ mod tests {
     fn mcp_http_config_carries_auth_header() {
         let config = McpHttpConfig {
             url: "https://example.com/mcp".into(),
-            label: Some("gmail".into()),
+            label: Some("context7".into()),
             auth_header: Some("access-token".into()),
             custom_headers: HashMap::new(),
         };

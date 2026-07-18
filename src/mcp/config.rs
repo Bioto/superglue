@@ -8,7 +8,6 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const DEFAULT_GMAIL_MCP_URL: &str = "https://gmailmcp.googleapis.com/mcp/v1";
 pub const DEFAULT_CONTEXT7_MCP_URL: &str = "https://mcp.context7.com/mcp";
 
 #[derive(Debug, Error)]
@@ -46,8 +45,6 @@ pub struct McpServerEntry {
 pub enum McpAuthKind {
     #[default]
     None,
-    #[serde(rename = "gmail_oauth")]
-    GmailOAuth,
     BearerEnv,
 }
 
@@ -91,44 +88,18 @@ fn default_server_entries() -> Vec<McpServerEntry> {
 #[must_use]
 pub fn default_mcp_servers() -> McpServersFile {
     McpServersFile {
-        servers: vec![
-            McpServerEntry {
-                id: "gmail".into(),
-                enabled: false,
-                url: DEFAULT_GMAIL_MCP_URL.into(),
-                auth: McpAuthKind::GmailOAuth,
-                bearer_env_var: None,
-                headers: HashMap::new(),
-                tools: McpToolPolicy {
-                    readonly: vec![
-                        "search_threads".into(),
-                        "get_thread".into(),
-                        "list_drafts".into(),
-                        "list_labels".into(),
-                    ],
-                    write: vec![
-                        "create_draft".into(),
-                        "label_message".into(),
-                        "label_thread".into(),
-                        "unlabel_message".into(),
-                        "unlabel_thread".into(),
-                        "create_label".into(),
-                    ],
-                },
-            },
-            McpServerEntry {
-                id: "context7".into(),
-                enabled: false,
-                url: DEFAULT_CONTEXT7_MCP_URL.into(),
-                auth: McpAuthKind::None,
-                bearer_env_var: None,
-                headers: HashMap::from([(
-                    "CONTEXT7_API_KEY".into(),
-                    "$CONTEXT7_API_KEY".into(),
-                )]),
-                tools: McpToolPolicy::default(),
-            },
-        ],
+        servers: vec![McpServerEntry {
+            id: "context7".into(),
+            enabled: false,
+            url: DEFAULT_CONTEXT7_MCP_URL.into(),
+            auth: McpAuthKind::None,
+            bearer_env_var: None,
+            headers: HashMap::from([(
+                "CONTEXT7_API_KEY".into(),
+                "$CONTEXT7_API_KEY".into(),
+            )]),
+            tools: McpToolPolicy::default(),
+        }],
     }
 }
 
@@ -270,7 +241,7 @@ mod tests {
         let path = tmp.path().join("servers.json");
         ensure_servers_file(&path).unwrap();
         let loaded = load_servers_file(&path).unwrap();
-        assert_eq!(loaded.servers.len(), 2);
+        assert_eq!(loaded.servers.len(), 1);
     }
 
     #[test]
@@ -279,6 +250,6 @@ mod tests {
         file.servers[0].enabled = true;
         let enabled = enabled_servers(&file);
         assert_eq!(enabled.len(), 1);
-        assert_eq!(enabled[0].id, "gmail");
+        assert_eq!(enabled[0].id, "context7");
     }
 }

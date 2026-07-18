@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::tools::ToolRegistry;
@@ -32,14 +31,7 @@ pub struct McpConnectOptions<'a> {
     pub config: &'a McpServersFile,
     pub full_registry: &'a ToolRegistry,
     pub readonly_registry: &'a ToolRegistry,
-    pub oauth: Option<&'a dyn McpOAuthProvider>,
     pub status_path: Option<&'a Path>,
-}
-
-/// Supplies bearer tokens for servers using external OAuth (e.g. Gmail).
-#[async_trait]
-pub trait McpOAuthProvider: Send + Sync {
-    async fn access_token(&self, server: &McpServerEntry) -> Result<Option<String>, McpError>;
 }
 
 pub async fn connect_enabled_servers(options: McpConnectOptions<'_>) -> McpConnectSummary {
@@ -52,7 +44,6 @@ pub async fn connect_enabled_servers(options: McpConnectOptions<'_>) -> McpConne
             &server,
             options.full_registry,
             options.readonly_registry,
-            options.oauth,
         )
         .await
         {
@@ -101,10 +92,9 @@ async fn connect_server(
     server: &McpServerEntry,
     full_registry: &ToolRegistry,
     readonly_registry: &ToolRegistry,
-    oauth: Option<&dyn McpOAuthProvider>,
 ) -> Result<McpConnections, McpError> {
     let custom_headers = resolve_headers(&server.headers);
-    let auth_header = resolve_auth_header(server, oauth).await?;
+    let auth_header = resolve_auth_header(server)?;
 
     let session = McpSession::connect_http(McpHttpConfig {
         url: server.url.clone(),
@@ -138,10 +128,7 @@ async fn connect_server(
     })
 }
 
-async fn resolve_auth_header(
-    server: &McpServerEntry,
-    oauth: Option<&dyn McpOAuthProvider>,
-) -> Result<Option<String>, McpError> {
+fn resolve_auth_header(server: &McpServerEntry) -> Result<Option<String>, McpError> {
     match server.auth {
         McpAuthKind::None => Ok(None),
         McpAuthKind::BearerEnv => Ok(server
@@ -149,15 +136,6 @@ async fn resolve_auth_header(
             .as_deref()
             .and_then(|var| std::env::var(var).ok())
             .filter(|s| !s.is_empty())),
-        McpAuthKind::GmailOAuth => {
-            let Some(provider) = oauth else {
-                return Err(McpError::Connect(format!(
-                    "{} requires an OAuth provider",
-                    server.id
-                )));
-            };
-            provider.access_token(server).await
-        }
     }
 }
 
