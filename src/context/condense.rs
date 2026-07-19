@@ -142,11 +142,56 @@ mod tests {
             .and_then(|c| c.as_text())
             .unwrap()
             .contains("[Tool Results]"));
-        assert!(messages[0]
+        let text = messages[0]
             .content
             .as_ref()
             .and_then(|c| c.as_text())
-            .unwrap()
-            .contains("do not call tools"));
+            .unwrap();
+        assert!(text.contains("do not re-invoke these same tool calls"));
+        assert!(text.contains("you may call new tools"));
+        assert!(!text.contains("do not call tools"));
+    }
+
+    #[test]
+    fn condense_after_ask_user_allows_follow_up_tools() {
+        let mut messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "c1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "ask_user".into(),
+                        arguments: r#"{"title":"Commit?"}"#.into(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+                refusal: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: Some(MessageContent::Text(
+                    r#"{"answers":{"commit":"Use this message and commit"}}"#.into(),
+                )),
+                tool_calls: None,
+                tool_call_id: Some("c1".into()),
+                name: Some("ask_user".into()),
+                refusal: None,
+            },
+        ];
+        condense_tool_round(&mut messages, false);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        let text = messages[0]
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text())
+            .unwrap();
+        assert!(text.contains("ask_user"));
+        assert!(text.contains("Use this message and commit"));
+        assert!(text.contains("you may call new tools"));
+        assert!(!text.contains("do not call tools"));
     }
 }

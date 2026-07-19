@@ -140,9 +140,10 @@ pub(crate) fn passthrough_aaak_context(messages: &[ChatMessage]) -> String {
     parts.join("\n")
 }
 
-/// When condensing replaces a tool round, tell the model not to re-invoke tools.
+/// When condensing replaces a tool round, tell the model not to re-invoke the same tools.
 pub(crate) const CONDENSE_ANTI_LOOP_SUFFIX: &str =
-    "\n(completed tool results — respond with the final answer, do not call tools)";
+    "\n(completed tool results for this round — do not re-invoke these same tool calls; \
+     you may call new tools if still needed to finish the user request)";
 
 pub(crate) fn passthrough_at_messages(messages: &[ChatMessage]) -> String {
     let mut parts = Vec::new();
