@@ -263,6 +263,30 @@ fn effective_function_call_id(call_id: &str, id: &Option<String>) -> String {
     }
 }
 
+/// `call_id` from a Responses SSE payload (`call_...`), not the output item id (`fc_...`).
+fn explicit_call_id_from_value(v: &Value) -> Option<String> {
+    v.get("call_id")
+        .or_else(|| v.pointer("/item/call_id"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn push_streamed_function_call(
+    round_state: &mut ResponsesStreamRound,
+    call: StreamedFunctionCall,
+) -> bool {
+    if round_state
+        .function_calls
+        .iter()
+        .any(|c| c.call_id == call.call_id)
+    {
+        return false;
+    }
+    round_state.function_calls.push(call);
+    true
+}
+
 fn function_calls(output: &[ResponseOutputItem]) -> Vec<(String, String, String)> {
     output
         .iter()
@@ -953,23 +977,18 @@ async fn ingest_stream_output_item(
                 name: name.clone(),
                 arguments: arguments.clone(),
             };
-            if !round_state
-                .function_calls
-                .iter()
-                .any(|c| c.call_id == call.call_id)
+            if push_streamed_function_call(round_state, call)
+                && let Some(emitter) = status_emitter
             {
-                round_state.function_calls.push(call);
-                if let Some(emitter) = status_emitter {
-                    let mut ev =
-                        ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
-                    ev.round = round;
-                    ev.metadata.insert("tool_name".to_string(), name);
-                    ev.metadata.insert(
-                        "arguments".to_string(),
-                        crate::chat::truncate_tool_event_metadata(arguments.trim()),
-                    );
-                    emit_safe(Some(emitter), ev).await;
-                }
+                let mut ev =
+                    ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
+                ev.round = round;
+                ev.metadata.insert("tool_name".to_string(), name);
+                ev.metadata.insert(
+                    "arguments".to_string(),
+                    crate::chat::truncate_tool_event_metadata(arguments.trim()),
+                );
+                emit_safe(Some(emitter), ev).await;
             }
         }
         item => {
@@ -1083,44 +1102,40 @@ async fn apply_responses_stream_event(
             }
         }
         "response.function_call_arguments.done" => {
-            let call_id = v
-                .get("call_id")
-                .or_else(|| v.get("id"))
-                .or_else(|| v.get("item_id"))
-                .or_else(|| v.pointer("/item/call_id"))
-                .or_else(|| v.pointer("/item/id"))
-                .and_then(|x| x.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let name = v
-                .get("name")
-                .or_else(|| v.pointer("/item/name"))
-                .and_then(|x| x.as_str())
-                .unwrap_or_default()
-                .to_string();
-            let arguments = v
-                .get("arguments")
-                .or_else(|| v.pointer("/item/arguments"))
-                .and_then(|x| x.as_str())
-                .unwrap_or_default()
-                .to_string();
-            if !name.is_empty() {
-                let call = StreamedFunctionCall {
-                    call_id,
-                    name: name.clone(),
-                    arguments: arguments.clone(),
-                };
-                round_state.function_calls.push(call);
-                if let Some(emitter) = status_emitter {
-                    let mut ev =
-                        ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
-                    ev.round = round;
-                    ev.metadata.insert("tool_name".to_string(), name);
-                    ev.metadata.insert(
-                        "arguments".to_string(),
-                        crate::chat::truncate_tool_event_metadata(arguments.trim()),
-                    );
-                    emit_safe(Some(emitter), ev).await;
+            // Only trust explicit `call_id` here. `item_id` / `id` are `fc_...` output item ids
+            // and must not be sent back as `function_call_output.call_id`.
+            if let Some(call_id) = explicit_call_id_from_value(v) {
+                let name = v
+                    .get("name")
+                    .or_else(|| v.pointer("/item/name"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let arguments = v
+                    .get("arguments")
+                    .or_else(|| v.pointer("/item/arguments"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if !name.is_empty() {
+                    let call = StreamedFunctionCall {
+                        call_id,
+                        name: name.clone(),
+                        arguments: arguments.clone(),
+                    };
+                    if push_streamed_function_call(round_state, call)
+                        && let Some(emitter) = status_emitter
+                    {
+                        let mut ev =
+                            ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
+                        ev.round = round;
+                        ev.metadata.insert("tool_name".to_string(), name);
+                        ev.metadata.insert(
+                            "arguments".to_string(),
+                            crate::chat::truncate_tool_event_metadata(arguments.trim()),
+                        );
+                        emit_safe(Some(emitter), ev).await;
+                    }
                 }
             }
         }
@@ -1475,9 +1490,11 @@ where
         let model_used = round_model;
         previous_response_id = Some(round_state.response_id.clone());
 
-        let mut calls = round_state.function_calls;
+        // `response.completed` output is authoritative for call ids; streamed SSE events can
+        // briefly carry only the output item id (`fc_...`) before `call_id` is known.
+        let mut calls = function_calls_from_output(&round_state.raw_output);
         if calls.is_empty() {
-            calls = function_calls_from_output(&round_state.raw_output);
+            calls = round_state.function_calls;
         }
         let tool_call_count = calls.len() as u32;
         let estimated_cost = round_state
@@ -2083,5 +2100,54 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn explicit_call_id_ignores_item_id_alias() {
+        let event = json!({
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_abc",
+            "name": "list_dir",
+            "arguments": "{\"path\":\".\"}"
+        });
+        assert!(explicit_call_id_from_value(&event).is_none());
+        let with_call_id = json!({
+            "type": "response.function_call_arguments.done",
+            "item_id": "fc_abc",
+            "call_id": "call_xyz",
+            "name": "list_dir",
+            "arguments": "{\"path\":\".\"}"
+        });
+        assert_eq!(
+            explicit_call_id_from_value(&with_call_id).as_deref(),
+            Some("call_xyz")
+        );
+    }
+
+    #[test]
+    fn completed_output_overrides_stale_streamed_function_call_ids() {
+        let mut round_state = ResponsesStreamRound::default();
+        round_state.function_calls.push(StreamedFunctionCall {
+            call_id: "fc_wrong".into(),
+            name: "list_dir".into(),
+            arguments: "{\"path\":\".\"}".into(),
+        });
+        round_state.raw_output = vec![ResponseOutputItem::FunctionCall {
+            id: Some("fc_abc".into()),
+            call_id: "call_xyz".into(),
+            name: "list_dir".into(),
+            arguments: "{\"path\":\".\"}".into(),
+        }];
+
+        let calls = function_calls_from_output(&round_state.raw_output);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call_id, "call_xyz");
+
+        let resolved = if calls.is_empty() {
+            round_state.function_calls
+        } else {
+            calls
+        };
+        assert_eq!(resolved[0].call_id, "call_xyz");
     }
 }

@@ -58,6 +58,37 @@ fn tool_round_sse() -> String {
     body
 }
 
+fn tool_round_sse_item_id_only_arguments_done() -> String {
+    let mut body = String::new();
+    let events = [
+        json!({"type":"response.created","response":{"id":"resp_tool_1"}}),
+        json!({
+            "type":"response.function_call_arguments.done",
+            "item_id":"fc_abc",
+            "name":"echo",
+            "arguments":"{\"x\":1}"
+        }),
+        json!({
+            "type":"response.completed",
+            "response":{
+                "id":"resp_tool_1",
+                "usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7},
+                "output":[{
+                    "type":"function_call",
+                    "id":"fc_abc",
+                    "call_id":"call_1",
+                    "name":"echo",
+                    "arguments":"{\"x\":1}"
+                }]
+            }
+        }),
+    ];
+    for ev in events {
+        body.push_str(&format!("data: {ev}\n\n"));
+    }
+    body
+}
+
 fn text_round_sse() -> String {
     let mut body = String::new();
     let events = [
@@ -191,6 +222,75 @@ async fn responses_stream_tool_then_text() {
     assert!(events.iter().any(|e| e.kind == ProcessEventKind::ToolCallStart));
     assert!(events.iter().any(|e| e.kind == ProcessEventKind::ToolCallEnd));
     assert!(events.iter().any(|e| e.kind == ProcessEventKind::ReasoningDelta));
+}
+
+#[tokio::test]
+async fn responses_stream_tool_round_uses_call_id_from_completed_output() {
+    let server = MockServer::start().await;
+    let captured = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+    let captured2 = Arc::clone(&captured);
+    let n = Arc::new(AtomicU32::new(0));
+    let n2 = Arc::clone(&n);
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            captured2.lock().unwrap().push(body);
+            let i = n2.fetch_add(1, Ordering::SeqCst);
+            let sse = if i == 0 {
+                tool_round_sse_item_id_only_arguments_done()
+            } else {
+                text_round_sse()
+            };
+            ResponseTemplate::new(200).set_body_raw(sse, "text/event-stream")
+        })
+        .mount(&server)
+        .await;
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    let reg = ToolRegistry::new();
+    reg.register(Arc::new(EchoTool)).await.unwrap();
+
+    let opts = superglue::chat::ChatOptions {
+        base_url: server.uri(),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
+        model: "openai:mock".into(),
+        max_tool_rounds: 4,
+        ..Default::default()
+    };
+
+    let out = stream_complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        vec![ChatMessage::text("user", "go")],
+        &opts,
+        |_| {},
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.content, "done");
+    assert_eq!(out.rounds, 2);
+
+    let bodies = captured.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let tool_outputs = bodies[1]
+        .pointer("/input")
+        .and_then(|v| v.as_array())
+        .expect("second request should send tool outputs");
+    assert_eq!(tool_outputs.len(), 1);
+    assert_eq!(tool_outputs[0].get("type").and_then(|v| v.as_str()), Some("function_call_output"));
+    assert_eq!(
+        tool_outputs[0].get("call_id").and_then(|v| v.as_str()),
+        Some("call_1")
+    );
+    assert_ne!(
+        tool_outputs[0].get("call_id").and_then(|v| v.as_str()),
+        Some("fc_abc")
+    );
 }
 
 #[tokio::test]
