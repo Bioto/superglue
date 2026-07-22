@@ -263,6 +263,33 @@ fn effective_function_call_id(call_id: &str, id: &Option<String>) -> String {
     }
 }
 
+fn looks_like_function_call_id(id: &str) -> bool {
+    id.starts_with("call_")
+}
+
+/// Prefer completed output when it has real `call_…` ids; otherwise keep streamed ids
+/// (completed items sometimes only carry `fc_…` output item ids).
+fn resolve_round_function_calls(round_state: &ResponsesStreamRound) -> Vec<StreamedFunctionCall> {
+    let from_output = function_calls_from_output(&round_state.raw_output);
+    if from_output.is_empty() {
+        return round_state.function_calls.clone();
+    }
+    let output_has_call_ids = from_output
+        .iter()
+        .any(|c| looks_like_function_call_id(&c.call_id));
+    if output_has_call_ids {
+        return from_output;
+    }
+    let stream_has_call_ids = round_state
+        .function_calls
+        .iter()
+        .any(|c| looks_like_function_call_id(&c.call_id));
+    if stream_has_call_ids {
+        return round_state.function_calls.clone();
+    }
+    from_output
+}
+
 /// `call_id` from a Responses SSE payload (`call_...`), not the output item id (`fc_...`).
 fn explicit_call_id_from_value(v: &Value) -> Option<String> {
     v.get("call_id")
@@ -743,15 +770,27 @@ where
 }
 
 /// Map chat history (excluding system messages) to Responses API input items.
+///
+/// Drops orphan `tool` / `function_call_output` items whose `call_id` is not present
+/// on a preceding assistant `function_call` — the API rejects those with
+/// `No tool call found for function call output`.
 #[must_use]
 pub(crate) fn chat_messages_to_response_input(messages: &[ChatMessage]) -> ResponseInput {
     let mut items = Vec::new();
+    let mut known_call_ids = std::collections::HashSet::new();
     for msg in messages {
         if msg.role == "system" {
             continue;
         }
         if msg.role == "tool" {
             if let Some(call_id) = &msg.tool_call_id {
+                if !known_call_ids.contains(call_id) {
+                    tracing::warn!(
+                        call_id,
+                        "responses: dropping orphan tool result (no matching function_call)"
+                    );
+                    continue;
+                }
                 let output = msg
                     .content
                     .as_ref()
@@ -780,6 +819,7 @@ pub(crate) fn chat_messages_to_response_input(messages: &[ChatMessage]) -> Respo
             if let Some(tool_calls) = &msg.tool_calls {
                 for tc in tool_calls {
                     if tc.kind == "function" {
+                        known_call_ids.insert(tc.id.clone());
                         items.push(ResponseInputItem::FunctionCall {
                             call_id: tc.id.clone(),
                             name: tc.function.name.clone(),
@@ -798,6 +838,28 @@ pub(crate) fn chat_messages_to_response_input(messages: &[ChatMessage]) -> Respo
         }
     }
     ResponseInput::Items(items)
+}
+
+/// Build the next Responses `input`: chain tool outputs only when `previous_response_id`
+/// is usable; otherwise send full sanitized history.
+fn next_response_input(
+    messages: &[ChatMessage],
+    previous_response_id: &Option<String>,
+    tool_input: &Option<Vec<ResponseInputItem>>,
+) -> ResponseInput {
+    let can_chain = previous_response_id
+        .as_ref()
+        .is_some_and(|id| !id.is_empty())
+        && tool_input.as_ref().is_some_and(|items| !items.is_empty());
+    if can_chain {
+        return ResponseInput::Items(tool_input.clone().unwrap_or_default());
+    }
+    if tool_input.is_some() {
+        tracing::warn!(
+            "responses: refusing tool-output chaining without previous_response_id; using full history"
+        );
+    }
+    chat_messages_to_response_input(messages)
 }
 
 #[derive(Debug, Clone)]
@@ -1449,11 +1511,18 @@ where
         )
         .await;
 
-        let input = if let Some(items) = &tool_input {
-            ResponseInput::Items(items.clone())
-        } else {
-            chat_messages_to_response_input(&messages)
-        };
+        if tool_input.is_some()
+            && !previous_response_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+        {
+            tracing::warn!(
+                "responses: clearing tool_input; cannot chain without previous_response_id"
+            );
+            tool_input = None;
+        }
+
+        let input = next_response_input(&messages, &previous_response_id, &tool_input);
 
         let req = ResponseCreateRequest {
             model: options.model.clone(),
@@ -1488,14 +1557,15 @@ where
         )
         .await?;
         let model_used = round_model;
-        previous_response_id = Some(round_state.response_id.clone());
+        previous_response_id = if round_state.response_id.is_empty() {
+            None
+        } else {
+            Some(round_state.response_id.clone())
+        };
 
-        // `response.completed` output is authoritative for call ids; streamed SSE events can
-        // briefly carry only the output item id (`fc_...`) before `call_id` is known.
-        let mut calls = function_calls_from_output(&round_state.raw_output);
-        if calls.is_empty() {
-            calls = round_state.function_calls;
-        }
+        // Prefer completed output when it has real `call_…` ids; streamed SSE can briefly
+        // carry only the output item id (`fc_…`) before `call_id` is known.
+        let calls = resolve_round_function_calls(&round_state);
         let tool_call_count = calls.len() as u32;
         let estimated_cost = round_state
             .usage
@@ -1583,7 +1653,17 @@ where
                     continue;
                 }
             }
-            tool_input = Some(outputs);
+            if previous_response_id
+                .as_ref()
+                .is_some_and(|id| !id.is_empty())
+            {
+                tool_input = Some(outputs);
+            } else {
+                tracing::warn!(
+                    "responses: missing response_id after tool round; next call uses full history"
+                );
+                tool_input = None;
+            }
             continue;
         }
 
@@ -2139,15 +2219,105 @@ mod tests {
             arguments: "{\"path\":\".\"}".into(),
         }];
 
-        let calls = function_calls_from_output(&round_state.raw_output);
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].call_id, "call_xyz");
-
-        let resolved = if calls.is_empty() {
-            round_state.function_calls
-        } else {
-            calls
-        };
+        let resolved = resolve_round_function_calls(&round_state);
+        assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].call_id, "call_xyz");
+    }
+
+    #[test]
+    fn resolve_prefers_streamed_call_ids_when_completed_only_has_fc() {
+        let mut round_state = ResponsesStreamRound::default();
+        round_state.function_calls.push(StreamedFunctionCall {
+            call_id: "call_xyz".into(),
+            name: "list_dir".into(),
+            arguments: "{\"path\":\".\"}".into(),
+        });
+        round_state.raw_output = vec![ResponseOutputItem::FunctionCall {
+            id: Some("fc_abc".into()),
+            call_id: String::new(),
+            name: "list_dir".into(),
+            arguments: "{\"path\":\".\"}".into(),
+        }];
+
+        let resolved = resolve_round_function_calls(&round_state);
+        assert_eq!(resolved[0].call_id, "call_xyz");
+    }
+
+    #[test]
+    fn chat_messages_to_response_input_drops_orphan_tool_results() {
+        let messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_ok".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "echo".into(),
+                        arguments: "{}".into(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+                refusal: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: Some(MessageContent::Text("ok".into())),
+                tool_calls: None,
+                tool_call_id: Some("call_ok".into()),
+                name: Some("echo".into()),
+                refusal: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: Some(MessageContent::Text("orphan".into())),
+                tool_calls: None,
+                tool_call_id: Some("call_missing".into()),
+                name: Some("echo".into()),
+                refusal: None,
+            },
+        ];
+        let ResponseInput::Items(items) = chat_messages_to_response_input(&messages) else {
+            panic!("expected items");
+        };
+        let outputs: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                ResponseInputItem::FunctionCallOutput { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, vec!["call_ok"]);
+    }
+
+    #[test]
+    fn next_response_input_requires_previous_response_id_to_chain() {
+        let messages = vec![ChatMessage::text("user", "hi")];
+        let tool_input = Some(vec![ResponseInputItem::FunctionCallOutput {
+            call_id: "call_1".into(),
+            output: "{}".into(),
+        }]);
+        let ResponseInput::Items(items) =
+            next_response_input(&messages, &None, &tool_input)
+        else {
+            panic!("expected items");
+        };
+        assert!(
+            items
+                .iter()
+                .all(|i| !matches!(i, ResponseInputItem::FunctionCallOutput { .. })),
+            "orphan outputs must not be sent without previous_response_id"
+        );
+
+        let ResponseInput::Items(chained) =
+            next_response_input(&messages, &Some("resp_1".into()), &tool_input)
+        else {
+            panic!("expected items");
+        };
+        assert!(matches!(
+            chained.as_slice(),
+            [ResponseInputItem::FunctionCallOutput { call_id, .. }] if call_id == "call_1"
+        ));
     }
 }
