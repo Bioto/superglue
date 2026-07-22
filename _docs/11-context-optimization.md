@@ -2,6 +2,19 @@
 
 Superglue ports [GlueLLM](https://github.com/Bioto/glue-llm) context optimization as **opt-in** features on [`ChatOptions`](../src/chat/mod.rs). Defaults match GlueLLM: standard tool mode, condensing off, AAAK off.
 
+## Recommended settings for multi-tool agents
+
+For agents that register many tools or run multi-round tool loops, enable context optimization even if you keep GlueLLM-compatible defaults elsewhere:
+
+| Setting | Why |
+|---------|-----|
+| `tool_mode = Dynamic` | Sends only the router + static tools on early rounds; matched schemas afterward. Cuts prompt size and improves time-to-first-token when you have a large tool registry. |
+| `condense_tool_messages = true` | Replaces each assistant + N tool messages with one compact user summary after every tool batch. Shrinks history on later LLM rounds. |
+
+**Trade-off:** dynamic routing adds one small routing LLM call up front. Net win when tool count and conversation depth are large; skip for single-tool or one-shot workloads.
+
+Pin always-needed tools with `static_tool = true` so they stay available in dynamic mode without routing.
+
 ## Features
 
 | Feature | Option | What it does |

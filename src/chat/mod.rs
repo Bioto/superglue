@@ -12,7 +12,10 @@ use std::sync::Arc;
 
 pub use conversation::Conversation;
 
+use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use std::collections::BTreeMap;
+use std::pin::Pin;
 use secrecy::ExposeSecret;
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -382,6 +385,7 @@ pub(crate) async fn provider_chat_post(
     credentials: &crate::providers::ProviderCredentials,
     messages: &[ChatMessage],
     tool_specs: Option<&[crate::tools::ToolSpec]>,
+    chat_tools: Option<&[crate::openai::ChatTool]>,
     options: &ChatOptions,
     request_id: &str,
     round: u32,
@@ -420,6 +424,7 @@ pub(crate) async fn provider_chat_post(
             credentials,
             messages,
             tools: tool_specs,
+            chat_tools,
             stream,
             options,
         };
@@ -463,6 +468,7 @@ pub(crate) async fn provider_chat_stream(
     credentials: &crate::providers::ProviderCredentials,
     messages: &[ChatMessage],
     tool_specs: Option<&[crate::tools::ToolSpec]>,
+    chat_tools: Option<&[crate::openai::ChatTool]>,
     options: &ChatOptions,
     request_id: &str,
     round: u32,
@@ -506,6 +512,7 @@ pub(crate) async fn provider_chat_stream(
             credentials,
             messages,
             tools: tool_specs,
+            chat_tools,
             stream: true,
             options,
         };
@@ -562,6 +569,7 @@ pub async fn proxy_chat_post(
         credentials,
         messages,
         tool_specs,
+        None,
         options,
         request_id,
         1,
@@ -591,6 +599,7 @@ pub async fn proxy_chat_stream(
         credentials,
         messages,
         tool_specs,
+        None,
         options,
         request_id,
         1,
@@ -690,18 +699,13 @@ fn http_error_type(err: &ChatError) -> String {
 }
 
 /// Invoke a tool, retrying on [`ToolInvokeError::HandlerFailed`] according to `policy`.
-///
-/// Returns either:
-/// - `Ok(value)` — tool succeeded (possibly after retries).
-/// - `Err(ToolInvokeError)` — policy dictates fail-fast (after all retries exhausted).
-/// - `Ok(json!({"ok": false, "error": message}))` — policy is [`OnToolError::Skip`].
 async fn invoke_with_policy(
-    registry: &ToolRegistry,
+    tool: &std::sync::Arc<dyn crate::tools::Tool>,
     name: &str,
     arguments: Value,
     policy: &ToolRetryPolicy,
 ) -> Result<Value, ToolInvokeError> {
-    let result = registry.invoke(name, arguments.clone()).await;
+    let result = tool.call(arguments.clone()).await;
 
     match result {
         Ok(v) => {
@@ -735,7 +739,7 @@ async fn invoke_with_policy(
                         sleep(Duration::from_millis(delay)).await;
                         delay = delay.saturating_mul(2);
 
-                        match registry.invoke(name, arguments.clone()).await {
+                        match tool.call(arguments.clone()).await {
                             Ok(v) => {
                                 metrics::counter!(crate::telemetry::metrics::TOOL_CALLS_TOTAL, "tool_name" => name.to_string()).increment(1);
                                 return Ok(v);
@@ -758,29 +762,31 @@ async fn invoke_with_policy(
 }
 
 /// Cap tool result/argument payload size in process-event metadata (UI / observability).
-const TOOL_EVENT_METADATA_MAX_CHARS: usize = 16_384;
+const TOOL_EVENT_METADATA_MAX_BYTES: usize = 16_384;
 
-pub(crate) fn truncate_tool_event_metadata(value: &str) -> String {
-    if value.chars().count() <= TOOL_EVENT_METADATA_MAX_CHARS {
+fn truncate_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
         return value.to_string();
     }
-    format!(
-        "{}…",
-        value
-            .chars()
-            .take(TOOL_EVENT_METADATA_MAX_CHARS)
-            .collect::<String>()
-    )
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &value[..end])
+}
+
+pub(crate) fn truncate_tool_event_metadata(value: &str) -> String {
+    truncate_bytes(value, TOOL_EVENT_METADATA_MAX_BYTES)
 }
 
 /// Truncate tool-result text before it is appended to chat history.
 pub(crate) fn truncate_tool_result(content: String, max_chars: usize) -> String {
-    if max_chars == 0 || content.chars().count() <= max_chars {
+    if max_chars == 0 || content.len() <= max_chars {
         return content;
     }
     format!(
         "{}…\n[truncated]",
-        content.chars().take(max_chars).collect::<String>()
+        truncate_bytes(&content, max_chars)
     )
 }
 
@@ -818,17 +824,26 @@ pub(crate) async fn dispatch_one(
     }
 
     let exec_result: Result<String, ChatError> = async {
-        let pre_ctx = hooks
-            .run(
+        let pre_ctx = if hooks.is_empty_for(&HookStage::PreTool).await {
+            HookContext::with_meta(
                 HookStage::PreTool,
-                HookContext::with_meta(
-                    HookStage::PreTool,
-                    tc.function.arguments.trim(),
-                    "tool_name",
-                    tc.function.name.as_str(),
-                ),
+                tc.function.arguments.trim(),
+                "tool_name",
+                tc.function.name.as_str(),
             )
-            .await?;
+        } else {
+            hooks
+                .run(
+                    HookStage::PreTool,
+                    HookContext::with_meta(
+                        HookStage::PreTool,
+                        tc.function.arguments.trim(),
+                        "tool_name",
+                        tc.function.name.as_str(),
+                    ),
+                )
+                .await?
+        };
         // If the LLM's argument JSON was truncated (e.g. by token limits), return a
         // soft error as a tool result so the model can retry rather than killing the turn.
         // An empty arguments string is treated as `{}` because some models omit braces for
@@ -855,20 +870,32 @@ pub(crate) async fn dispatch_one(
                 }
             }
         };
-        let policy = registry.policy_for(&tc.function.name).await;
-        let result = invoke_with_policy(registry, &tc.function.name, args, &policy).await?;
+        let (tool, policy) = registry
+            .resolve_invocation(&tc.function.name)
+            .await
+            .map_err(ChatError::Tool)?;
+        let result = invoke_with_policy(&tool, &tc.function.name, args, &policy).await?;
         let result_json = serde_json::to_string(&result)?;
-        let post_ctx = hooks
-            .run(
+        let post_ctx = if hooks.is_empty_for(&HookStage::PostTool).await {
+            HookContext::with_meta(
                 HookStage::PostTool,
-                HookContext::with_meta(
-                    HookStage::PostTool,
-                    &result_json,
-                    "tool_name",
-                    tc.function.name.as_str(),
-                ),
+                &result_json,
+                "tool_name",
+                tc.function.name.as_str(),
             )
-            .await?;
+        } else {
+            hooks
+                .run(
+                    HookStage::PostTool,
+                    HookContext::with_meta(
+                        HookStage::PostTool,
+                        &result_json,
+                        "tool_name",
+                        tc.function.name.as_str(),
+                    ),
+                )
+                .await?
+        };
         Ok(post_ctx.content)
     }
     .await;
@@ -1060,12 +1087,14 @@ pub async fn complete_with_tools(
         .await;
 
         let tool_specs = active_set.specs_for_llm();
+        let chat_tools = active_set.chat_tools_for_llm();
 
         let (val, model_ref) = match provider_chat_post(
             http,
             &credentials,
             &messages,
             tool_specs,
+            chat_tools,
             options,
             &request_id,
             api_calls,
@@ -1341,6 +1370,7 @@ pub async fn complete_with_tools(
                             &credentials,
                             &messages,
                             None,
+                            None,
                             options,
                             &request_id,
                             api_calls,
@@ -1551,6 +1581,7 @@ where
         credentials: &credentials,
         messages: &full_messages,
         tools: None,
+        chat_tools: None,
         stream: true,
         options,
     };
@@ -1692,6 +1723,48 @@ where
     );
 
     Ok(outcome)
+}
+
+fn push_early_stream_tool<'a>(
+    tc: ToolCall,
+    in_flight: &mut FuturesUnordered<
+        Pin<
+            Box<
+                dyn std::future::Future<Output = Result<(String, ChatMessage), ChatError>>
+                    + Send
+                    + 'a,
+            >,
+        >,
+    >,
+    dispatched_ids: &mut BTreeMap<String, ()>,
+    hooks: &'a HookRegistry,
+    registry: &'a ToolRegistry,
+    status_emitter: Option<&'a Arc<StatusEmitter>>,
+    request_id: &'a str,
+    round: u32,
+    model: &'a str,
+    tool_result_max_chars: usize,
+) {
+    if dispatched_ids.contains_key(&tc.id) {
+        return;
+    }
+    dispatched_ids.insert(tc.id.clone(), ());
+    let tool_id = tc.id.clone();
+    in_flight.push(Box::pin(async move {
+        let msg = dispatch_one(
+            &tc,
+            hooks,
+            registry,
+            status_emitter,
+            request_id,
+            round,
+            model,
+            true,
+            tool_result_max_chars,
+        )
+        .await?;
+        Ok((tool_id, msg))
+    }));
 }
 
 /// Outcome of a streaming completion with tool rounds.
@@ -1838,12 +1911,14 @@ where
         .await;
 
         let tool_specs = active_set.specs_for_llm();
+        let chat_tools = active_set.chat_tools_for_llm();
 
         let (mut byte_stream, model_ref) = provider_chat_stream(
             http,
             &credentials,
             &messages,
             tool_specs,
+            chat_tools,
             options,
             &request_id,
             api_calls,
@@ -1854,66 +1929,131 @@ where
 
         let mut parser = SseParser::new();
         let mut round_content = String::new();
-        let mut tool_accumulator = stream_tools::ToolCallAccumulator::new();
+        let mut tool_dispatch = stream_tools::StreamingToolDispatch::new();
+        let mut completed_tools: BTreeMap<String, ChatMessage> = BTreeMap::new();
+        let mut dispatched_tool_ids: BTreeMap<String, ()> = BTreeMap::new();
+        let mut in_flight: FuturesUnordered<
+            Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<(String, ChatMessage), ChatError>>
+                        + Send,
+                >,
+            >,
+        > = FuturesUnordered::new();
         let mut anthropic_acc =
             crate::providers::anthropic_stream::AnthropicStreamAccumulator::new();
         let mut round_finish: Option<String> = None;
         let mut round_usage: Option<proto::Usage> = None;
+        let mut stream_done = false;
 
-        while let Some(chunk) = byte_stream.next().await {
-            if let Some(token) = &options.cancel
-                && token.is_cancelled()
-            {
-                return Err(ChatError::Cancelled);
-            }
-            let bytes = chunk?;
-            let text = String::from_utf8_lossy(&bytes);
-            let events = parser
-                .push_str(&text)
-                .map_err(|e| ChatError::Http(HttpError::InvalidJson(e.to_string())))?;
-
-            for event in events {
-                if event.event.as_deref() == Some("error") {
-                    return Err(ChatError::Api(format!(
-                        "stream error event: {}",
-                        event.data.trim()
-                    )));
+        while !stream_done || !in_flight.is_empty() {
+            tokio::select! {
+                biased;
+                result = in_flight.next(), if !in_flight.is_empty() => {
+                    match result {
+                        Some(Ok((id, msg))) => {
+                            completed_tools.insert(id, msg);
+                        }
+                        Some(Err(e)) => return Err(e),
+                        None => {}
+                    }
                 }
-                let data = event.data.trim();
-                if data == "[DONE]" {
-                    break;
-                }
-                if data.is_empty() {
-                    continue;
-                }
-                if is_anthropic {
-                    if let Some(delta) = anthropic_acc.apply_sse_data(data).map_err(ChatError::Serde)?
-                        && !delta.is_empty()
+                chunk = byte_stream.next(), if !stream_done => {
+                    let Some(chunk) = chunk else {
+                        stream_done = true;
+                        continue;
+                    };
+                    if let Some(token) = &options.cancel
+                        && token.is_cancelled()
                     {
-                        round_content.push_str(&delta);
-                        on_delta(delta);
+                        return Err(ChatError::Cancelled);
                     }
-                } else {
-                    let chunk: ChatCompletionChunk = serde_json::from_str(data)?;
-                    let prev_len = round_content.len();
-                    stream_tools::apply_openai_chunk(
-                        &chunk,
-                        &mut round_content,
-                        &mut tool_accumulator,
-                        &mut round_finish,
-                        &mut round_usage,
-                    );
-                    if round_content.len() > prev_len {
-                        on_delta(round_content[prev_len..].to_string());
+                    let bytes = chunk?;
+                    let text = String::from_utf8_lossy(&bytes);
+                    let events = parser
+                        .push_str(&text)
+                        .map_err(|e| ChatError::Http(HttpError::InvalidJson(e.to_string())))?;
+
+                    for event in events {
+                        if event.event.as_deref() == Some("error") {
+                            return Err(ChatError::Api(format!(
+                                "stream error event: {}",
+                                event.data.trim()
+                            )));
+                        }
+                        let data = event.data.trim();
+                        if data == "[DONE]" {
+                            stream_done = true;
+                            break;
+                        }
+                        if data.is_empty() {
+                            continue;
+                        }
+                        if is_anthropic {
+                            if let Some(delta) = anthropic_acc.apply_sse_data(data).map_err(ChatError::Serde)?
+                                && !delta.is_empty()
+                            {
+                                round_content.push_str(&delta);
+                                on_delta(delta);
+                            }
+                        } else {
+                            let chunk: ChatCompletionChunk = serde_json::from_str(data)?;
+                            let prev_len = round_content.len();
+                            let ready = stream_tools::apply_openai_chunk(
+                                &chunk,
+                                &mut round_content,
+                                &mut tool_dispatch,
+                                &mut round_finish,
+                                &mut round_usage,
+                            );
+                            if round_content.len() > prev_len {
+                                on_delta(round_content[prev_len..].to_string());
+                            }
+                            for tc in ready {
+                                push_early_stream_tool(
+                                    tc,
+                                    &mut in_flight,
+                                    &mut dispatched_tool_ids,
+                                    hooks,
+                                    registry,
+                                    options.status_emitter.as_ref(),
+                                    &request_id,
+                                    api_calls,
+                                    &options.model,
+                                    options.tool_result_max_chars,
+                                );
+                            }
+                        }
                     }
                 }
+            }
+        }
+
+        if !is_anthropic {
+            for tc in tool_dispatch.drain_at_round_end() {
+                push_early_stream_tool(
+                    tc,
+                    &mut in_flight,
+                    &mut dispatched_tool_ids,
+                    hooks,
+                    registry,
+                    options.status_emitter.as_ref(),
+                    &request_id,
+                    api_calls,
+                    &options.model,
+                    options.tool_result_max_chars,
+                );
+            }
+            while let Some(result) = in_flight.next().await {
+                let (id, msg) = result?;
+                completed_tools.insert(id, msg);
             }
         }
 
         let round = if is_anthropic {
             anthropic_acc.into_round_outcome()
         } else {
-            let tool_calls = tool_accumulator.finish();
+            let tool_calls = tool_dispatch.finish_remaining();
             crate::providers::StreamRoundOutcome {
                 content: round_content,
                 tool_calls,
@@ -2087,24 +2227,32 @@ where
                 .iter()
                 .filter(|tc| tc.kind == "function")
                 .collect();
-            let results = futures_util::future::join_all(
-                function_tcs.iter().map(|tc| {
-                    dispatch_one(
-                        tc,
-                        hooks,
-                        registry,
-                        options.status_emitter.as_ref(),
-                        &request_id,
-                        api_calls,
-                        &options.model,
-                        true,
-                        options.tool_result_max_chars,
-                    )
-                }),
-            )
-            .await;
-            for r in results {
-                messages.push(r?);
+            if completed_tools.len() == function_tcs.len() && !function_tcs.is_empty() {
+                for tc in function_tcs {
+                    if let Some(msg) = completed_tools.remove(&tc.id) {
+                        messages.push(msg);
+                    }
+                }
+            } else {
+                let results = futures_util::future::join_all(
+                    function_tcs.iter().map(|tc| {
+                        dispatch_one(
+                            tc,
+                            hooks,
+                            registry,
+                            options.status_emitter.as_ref(),
+                            &request_id,
+                            api_calls,
+                            &options.model,
+                            true,
+                            options.tool_result_max_chars,
+                        )
+                    }),
+                )
+                .await;
+                for r in results {
+                    messages.push(r?);
+                }
             }
 
             if options.condense_tool_messages {
@@ -2166,7 +2314,7 @@ mod truncate_tests {
         let content = "x".repeat(100);
         let out = truncate_tool_result(content.clone(), 50);
         assert!(out.contains("…\n[truncated]"));
-        assert!(out.chars().count() <= 50 + "…\n[truncated]".chars().count());
+        assert!(out.len() < content.len());
     }
 
     #[test]

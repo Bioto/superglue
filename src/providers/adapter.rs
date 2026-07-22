@@ -47,6 +47,7 @@ pub struct ProviderRequestContext<'a> {
     pub credentials: &'a ProviderCredentials,
     pub messages: &'a [ChatMessage],
     pub tools: Option<&'a [ToolSpec]>,
+    pub chat_tools: Option<&'a [crate::openai::ChatTool]>,
     pub stream: bool,
     pub options: &'a crate::chat::ChatOptions,
 }

@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use crate::openai::ToolCall;
+use crate::openai::{ChatTool, ToolCall};
 
 use super::types::ToolSpec;
 
@@ -25,8 +25,13 @@ pub struct ActiveToolSet {
     static_specs: Vec<ToolSpec>,
     dynamic_specs: Vec<ToolSpec>,
     active_specs: Vec<ToolSpec>,
+    llm_chat_tools: Vec<ChatTool>,
     router_spec: Option<ToolSpec>,
     pub routed: bool,
+}
+
+fn build_llm_chat_tools(specs: &[ToolSpec]) -> Vec<ChatTool> {
+    specs.iter().map(|s| ChatTool::from(s.clone())).collect()
 }
 
 impl ActiveToolSet {
@@ -37,7 +42,8 @@ impl ActiveToolSet {
             return Self {
                 static_specs: Vec::new(),
                 dynamic_specs: Vec::new(),
-                active_specs: all_specs,
+                active_specs: all_specs.clone(),
+                llm_chat_tools: build_llm_chat_tools(&all_specs),
                 router_spec: None,
                 routed: false,
             };
@@ -64,7 +70,8 @@ impl ActiveToolSet {
         Self {
             static_specs,
             dynamic_specs,
-            active_specs,
+            active_specs: active_specs.clone(),
+            llm_chat_tools: build_llm_chat_tools(&active_specs),
             router_spec,
             routed: false,
         }
@@ -79,9 +86,20 @@ impl ActiveToolSet {
         }
     }
 
+    /// Pre-built OpenAI `tools[]` entries for the active set (avoids per-request cloning).
+    #[must_use]
+    pub fn chat_tools_for_llm(&self) -> Option<&[ChatTool]> {
+        if self.llm_chat_tools.is_empty() {
+            None
+        } else {
+            Some(&self.llm_chat_tools)
+        }
+    }
+
     pub fn apply_route(&mut self, matched: Vec<ToolSpec>) {
         self.active_specs = matched;
         self.active_specs.extend(self.static_specs.clone());
+        self.llm_chat_tools = build_llm_chat_tools(&self.active_specs);
         self.router_spec = None;
         self.routed = true;
     }

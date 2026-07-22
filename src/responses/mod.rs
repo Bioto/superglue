@@ -816,7 +816,7 @@ struct ResponsesStreamRound {
     usage: Option<proto::Usage>,
     raw_output: Vec<ResponseOutputItem>,
     stream_error: Option<String>,
-    chat_tool_accumulator: stream_tools::ToolCallAccumulator,
+    chat_tool_dispatch: stream_tools::StreamingToolDispatch,
     chat_finish_reason: Option<String>,
 }
 
@@ -1002,9 +1002,9 @@ async fn ingest_stream_output_item(
     }
 }
 
-fn merge_chat_tool_accumulator(round_state: &mut ResponsesStreamRound) {
+fn merge_chat_tool_dispatch(round_state: &mut ResponsesStreamRound) {
     if round_state.function_calls.is_empty() {
-        for tc in round_state.chat_tool_accumulator.finish() {
+        for tc in round_state.chat_tool_dispatch.finish_remaining() {
             if tc.function.name.is_empty() {
                 continue;
             }
@@ -1032,10 +1032,10 @@ fn apply_chat_completion_chunk_event(
         round_state.response_id = chunk.id.clone();
     }
     let prev_len = round_state.content.len();
-    stream_tools::apply_openai_chunk(
+    let _ready = stream_tools::apply_openai_chunk(
         &chunk,
         &mut round_state.content,
-        &mut round_state.chat_tool_accumulator,
+        &mut round_state.chat_tool_dispatch,
         &mut round_state.chat_finish_reason,
         &mut round_state.usage,
     );
@@ -1295,7 +1295,7 @@ where
         return Err(ResponseError::StreamFailed(err));
     }
 
-    merge_chat_tool_accumulator(&mut round_state);
+    merge_chat_tool_dispatch(&mut round_state);
 
     Ok((round_state, model_used))
 }

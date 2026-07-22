@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject};
-use rmcp::service::{RoleClient, RunningService, ServiceError};
+use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use rmcp::transport::{
     streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
     StreamableHttpClientTransport, TokioChildProcess,
@@ -65,8 +65,12 @@ pub struct McpHttpConfig {
 }
 
 /// Active MCP session; disconnect via [`McpSession::close`] or on drop.
+///
+/// Tool calls use a cloned [`Peer`] so concurrent `call_tool` requests are not
+/// serialized by the service shutdown mutex.
 pub struct McpSession {
-    inner: Mutex<RunningService<RoleClient, ()>>,
+    peer: Peer<RoleClient>,
+    service: Mutex<Option<RunningService<RoleClient, ()>>>,
     label: String,
 }
 
@@ -100,7 +104,8 @@ impl McpSession {
             .map_err(|e| McpError::Connect(e.to_string()))?;
 
         Ok(Arc::new(Self {
-            inner: Mutex::new(client),
+            peer: client.peer().clone(),
+            service: Mutex::new(Some(client)),
             label,
         }))
     }
@@ -134,7 +139,8 @@ impl McpSession {
             .map_err(|e| McpError::Connect(e.to_string()))?;
 
         Ok(Arc::new(Self {
-            inner: Mutex::new(client),
+            peer: client.peer().clone(),
+            service: Mutex::new(Some(client)),
             label,
         }))
     }
@@ -160,10 +166,7 @@ impl McpSession {
         prefix: Option<&str>,
         include: impl Fn(&str) -> bool,
     ) -> Result<Vec<String>, McpError> {
-        let tools = {
-            let guard = self.inner.lock().await;
-            guard.list_all_tools().await?
-        };
+        let tools = self.peer.list_all_tools().await?;
         let prefix = prefix.unwrap_or(&self.label);
         let mut registered = Vec::new();
         for tool in tools {
@@ -200,11 +203,13 @@ impl McpSession {
 
     /// Gracefully close the MCP connection.
     pub async fn close(&self) -> Result<(), McpError> {
-        let mut guard = self.inner.lock().await;
-        guard
-            .close()
-            .await
-            .map_err(|e| McpError::Connect(format!("close: {e}")))?;
+        let mut guard = self.service.lock().await;
+        if let Some(mut service) = guard.take() {
+            service
+                .close()
+                .await
+                .map_err(|e| McpError::Connect(format!("close: {e}")))?;
+        }
         Ok(())
     }
 
@@ -225,8 +230,7 @@ impl McpSession {
             Some(args) => CallToolRequestParams::new(mcp_name.to_string()).with_arguments(args),
             None => CallToolRequestParams::new(mcp_name.to_string()),
         };
-        let guard = self.inner.lock().await;
-        guard.peer().call_tool(params).await.map_err(McpError::from)
+        self.peer.call_tool(params).await.map_err(McpError::from)
     }
 }
 
@@ -330,6 +334,12 @@ mod tests {
             transport_config.auth_header.as_deref(),
             Some("access-token")
         );
+    }
+
+    #[test]
+    fn mcp_peer_supports_clone_for_parallel_calls() {
+        fn assert_clone<T: Clone>() {}
+        assert_clone::<Peer<RoleClient>>();
     }
 
     #[test]

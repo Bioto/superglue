@@ -82,6 +82,20 @@ impl ToolRegistry {
         removed
     }
 
+    /// Resolve a tool and its error policy in one registry read.
+    pub async fn resolve_invocation(
+        &self,
+        name: &str,
+    ) -> Result<(Arc<dyn Tool>, ToolRetryPolicy), ToolInvokeError> {
+        let map = self.tools.read().await;
+        match map.get(name) {
+            Some((tool, policy)) => Ok((Arc::clone(tool), policy.clone())),
+            None => Err(ToolInvokeError::UnknownTool {
+                name: name.to_string(),
+            }),
+        }
+    }
+
     /// Invoke a tool by name.
     #[instrument(skip(self, arguments), fields(tool = name))]
     pub async fn invoke(&self, name: &str, arguments: Value) -> Result<Value, ToolInvokeError> {

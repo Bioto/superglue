@@ -43,12 +43,17 @@ impl LlmProvider for OpenAiCompatProvider {
             ("Content-Type".to_string(), "application/json".to_string()),
         ];
 
-        let tools = ctx.tools.map(|specs| {
-            specs
-                .iter()
-                .map(|s| ChatTool::from(s.clone()))
-                .collect::<Vec<ChatTool>>()
-        });
+        let tools = ctx
+            .chat_tools
+            .map(|t| t.to_vec())
+            .or_else(|| {
+                ctx.tools.map(|specs| {
+                    specs
+                        .iter()
+                        .map(|s| ChatTool::from(s.clone()))
+                        .collect::<Vec<ChatTool>>()
+                })
+            });
 
         let mut req = ChatCompletionRequest::new(
             ctx.model_ref.model.clone(),

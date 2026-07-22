@@ -78,6 +78,8 @@ use superglue::events::{
 };
 use superglue::tools::{Tool, ToolInvokeError, ToolRegistry, ToolSpec};
 
+mod json_bridge;
+
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 fn runtime() -> &'static Runtime {
@@ -103,33 +105,17 @@ impl Tool for PythonDictTool {
     }
 
     async fn call(&self, arguments: Value) -> Result<Value, ToolInvokeError> {
-        let args_json = serde_json::to_string(&arguments)
-            .map_err(|e| ToolInvokeError::handler(e.to_string(), None))?;
         let cb = Arc::clone(&self.callback);
         tokio::task::spawn_blocking(move || {
             Python::attach(|py| {
-                // Convert JSON → Python dict via json.loads
-                let json_mod = py
-                    .import("json")
-                    .map_err(|e| ToolInvokeError::handler(format!("import json: {e}"), None))?;
-                let args_dict = json_mod
-                    .call_method1("loads", (args_json.as_str(),))
-                    .map_err(|e| ToolInvokeError::handler(format!("json.loads: {e}"), None))?;
-
-                // Call the Python function with the dict
+                let args_py = json_bridge::json_to_py(py, &arguments).map_err(|e| {
+                    ToolInvokeError::handler(format!("args to python: {e}"), None)
+                })?;
                 let result = cb
-                    .call1(py, (args_dict,))
+                    .call1(py, (args_py,))
                     .map_err(|e| ToolInvokeError::handler(format!("python call: {e}"), None))?;
-
-                // Convert return value → JSON string via json.dumps
-                let result_str: String = json_mod
-                    .call_method1("dumps", (result,))
-                    .map_err(|e| ToolInvokeError::handler(format!("json.dumps: {e}"), None))?
-                    .extract()
-                    .map_err(|e| ToolInvokeError::handler(format!("extract str: {e}"), None))?;
-
-                serde_json::from_str(&result_str)
-                    .map_err(|e| ToolInvokeError::handler(e.to_string(), None))
+                json_bridge::py_to_json(py, result.bind(py).clone())
+                    .map_err(|e| ToolInvokeError::handler(format!("result to json: {e}"), None))
             })
         })
         .await
@@ -279,7 +265,7 @@ impl HookHandler for PythonHook {
                     None
                 } else if let Ok(s) = result.extract::<String>(py) {
                     Some(s)
-                } else if let Ok(d) = result.downcast_bound::<pyo3::types::PyDict>(py) {
+                } else if let Ok(d) = result.bind(py).cast::<pyo3::types::PyDict>() {
                     d.get_item("content")
                         .ok()
                         .flatten()
