@@ -25,6 +25,7 @@ pub mod files;
 pub mod guardrails;
 pub mod hooks;
 pub mod http;
+pub mod images;
 pub mod openai;
 pub mod proto;
 pub mod providers;

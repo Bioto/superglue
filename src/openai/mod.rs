@@ -60,6 +60,12 @@ pub enum ContentPart {
     File {
         file: FileContent,
     },
+    /// Lazy image reference resolved via [`crate::images::ImageStore`] before provider calls.
+    ImageRef {
+        hash: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +92,15 @@ impl MessageContent {
         match self {
             MessageContent::Text(s) => Some(s.as_str()),
             MessageContent::Parts(_) => None,
+        }
+    }
+
+    /// Concatenate text parts and image-ref markers for compaction / transcripts.
+    #[must_use]
+    pub fn text_for_summary(&self) -> String {
+        match self {
+            MessageContent::Text(s) => s.clone(),
+            MessageContent::Parts(parts) => crate::images::parts_text_for_summary(parts),
         }
     }
 }

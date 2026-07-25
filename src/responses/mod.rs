@@ -6,7 +6,7 @@ use std::time::Instant;
 use futures_util::StreamExt;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use thiserror::Error;
 use tracing::instrument;
 
@@ -23,7 +23,7 @@ use crate::guardrails::{
 };
 use crate::hooks::{HookRegistry, HookStage};
 use crate::http::{join_base_url, HttpClient, sse::SseParser};
-use crate::openai::{ChatMessage, FunctionCall, MessageContent, ToolCall, ToolChoice};
+use crate::openai::{ChatMessage, ContentPart, FunctionCall, ImageDetail, MessageContent, ToolCall, ToolChoice};
 use crate::proto;
 use crate::tools::{ToolRegistry, ToolSpec};
 
@@ -794,9 +794,8 @@ pub(crate) fn chat_messages_to_response_input(messages: &[ChatMessage]) -> Respo
                 let output = msg
                     .content
                     .as_ref()
-                    .and_then(|c| c.as_text())
-                    .unwrap_or("")
-                    .to_string();
+                    .map(MessageContent::text_for_summary)
+                    .unwrap_or_default();
                 items.push(ResponseInputItem::FunctionCallOutput {
                     call_id: call_id.clone(),
                     output,
@@ -805,15 +804,14 @@ pub(crate) fn chat_messages_to_response_input(messages: &[ChatMessage]) -> Respo
             continue;
         }
         if msg.role == "assistant" {
-            if let Some(text) = msg
+            if let Some(content) = msg
                 .content
                 .as_ref()
-                .and_then(|c| c.as_text())
-                .filter(|t| !t.is_empty())
+                .and_then(message_content_to_response_value)
             {
                 items.push(ResponseInputItem::Message {
                     role: "assistant".into(),
-                    content: Value::String(text.to_string()),
+                    content,
                 });
             }
             if let Some(tool_calls) = &msg.tool_calls {
@@ -830,14 +828,85 @@ pub(crate) fn chat_messages_to_response_input(messages: &[ChatMessage]) -> Respo
             }
             continue;
         }
-        if let Some(text) = msg.content.as_ref().and_then(|c| c.as_text()) {
+        if let Some(content) = msg.content.as_ref().and_then(message_content_to_response_value) {
             items.push(ResponseInputItem::Message {
                 role: msg.role.clone(),
-                content: Value::String(text.to_string()),
+                content,
             });
         }
     }
     ResponseInput::Items(items)
+}
+
+fn message_content_to_response_value(content: &MessageContent) -> Option<Value> {
+    match content {
+        MessageContent::Text(text) if !text.is_empty() => Some(Value::String(text.clone())),
+        MessageContent::Text(_) => None,
+        MessageContent::Parts(parts) => {
+            let blocks = content_parts_to_response_parts(parts);
+            if blocks.is_empty() {
+                None
+            } else if blocks.len() == 1
+                && blocks[0].get("type").and_then(Value::as_str) == Some("input_text")
+                && let Some(text) = blocks[0].get("text").and_then(Value::as_str)
+            {
+                Some(Value::String(text.to_string()))
+            } else {
+                Some(Value::Array(blocks))
+            }
+        }
+    }
+}
+
+fn content_parts_to_response_parts(parts: &[ContentPart]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for part in parts {
+        match part {
+            ContentPart::Text { text } if !text.is_empty() => {
+                out.push(json!({"type": "input_text", "text": text}));
+            }
+            ContentPart::ImageUrl { image_url } => {
+                let mut block = json!({
+                    "type": "input_image",
+                    "image_url": image_url.url,
+                });
+                if let Some(detail) = &image_url.detail {
+                    block["detail"] = json!(image_detail_to_api(detail));
+                }
+                out.push(block);
+            }
+            ContentPart::ImageRef { hash, filename } => {
+                let label = filename.as_deref().unwrap_or(hash.as_str());
+                out.push(json!({
+                    "type": "input_text",
+                    "text": format!("[missing image: {label}]"),
+                }));
+            }
+            ContentPart::File { file } => {
+                if let Some(data) = &file.file_data {
+                    let mut block = json!({
+                        "type": "input_file",
+                        "file_data": data,
+                    });
+                    if let Some(name) = &file.filename {
+                        block["filename"] = json!(name);
+                    }
+                    out.push(block);
+                }
+            }
+            ContentPart::InputAudio { .. } => {}
+            ContentPart::Text { .. } => {}
+        }
+    }
+    out
+}
+
+fn image_detail_to_api(detail: &ImageDetail) -> &'static str {
+    match detail {
+        ImageDetail::Auto => "auto",
+        ImageDetail::Low => "low",
+        ImageDetail::High => "high",
+    }
 }
 
 /// Build the next Responses `input`: chain tool outputs only when `previous_response_id`
@@ -1422,13 +1491,15 @@ where
             .rev()
             .find(|m| m.role == "user")
             .and_then(|m| m.content.as_ref())
-            .and_then(|c| c.as_text().map(str::to_string))
+            .map(MessageContent::text_for_summary)
+            .filter(|t| !t.trim().is_empty())
             .unwrap_or_default();
         let (outcome, guard_name) = guardrails.run_input(&last_user).await;
         match outcome {
             GuardrailOutcome::Allow(transformed) => {
                 if transformed != last_user
                     && let Some(msg) = messages.iter_mut().rev().find(|m| m.role == "user")
+                    && matches!(msg.content, Some(MessageContent::Text(_)))
                 {
                     msg.content = Some(MessageContent::Text(transformed));
                 }
@@ -1464,7 +1535,8 @@ where
             .rev()
             .find(|m| m.role == "user")
             .and_then(|m| m.content.as_ref())
-            .and_then(|c| c.as_text().map(str::to_string))
+            .map(MessageContent::text_for_summary)
+            .filter(|t| !t.trim().is_empty())
             .unwrap_or_default();
         hooks
             .run(
@@ -1735,6 +1807,7 @@ fn reset_chain_after_context_mutation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::images::{ImageStore, resolve_message_content};
     use serde_json::json;
 
     #[test]
@@ -2241,6 +2314,74 @@ mod tests {
 
         let resolved = resolve_round_function_calls(&round_state);
         assert_eq!(resolved[0].call_id, "call_xyz");
+    }
+
+    #[test]
+    fn resolved_image_parts_map_to_response_input() {
+        let mut store = ImageStore::default();
+        let hash = store.insert_from_bytes("horse.png", b"\x89PNG\r\n\x1a\n");
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: Some(resolve_message_content(
+                &MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "what is this?".into(),
+                    },
+                    ContentPart::ImageRef {
+                        hash,
+                        filename: Some("horse.png".into()),
+                    },
+                ]),
+                &store,
+            )),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            refusal: None,
+        }];
+        let ResponseInput::Items(items) = chat_messages_to_response_input(&messages) else {
+            panic!("expected items");
+        };
+        let ResponseInputItem::Message { content, .. } = &items[0] else {
+            panic!("expected message");
+        };
+        let arr = content.as_array().expect("multipart content");
+        assert!(arr.iter().any(|p| p.get("type").and_then(|v| v.as_str()) == Some("input_image")));
+    }
+
+    #[test]
+    fn chat_messages_to_response_input_maps_user_image_parts() {
+        let messages = vec![ChatMessage {
+            role: "user".into(),
+            content: Some(MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "what is this?".into(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: crate::openai::ImageUrl {
+                        url: "data:image/png;base64,abc".into(),
+                        detail: None,
+                    },
+                },
+            ])),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            refusal: None,
+        }];
+        let ResponseInput::Items(items) = chat_messages_to_response_input(&messages) else {
+            panic!("expected items");
+        };
+        assert_eq!(items.len(), 1);
+        let ResponseInputItem::Message { role, content } = &items[0] else {
+            panic!("expected message");
+        };
+        assert_eq!(role, "user");
+        let arr = content.as_array().expect("multipart content");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "input_text");
+        assert_eq!(arr[1]["type"], "input_image");
+        assert_eq!(arr[1]["image_url"], "data:image/png;base64,abc");
     }
 
     #[test]

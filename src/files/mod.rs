@@ -193,6 +193,9 @@ pub fn default_max_upload_bytes() -> usize {
 }
 
 fn mime_from_filename(filename: &str) -> &'static str {
+    if crate::images::is_image_filename(filename) {
+        return crate::images::image_mime_from_filename(filename);
+    }
     let lower = filename.to_ascii_lowercase();
     if lower.ends_with(".pdf") {
         "application/pdf"

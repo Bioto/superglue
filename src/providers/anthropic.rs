@@ -265,6 +265,10 @@ fn map_user_content(msg: &ChatMessage) -> Value {
                         }
                     }),
                     ContentPart::File { file } => map_file_part(file),
+                    ContentPart::ImageRef { hash, .. } => json!({
+                        "type": "text",
+                        "text": format!("[unresolved image_ref: {hash}]")
+                    }),
                     ContentPart::InputAudio { .. } => json!({
                         "type": "text",
                         "text": "[audio input not supported on anthropic adapter]"
