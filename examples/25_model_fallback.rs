@@ -2,8 +2,8 @@
 
 mod support;
 
-use superglue::{Client, CallOptions};
-use support::{model, require_api_key, base_url};
+use superglue::{CallOptions, Client};
+use support::{base_url, model, require_api_key};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

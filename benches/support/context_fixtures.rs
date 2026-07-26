@@ -13,19 +13,19 @@ pub mod conversation_profiles;
 #[path = "multiturn.rs"]
 pub mod multiturn;
 
-pub use bench_configs::{BenchConfig, BENCH_CONFIGS};
+pub use bench_configs::{BENCH_CONFIGS, BenchConfig};
 pub use conversation_profiles::ConversationProfile;
-pub use multiturn::{run_multiturn_wiremock, MultiTurnMetrics};
+pub use multiturn::{MultiTurnMetrics, run_multiturn_wiremock};
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use superglue::chat::{ChatError, ChatOptions, CompletionOutcome, complete_with_tools};
 use superglue::guardrails::GuardrailRegistry;
 use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
-use superglue::tools::{ToolMode, ToolRegistry, ROUTER_TOOL_NAME};
+use superglue::tools::{ROUTER_TOOL_NAME, ToolMode, ToolRegistry};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

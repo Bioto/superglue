@@ -20,7 +20,10 @@ pub fn parse_model_ref(s: &str) -> ModelRef {
     let trimmed = s.trim();
     if let Some((provider, model)) = trimmed.split_once(':') {
         let provider = ProviderId::from_str(provider).unwrap_or_else(|_| {
-            warn!(provider = provider, "unknown provider prefix; defaulting to openai");
+            warn!(
+                provider = provider,
+                "unknown provider prefix; defaulting to openai"
+            );
             ProviderId::OpenAi
         });
         return ModelRef {

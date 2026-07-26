@@ -9,8 +9,8 @@ use chrono::Utc;
 use crate::tools::ToolRegistry;
 
 use super::config::{
-    enabled_servers, record_server_status, resolve_headers, McpAuthKind, McpServerEntry,
-    McpServerStatus, McpServersFile, McpToolPolicy,
+    McpAuthKind, McpServerEntry, McpServerStatus, McpServersFile, McpToolPolicy, enabled_servers,
+    record_server_status, resolve_headers,
 };
 use super::{McpError, McpHttpConfig, McpSession};
 
@@ -40,13 +40,7 @@ pub async fn connect_enabled_servers(options: McpConnectOptions<'_>) -> McpConne
     let mut registered_tool_names = Vec::new();
 
     for server in enabled_servers(options.config) {
-        match connect_server(
-            &server,
-            options.full_registry,
-            options.readonly_registry,
-        )
-        .await
-        {
+        match connect_server(&server, options.full_registry, options.readonly_registry).await {
             Ok(conn) => {
                 if let Some(path) = options.status_path {
                     let _ = record_server_status(
@@ -106,10 +100,18 @@ async fn connect_server(
 
     let prefix = server.id.as_str();
     let registered_names = if server.tools.uses_split_registration() {
-        register_split_tools(&session, full_registry, readonly_registry, prefix, &server.tools)
-            .await?
+        register_split_tools(
+            &session,
+            full_registry,
+            readonly_registry,
+            prefix,
+            &server.tools,
+        )
+        .await?
     } else {
-        let readonly_names = session.register_tools(readonly_registry, Some(prefix)).await?;
+        let readonly_names = session
+            .register_tools(readonly_registry, Some(prefix))
+            .await?;
         let mut full_names = session.register_tools(full_registry, Some(prefix)).await?;
         // Merge: readonly names + any additional names registered only in full.
         let mut names = readonly_names;
@@ -146,8 +148,18 @@ async fn register_split_tools(
     prefix: &str,
     tools: &McpToolPolicy,
 ) -> Result<Vec<String>, McpError> {
-    let readonly_set: HashMap<&str, ()> = tools.readonly.iter().map(|s| s.as_str()).map(|s| (s, ())).collect();
-    let write_set: HashMap<&str, ()> = tools.write.iter().map(|s| s.as_str()).map(|s| (s, ())).collect();
+    let readonly_set: HashMap<&str, ()> = tools
+        .readonly
+        .iter()
+        .map(|s| s.as_str())
+        .map(|s| (s, ()))
+        .collect();
+    let write_set: HashMap<&str, ()> = tools
+        .write
+        .iter()
+        .map(|s| s.as_str())
+        .map(|s| (s, ()))
+        .collect();
 
     let mut all_names = session
         .register_tools_if(readonly_registry, Some(prefix), |name| {
@@ -156,11 +168,15 @@ async fn register_split_tools(
         .await?;
 
     let write_names = session
-        .register_tools_if(full_registry, Some(prefix), |name| write_set.contains_key(name))
+        .register_tools_if(full_registry, Some(prefix), |name| {
+            write_set.contains_key(name)
+        })
         .await?;
 
     let readonly_in_full = session
-        .register_tools_if(full_registry, Some(prefix), |name| readonly_set.contains_key(name))
+        .register_tools_if(full_registry, Some(prefix), |name| {
+            readonly_set.contains_key(name)
+        })
         .await?;
 
     for n in write_names.into_iter().chain(readonly_in_full) {

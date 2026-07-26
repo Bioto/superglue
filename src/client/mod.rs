@@ -13,18 +13,14 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::agents::{AgentEngine, AgentSpec};
-use crate::batch::{batch_complete, BatchConfig, BatchError, BatchRequest, BatchResponse};
+use crate::batch::{BatchConfig, BatchError, BatchRequest, BatchResponse, batch_complete};
 use crate::chat::{
-    complete_with_tools, stream_complete, stream_complete_with_tools, ChatError, ChatOptions,
-    CompletionOutcome, Conversation, StreamOutcome,
+    ChatError, ChatOptions, CompletionOutcome, Conversation, StreamOutcome, complete_with_tools,
+    stream_complete, stream_complete_with_tools,
 };
 use crate::context::SummarizeContextConfig;
-use crate::fallback::{FallbackPolicy, ModelFallbackChain};
-use crate::responses::{
-    complete_with_tools as complete_response_with_tools, stream_response as stream_response_api,
-    ResponseError, ResponseOutcome, ResponseStreamOutcome,
-};
 use crate::events::StatusEmitter;
+use crate::fallback::{FallbackPolicy, ModelFallbackChain};
 use crate::guardrails::{
     BlocklistAction, BlocklistGuardrail, GuardrailConfig, GuardrailHandler, GuardrailRegistry,
     GuardrailStage, LengthStrategy, MaxLengthGuardrail, PiiRedactGuardrail,
@@ -32,10 +28,14 @@ use crate::guardrails::{
 use crate::hooks::{HookConfig, HookRegistry, HookStage};
 use crate::http::{Error as HttpError, HttpClient};
 use crate::openai::ChatMessage;
+use crate::responses::{
+    ResponseError, ResponseOutcome, ResponseStreamOutcome,
+    complete_with_tools as complete_response_with_tools, stream_response as stream_response_api,
+};
 use crate::tools::{Tool, ToolMode, ToolRegistry};
 
 pub use bootstrap::{
-    bootstrap_from_parts, provider_id_from_str, BindingBootstrap, BindingBootstrapConfig,
+    BindingBootstrap, BindingBootstrapConfig, bootstrap_from_parts, provider_id_from_str,
 };
 
 const DEFAULT_MODEL: &str = "gpt-5.4-nano-2026-03-17-mini";
@@ -198,13 +198,14 @@ impl ClientBuilder {
     }
 
     /// Set API key for a specific provider (overrides env for that provider).
-    pub fn api_key_for(mut self, provider: crate::providers::ProviderId, key: impl Into<String>) -> Self {
+    pub fn api_key_for(
+        mut self,
+        provider: crate::providers::ProviderId,
+        key: impl Into<String>,
+    ) -> Self {
         let mut creds = self.provider_credentials.unwrap_or_else(|| {
             let mut c = crate::providers::ProviderCredentials::from_env();
-            c.with_legacy_openai_key(
-                self.api_key.as_deref().unwrap_or(""),
-                Some(&self.base_url),
-            );
+            c.with_legacy_openai_key(self.api_key.as_deref().unwrap_or(""), Some(&self.base_url));
             c
         });
         creds.insert_key(provider, key);
@@ -400,7 +401,10 @@ impl Client {
     }
 
     /// Register a tool implementation.
-    pub async fn register_tool(&self, tool: Arc<dyn Tool>) -> Result<(), crate::tools::ToolInvokeError> {
+    pub async fn register_tool(
+        &self,
+        tool: Arc<dyn Tool>,
+    ) -> Result<(), crate::tools::ToolInvokeError> {
         self.inner.registry.register(tool).await
     }
 
@@ -489,10 +493,7 @@ impl Client {
         }
         if max_output.is_some() {
             guardrails
-                .add_output(GuardrailConfig {
-                    name,
-                    handler,
-                })
+                .add_output(GuardrailConfig { name, handler })
                 .await;
         }
     }
@@ -689,7 +690,11 @@ impl Client {
         session
             .register_tools(&self.inner.registry, prefix.as_deref())
             .await?;
-        self.inner.mcp_sessions.lock().await.push(Arc::clone(&session));
+        self.inner
+            .mcp_sessions
+            .lock()
+            .await
+            .push(Arc::clone(&session));
         Ok(session)
     }
 
@@ -710,7 +715,11 @@ impl Client {
         session
             .register_tools(&self.inner.registry, prefix.as_deref())
             .await?;
-        self.inner.mcp_sessions.lock().await.push(Arc::clone(&session));
+        self.inner
+            .mcp_sessions
+            .lock()
+            .await
+            .push(Arc::clone(&session));
         Ok(session)
     }
 
@@ -779,9 +788,7 @@ impl Client {
             .with_hooks(hooks)
             .with_guardrails(guardrails);
 
-        engine
-            .run(&http, &registry, user_message, &opts)
-            .await
+        engine.run(&http, &registry, user_message, &opts).await
     }
 
     /// Start a multi-turn conversation backed by this client.

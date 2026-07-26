@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -113,11 +113,7 @@ pub fn image_data_url(bytes: &[u8], mime: &str) -> String {
 
 /// Build a user message with inline image bytes as `image_url` parts.
 #[must_use]
-pub fn message_with_image_bytes(
-    text: Option<&str>,
-    filename: &str,
-    bytes: &[u8],
-) -> ChatMessage {
+pub fn message_with_image_bytes(text: Option<&str>, filename: &str, bytes: &[u8]) -> ChatMessage {
     let mime = image_mime_from_filename(filename);
     let url = image_data_url(bytes, mime);
     let mut parts = Vec::new();
@@ -127,10 +123,7 @@ pub fn message_with_image_bytes(
         });
     }
     parts.push(ContentPart::ImageUrl {
-        image_url: ImageUrl {
-            url,
-            detail: None,
-        },
+        image_url: ImageUrl { url, detail: None },
     });
     ChatMessage {
         role: "user".to_string(),
@@ -147,9 +140,7 @@ pub fn message_with_image_bytes(
 pub fn resolve_message_content(content: &MessageContent, store: &ImageStore) -> MessageContent {
     match content {
         MessageContent::Text(_) => content.clone(),
-        MessageContent::Parts(parts) => {
-            MessageContent::Parts(resolve_content_parts(parts, store))
-        }
+        MessageContent::Parts(parts) => MessageContent::Parts(resolve_content_parts(parts, store)),
     }
 }
 
@@ -311,11 +302,13 @@ mod tests {
         let h2 = store.insert_from_bytes("b.png", bytes);
         assert_eq!(h1, h2);
         assert!(store.get(&h1).is_some());
-        assert!(store
-            .get(&h1)
-            .unwrap()
-            .data_url
-            .starts_with("data:image/png;base64,"));
+        assert!(
+            store
+                .get(&h1)
+                .unwrap()
+                .data_url
+                .starts_with("data:image/png;base64,")
+        );
     }
 
     #[test]
@@ -346,10 +339,12 @@ mod tests {
         let v = serde_json::to_value(&msg).unwrap();
         let parts = v["content"].as_array().unwrap();
         assert_eq!(parts[1]["type"], "image_url");
-        assert!(parts[1]["image_url"]["url"]
-            .as_str()
-            .unwrap()
-            .starts_with("data:image/png;base64,"));
+        assert!(
+            parts[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
         let _ = ImageDetail::Auto; // keep import used in openai tests parity
     }
 }

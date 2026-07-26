@@ -11,13 +11,13 @@
 //!          [`http::download`] throttling, per-tool policies, [`audit`] run recording,
 //!          and optional [`grpc`] server.
 
-pub mod context;
 pub mod agents;
 pub mod audit;
 pub mod batch;
 pub mod cancel;
-pub mod client;
 pub mod chat;
+pub mod client;
+pub mod context;
 pub mod costing;
 pub mod events;
 pub mod fallback;
@@ -36,7 +36,7 @@ pub mod tools;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
-pub use client::{CallOptions, Client, ClientBuilder, ClientBuildError, ClientConversation};
+pub use client::{CallOptions, Client, ClientBuildError, ClientBuilder, ClientConversation};
 
 #[cfg(feature = "grpc")]
 pub mod grpc;

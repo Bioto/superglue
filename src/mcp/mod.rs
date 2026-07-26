@@ -4,15 +4,12 @@ pub mod config;
 pub mod runtime;
 
 pub use config::{
-    default_mcp_servers, enabled_servers, ensure_servers_file, format_config_status,
-    load_servers_file, load_servers_file_or_default, load_status_file, record_server_status,
-    resolve_env_value, resolve_headers, save_servers_file, save_status_file, McpAuthKind,
-    McpServerEntry, McpServerStatus, McpServersFile, McpServersStatusFile, McpToolPolicy,
-    DEFAULT_CONTEXT7_MCP_URL,
+    DEFAULT_CONTEXT7_MCP_URL, McpAuthKind, McpServerEntry, McpServerStatus, McpServersFile,
+    McpServersStatusFile, McpToolPolicy, default_mcp_servers, enabled_servers, ensure_servers_file,
+    format_config_status, load_servers_file, load_servers_file_or_default, load_status_file,
+    record_server_status, resolve_env_value, resolve_headers, save_servers_file, save_status_file,
 };
-pub use runtime::{
-    connect_enabled_servers, McpConnectOptions, McpConnectSummary, McpConnections,
-};
+pub use runtime::{McpConnectOptions, McpConnectSummary, McpConnections, connect_enabled_servers};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,11 +18,11 @@ use async_trait::async_trait;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, JsonObject};
 use rmcp::service::{Peer, RoleClient, RunningService, ServiceError};
 use rmcp::transport::{
-    streamable_http_client::StreamableHttpClientTransportConfig, ConfigureCommandExt,
-    StreamableHttpClientTransport, TokioChildProcess,
+    ConfigureCommandExt, StreamableHttpClientTransport, TokioChildProcess,
+    streamable_http_client::StreamableHttpClientTransportConfig,
 };
 use rmcp::{ServiceExt, model::Tool as McpToolDef};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -84,8 +81,8 @@ impl McpSession {
         let cmd = config.command.clone();
         let args = config.args.clone();
         let env = config.env.clone();
-        let transport = TokioChildProcess::new(tokio::process::Command::new(&config.command).configure(
-            |c| {
+        let transport = TokioChildProcess::new(
+            tokio::process::Command::new(&config.command).configure(|c| {
                 for a in &args {
                     c.arg(a);
                 }
@@ -94,14 +91,11 @@ impl McpSession {
                         c.env(k, v);
                     }
                 }
-            },
-        ))
+            }),
+        )
         .map_err(|e| McpError::Connect(format!("spawn {cmd}: {e}")))?;
 
-        let client = ()
-            .serve(transport)
-            .await
-            .map_err(|e| McpError::Connect(e.to_string()))?;
+        let client = ().serve(transport).await.map_err(|e| McpError::Connect(e.to_string()))?;
 
         Ok(Arc::new(Self {
             peer: client.peer().clone(),
@@ -116,7 +110,8 @@ impl McpSession {
             .label
             .clone()
             .unwrap_or_else(|| "mcp_http".to_string());
-        let mut transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.clone());
+        let mut transport_config =
+            StreamableHttpClientTransportConfig::with_uri(config.url.clone());
         if let Some(token) = config.auth_header {
             transport_config = transport_config.auth_header(token);
         }
@@ -126,17 +121,15 @@ impl McpSession {
             for (name, value) in config.custom_headers {
                 let name = HeaderName::from_bytes(name.as_bytes())
                     .map_err(|e| McpError::Connect(format!("invalid header name {name}: {e}")))?;
-                let value = HeaderValue::from_str(&value)
-                    .map_err(|e| McpError::Connect(format!("invalid header value for {name}: {e}")))?;
+                let value = HeaderValue::from_str(&value).map_err(|e| {
+                    McpError::Connect(format!("invalid header value for {name}: {e}"))
+                })?;
                 headers.insert(name, value);
             }
             transport_config = transport_config.custom_headers(headers);
         }
         let transport = StreamableHttpClientTransport::from_config(transport_config);
-        let client = ()
-            .serve(transport)
-            .await
-            .map_err(|e| McpError::Connect(e.to_string()))?;
+        let client = ().serve(transport).await.map_err(|e| McpError::Connect(e.to_string()))?;
 
         Ok(Arc::new(Self {
             peer: client.peer().clone(),
@@ -221,10 +214,7 @@ impl McpSession {
         let args_obj: Option<JsonObject> = match arguments {
             Value::Object(map) => Some(map),
             Value::Null => None,
-            other => Some(Map::from_iter([(
-                "value".to_string(),
-                other,
-            )])),
+            other => Some(Map::from_iter([("value".to_string(), other)])),
         };
         let params = match args_obj {
             Some(args) => CallToolRequestParams::new(mcp_name.to_string()).with_arguments(args),
@@ -240,11 +230,7 @@ pub fn prefixed_tool_name(prefix: &str, tool_name: &str) -> String {
 }
 
 fn default_label(command: &str) -> String {
-    command
-        .rsplit('/')
-        .next()
-        .unwrap_or(command)
-        .to_string()
+    command.rsplit('/').next().unwrap_or(command).to_string()
 }
 
 fn mcp_tool_to_spec(tool: &McpToolDef, registered_name: &str) -> ToolSpec {
@@ -301,7 +287,9 @@ impl Tool for McpTool {
             .session
             .call_mcp_tool(&self.mcp_name, arguments)
             .await
-            .map_err(|e| ToolInvokeError::handler(e.to_string(), Some(self.registered_name.clone())))?;
+            .map_err(|e| {
+                ToolInvokeError::handler(e.to_string(), Some(self.registered_name.clone()))
+            })?;
         call_tool_result_to_value(result).map_err(|e| {
             ToolInvokeError::handler(e.to_string(), Some(self.registered_name.clone()))
         })
@@ -327,9 +315,8 @@ mod tests {
             custom_headers: HashMap::new(),
         };
         assert_eq!(config.auth_header.as_deref(), Some("access-token"));
-        let transport_config =
-            StreamableHttpClientTransportConfig::with_uri(config.url.clone())
-                .auth_header(config.auth_header.unwrap());
+        let transport_config = StreamableHttpClientTransportConfig::with_uri(config.url.clone())
+            .auth_header(config.auth_header.unwrap());
         assert_eq!(
             transport_config.auth_header.as_deref(),
             Some("access-token")

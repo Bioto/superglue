@@ -14,7 +14,11 @@ pub struct GatewayConfig {
 
 impl GatewayConfig {
     #[must_use]
-    pub fn new(listen_addr: impl Into<String>, db_path: PathBuf, master_key: impl Into<String>) -> Self {
+    pub fn new(
+        listen_addr: impl Into<String>,
+        db_path: PathBuf,
+        master_key: impl Into<String>,
+    ) -> Self {
         Self {
             listen_addr: listen_addr.into(),
             db_path,

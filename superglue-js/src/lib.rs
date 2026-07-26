@@ -2,30 +2,31 @@
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use napi::Status;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use napi::Status;
 use napi_derive::napi;
 
 type StdResult<T, E> = std::result::Result<T, E>;
 use secrecy::SecretString;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use superglue::agents::{AgentEngine as SgAgentEngine, AgentSpec};
 use superglue::batch::{BatchConfig, BatchRequest, ErrorStrategy, batch_complete};
 use superglue::chat::{
     ChatOptions, CompletionOutcome, StreamOutcome, complete_with_tools, stream_complete,
     stream_complete_with_tools,
 };
-use superglue::fallback::ModelFallbackChain;
-use superglue::responses::{
-    complete_with_tools as complete_response_with_tools, stream_response as stream_response_api,
+use superglue::client::{
+    BindingBootstrapConfig, ClientBuildError, bootstrap_from_parts, provider_id_from_str,
 };
-use superglue::mcp::{McpHttpConfig, McpSession, McpStdioConfig};
+use superglue::events::{ProcessEvent, StatusEmitter as SgStatusEmitter, StatusSubscriber};
+use superglue::fallback::ModelFallbackChain;
+use superglue::files::{self, FilePurpose};
 use superglue::guardrails::{
     BlocklistAction, BlocklistGuardrail, GuardrailConfig, GuardrailHandler, GuardrailOutcome,
     GuardrailRegistry, GuardrailStage, LengthStrategy, MaxLengthGuardrail, PiiRedactGuardrail,
@@ -33,14 +34,13 @@ use superglue::guardrails::{
 use superglue::hooks::{
     HookConfig, HookContext, HookError, HookErrorStrategy, HookHandler, HookRegistry, HookStage,
 };
-use superglue::client::{
-    bootstrap_from_parts, provider_id_from_str, BindingBootstrapConfig, ClientBuildError,
-};
-use superglue::files::{self, FilePurpose};
 use superglue::http::{ClientConfig, HttpClient, RetryPolicy};
-use superglue::providers::ProviderId;
-use superglue::events::{ProcessEvent, StatusEmitter as SgStatusEmitter, StatusSubscriber};
+use superglue::mcp::{McpHttpConfig, McpSession, McpStdioConfig};
 use superglue::openai::ChatMessage;
+use superglue::providers::ProviderId;
+use superglue::responses::{
+    complete_with_tools as complete_response_with_tools, stream_response as stream_response_api,
+};
 use superglue::tools::{Tool, ToolInvokeError, ToolRegistry, ToolSpec};
 
 // ---------------------------------------------------------------------------
@@ -53,12 +53,10 @@ use superglue::tools::{Tool, ToolInvokeError, ToolRegistry, ToolSpec};
 ///
 /// `Weak = true`: threadsafe functions do not keep the Node event loop running after the script
 /// finishes (same issue as std `ThreadsafeFunction` default otherwise — tools/hooks would require Ctrl+C).
-type JsonCallback =
-    ThreadsafeFunction<Value, Promise<Value>, Value, Status, true, true, 0>;
+type JsonCallback = ThreadsafeFunction<Value, Promise<Value>, Value, Status, true, true, 0>;
 
 /// Process event callback: receives a JSON event object.
-type StatusCallback =
-    ThreadsafeFunction<Value, (), Value, Status, true, true, 0>;
+type StatusCallback = ThreadsafeFunction<Value, (), Value, Status, true, true, 0>;
 
 fn process_event_to_value(event: &ProcessEvent) -> Value {
     let usage = if let Some(u) = &event.usage {
@@ -92,7 +90,8 @@ struct JsStatusSubscriber {
 impl StatusSubscriber for JsStatusSubscriber {
     async fn on_event(&self, event: ProcessEvent) {
         let v = process_event_to_value(&event);
-        self.callback.call(Ok(v), ThreadsafeFunctionCallMode::NonBlocking);
+        self.callback
+            .call(Ok(v), ThreadsafeFunctionCallMode::NonBlocking);
     }
 }
 
@@ -139,7 +138,6 @@ fn finalize_call_options(
 /// JS guardrail callbacks `(stageStr, content)` → allow string or structured result.
 type GuardrailCallback =
     ThreadsafeFunction<(String, String), Value, (String, String), Status, true, true, 0>;
-
 
 struct JsDictTool {
     spec: ToolSpec,
@@ -201,7 +199,9 @@ impl HookHandler for JsHook {
         } else if let Some(s) = result.as_str() {
             Some(s.to_string())
         } else if let Some(obj) = result.as_object() {
-            obj.get("content").and_then(|v| v.as_str()).map(String::from)
+            obj.get("content")
+                .and_then(|v| v.as_str())
+                .map(String::from)
         } else {
             None
         };
@@ -231,13 +231,8 @@ impl GuardrailHandler for JsGuardrail {
     async fn check(&self, stage: GuardrailStage, content: &str) -> GuardrailOutcome {
         let applies = matches!(
             (&self.stage_filter, &stage),
-            (
-                JsGuardrailStageFilter::Input,
-                GuardrailStage::Input
-            ) | (
-                JsGuardrailStageFilter::Output,
-                GuardrailStage::Output
-            )
+            (JsGuardrailStageFilter::Input, GuardrailStage::Input)
+                | (JsGuardrailStageFilter::Output, GuardrailStage::Output)
         );
         if !applies {
             return GuardrailOutcome::Allow(content.to_string());
@@ -289,9 +284,8 @@ fn completion_outcome_to_js(outcome: CompletionOutcome) -> Result<CompletionOutc
             "total_tokens": u.total_tokens,
         })
     });
-    let messages = serde_json::to_value(&outcome.messages).map_err(|e| {
-        Error::from_reason(e.to_string())
-    })?;
+    let messages =
+        serde_json::to_value(&outcome.messages).map_err(|e| Error::from_reason(e.to_string()))?;
     Ok(CompletionOutcomeJs {
         content: outcome.content,
         rounds: outcome.rounds,
@@ -619,9 +613,7 @@ impl Client {
             status_emitter: status_emitter_arc,
             model_fallback,
             provider_credentials: provider_creds,
-            provider_qps: provider_qps_from_map(
-                &requests_per_second_for.unwrap_or_default(),
-            ),
+            provider_qps: provider_qps_from_map(&requests_per_second_for.unwrap_or_default()),
             max_upload_bytes: max_upload_bytes
                 .map(|b| b as usize)
                 .unwrap_or_else(files::default_max_upload_bytes),
@@ -912,7 +904,11 @@ impl Client {
     }
 
     #[napi]
-    pub async fn add_pii_guardrail(&self, stage: Option<String>, name: Option<String>) -> Result<()> {
+    pub async fn add_pii_guardrail(
+        &self,
+        stage: Option<String>,
+        name: Option<String>,
+    ) -> Result<()> {
         let stage_s = stage.as_deref().unwrap_or("both");
         let stages: Vec<GuardrailStage> = match stage_s {
             "input" => vec![GuardrailStage::Input],
@@ -998,22 +994,12 @@ impl Client {
         let registry = Arc::clone(&self.inner.registry);
         let hooks = Arc::clone(&self.inner.hooks);
         let guardrails = Arc::clone(&self.inner.guardrails);
-        let options = finalize_call_options(
-            &self.inner.options,
-            request_id,
-            reasoning_effort,
-        );
+        let options = finalize_call_options(&self.inner.options, request_id, reasoning_effort);
 
-        let outcome = complete_with_tools(
-            &http,
-            &registry,
-            &hooks,
-            &guardrails,
-            messages,
-            &options,
-        )
-        .await
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        let outcome =
+            complete_with_tools(&http, &registry, &hooks, &guardrails, messages, &options)
+                .await
+                .map_err(|e| Error::from_reason(e.to_string()))?;
         completion_outcome_to_js(outcome)
     }
 
@@ -1051,11 +1037,7 @@ impl Client {
         let registry = Arc::clone(&self.inner.registry);
         let hooks = Arc::clone(&self.inner.hooks);
         let guardrails = Arc::clone(&self.inner.guardrails);
-        let options = finalize_call_options(
-            &self.inner.options,
-            request_id,
-            reasoning_effort,
-        );
+        let options = finalize_call_options(&self.inner.options, request_id, reasoning_effort);
 
         let outcome = complete_with_tools(
             &http,
@@ -1082,11 +1064,7 @@ impl Client {
     ) -> Result<StreamOutcomeJs> {
         let messages = vec![ChatMessage::text("user", user_message)];
         let http = effective_http(&self.inner.http, timeout_secs, connect_timeout_secs)?;
-        let options = finalize_call_options(
-            &self.inner.options,
-            request_id,
-            reasoning_effort,
-        );
+        let options = finalize_call_options(&self.inner.options, request_id, reasoning_effort);
         let hooks = Arc::clone(&self.inner.hooks);
         let guardrails = Arc::clone(&self.inner.guardrails);
         let registry = Arc::clone(&self.inner.registry);
@@ -1122,15 +1100,7 @@ impl Client {
                 request_id: o.request_id,
             })
         } else {
-            stream_complete(
-                &http,
-                &hooks,
-                &guardrails,
-                messages,
-                &options,
-                on_delta,
-            )
-            .await
+            stream_complete(&http, &hooks, &guardrails, messages, &options, on_delta).await
         };
 
         let _ = consumer.await;
@@ -1152,11 +1122,7 @@ impl Client {
         let registry = Arc::clone(&self.inner.registry);
         let hooks = Arc::clone(&self.inner.hooks);
         let guardrails = Arc::clone(&self.inner.guardrails);
-        let options = finalize_call_options(
-            &self.inner.options,
-            request_id,
-            reasoning_effort,
-        );
+        let options = finalize_call_options(&self.inner.options, request_id, reasoning_effort);
         let outcome = complete_response_with_tools(
             &http,
             &registry,
@@ -1211,15 +1177,8 @@ impl Client {
             let _ = tx.send(delta);
         };
 
-        let stream_result = stream_response_api(
-            &http,
-            &hooks,
-            &guardrails,
-            user_message,
-            &options,
-            on_delta,
-        )
-        .await;
+        let stream_result =
+            stream_response_api(&http, &hooks, &guardrails, user_message, &options, on_delta).await;
 
         let _ = consumer.await;
         let outcome = stream_result.map_err(|e| Error::from_reason(e.to_string()))?;
@@ -1295,7 +1254,8 @@ impl Client {
         let strategy = ErrorStrategy::from_str(error_strategy.as_deref().unwrap_or("continue"))
             .ok_or_else(|| {
                 Error::from_reason(
-                    "invalid error_strategy; expected 'continue', 'skip', or 'fail_fast'".to_string(),
+                    "invalid error_strategy; expected 'continue', 'skip', or 'fail_fast'"
+                        .to_string(),
                 )
             })?;
 
@@ -1396,21 +1356,30 @@ impl Conversation {
 
     #[napi]
     pub fn push_user(&self, text: String) -> Result<()> {
-        let mut g = self.turns.lock().map_err(|e| Error::from_reason(e.to_string()))?;
+        let mut g = self
+            .turns
+            .lock()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
         g.push(ChatMessage::text("user", text));
         Ok(())
     }
 
     #[napi]
     pub fn push_assistant_text(&self, text: String) -> Result<()> {
-        let mut g = self.turns.lock().map_err(|e| Error::from_reason(e.to_string()))?;
+        let mut g = self
+            .turns
+            .lock()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
         g.push(ChatMessage::text("assistant", text));
         Ok(())
     }
 
     #[napi(getter)]
     pub fn messages(&self) -> Result<Value> {
-        let g = self.turns.lock().map_err(|e| Error::from_reason(e.to_string()))?;
+        let g = self
+            .turns
+            .lock()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
         serde_json::to_value(&*g).map_err(|e| Error::from_reason(e.to_string()))
     }
 
@@ -1431,22 +1400,11 @@ impl Conversation {
         let registry = Arc::clone(&self.state.registry);
         let hooks = Arc::clone(&self.state.hooks);
         let guardrails = Arc::clone(&self.state.guardrails);
-        let options = finalize_call_options(
-            &self.state.options,
-            request_id,
-            reasoning_effort,
-        );
+        let options = finalize_call_options(&self.state.options, request_id, reasoning_effort);
 
-        let outcome = complete_with_tools(
-            &http,
-            &registry,
-            &hooks,
-            &guardrails,
-            msgs,
-            &options,
-        )
-        .await
-        .map_err(|e| Error::from_reason(e.to_string()))?;
+        let outcome = complete_with_tools(&http, &registry, &hooks, &guardrails, msgs, &options)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?;
 
         {
             let mut g = self
@@ -1503,8 +1461,7 @@ impl JsAgentEngine {
             timeout: Duration::from_secs(timeout_secs.unwrap_or(60).max(0) as u64),
             connect_timeout: Duration::from_secs(connect_timeout_secs.unwrap_or(30).max(0) as u64),
             pool_max_idle_per_host: pool_max_idle_per_host.unwrap_or(50) as usize,
-            pool_idle_timeout: pool_idle_timeout_secs
-                .map(|s| Duration::from_secs(s.max(0) as u64)),
+            pool_idle_timeout: pool_idle_timeout_secs.map(|s| Duration::from_secs(s.max(0) as u64)),
             ..ClientConfig::default()
         };
         let http = HttpClient::new(cfg).map_err(|e| Error::from_reason(e.to_string()))?;
@@ -1520,8 +1477,7 @@ impl JsAgentEngine {
         );
 
         let status_emitter_arc = status_emitter.map(|e| Arc::clone(&e.inner));
-        let effective_reasoning =
-            reasoning_effort.or_else(|| spec.inner.reasoning_effort.clone());
+        let effective_reasoning = reasoning_effort.or_else(|| spec.inner.reasoning_effort.clone());
         let mut base_options = ChatOptions::new(
             base_url.as_deref().unwrap_or("https://api.openai.com"),
             api_key,
@@ -1556,7 +1512,10 @@ impl JsAgentEngine {
             static_tool: static_tool.unwrap_or(false),
         };
         let tool = Arc::new(JsDictTool { spec, callback }) as Arc<dyn Tool>;
-        self.registry.register(tool).await.map_err(tool_error_to_napi)
+        self.registry
+            .register(tool)
+            .await
+            .map_err(tool_error_to_napi)
     }
 
     #[napi]
@@ -1567,9 +1526,8 @@ impl JsAgentEngine {
         name: Option<String>,
         error_strategy: Option<String>,
     ) -> Result<()> {
-        let hook_stage = HookStage::from_str(&stage).ok_or_else(|| {
-            Error::from_reason(format!("invalid stage {stage:?}"))
-        })?;
+        let hook_stage = HookStage::from_str(&stage)
+            .ok_or_else(|| Error::from_reason(format!("invalid stage {stage:?}")))?;
         let strategy = HookErrorStrategy::from_str(error_strategy.as_deref().unwrap_or("skip"))
             .ok_or_else(|| Error::from_reason("invalid error_strategy".to_string()))?;
         let js_hook = JsHook {
@@ -1681,9 +1639,7 @@ impl JsAgentEngine {
         let engine = SgAgentEngine::new(spec)
             .with_hooks(hooks)
             .with_guardrails(guardrails);
-        let stream_result = engine
-            .stream(&http, user_message, &opts, on_delta)
-            .await;
+        let stream_result = engine.stream(&http, user_message, &opts, on_delta).await;
         let _ = consumer.await;
 
         let outcome = stream_result.map_err(|e| Error::from_reason(e.to_string()))?;

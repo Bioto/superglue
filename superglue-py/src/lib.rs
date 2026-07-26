@@ -42,8 +42,8 @@ use pyo3::types::PyDict;
 use serde_json::Value;
 use tokio::runtime::Runtime;
 
-use std::num::NonZeroU32;
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use superglue::agents::{AgentEngine, AgentSpec};
@@ -52,12 +52,12 @@ use superglue::chat::{
     ChatOptions, CompletionOutcome, StreamOutcome, complete_with_tools, stream_complete,
     stream_complete_with_tools,
 };
-use superglue::fallback::ModelFallbackChain;
-use superglue::responses::{
-    ResponseOutcome, ResponseStreamOutcome, complete_with_tools as complete_response_with_tools,
-    stream_response as stream_response_api,
+use superglue::client::{
+    BindingBootstrapConfig, ClientBuildError, bootstrap_from_parts, provider_id_from_str,
 };
-use superglue::mcp::{McpHttpConfig, McpSession, McpStdioConfig};
+use superglue::events::{ProcessEvent, ProcessEventKind, StatusEmitter, StatusSubscriber};
+use superglue::fallback::ModelFallbackChain;
+use superglue::files::{self, FilePurpose};
 use superglue::guardrails::{
     BlocklistAction, BlocklistGuardrail, GuardrailConfig, GuardrailError, GuardrailHandler,
     GuardrailOutcome, GuardrailRegistry, GuardrailStage, LengthStrategy, MaxLengthGuardrail,
@@ -66,16 +66,14 @@ use superglue::guardrails::{
 use superglue::hooks::{
     HookConfig, HookContext, HookError, HookErrorStrategy, HookHandler, HookRegistry, HookStage,
 };
-use superglue::client::{
-    bootstrap_from_parts, provider_id_from_str, BindingBootstrapConfig, ClientBuildError,
-};
-use superglue::files::{self, FilePurpose};
 use superglue::http::{ClientConfig, HttpClient, RetryPolicy};
+use superglue::mcp::{McpHttpConfig, McpSession, McpStdioConfig};
 use superglue::openai::ChatMessage;
-use superglue::telemetry::{TelemetryConfig, init_tracing};
-use superglue::events::{
-    ProcessEvent, ProcessEventKind, StatusEmitter, StatusSubscriber,
+use superglue::responses::{
+    ResponseOutcome, ResponseStreamOutcome, complete_with_tools as complete_response_with_tools,
+    stream_response as stream_response_api,
 };
+use superglue::telemetry::{TelemetryConfig, init_tracing};
 use superglue::tools::{Tool, ToolInvokeError, ToolRegistry, ToolSpec};
 
 mod json_bridge;
@@ -108,9 +106,8 @@ impl Tool for PythonDictTool {
         let cb = Arc::clone(&self.callback);
         tokio::task::spawn_blocking(move || {
             Python::attach(|py| {
-                let args_py = json_bridge::json_to_py(py, &arguments).map_err(|e| {
-                    ToolInvokeError::handler(format!("args to python: {e}"), None)
-                })?;
+                let args_py = json_bridge::json_to_py(py, &arguments)
+                    .map_err(|e| ToolInvokeError::handler(format!("args to python: {e}"), None))?;
                 let result = cb
                     .call1(py, (args_py,))
                     .map_err(|e| ToolInvokeError::handler(format!("python call: {e}"), None))?;
@@ -482,7 +479,10 @@ struct PyResponseStreamOutcome {
     model_used: String,
 }
 
-fn response_stream_outcome_to_py(py: Python<'_>, o: ResponseStreamOutcome) -> PyResponseStreamOutcome {
+fn response_stream_outcome_to_py(
+    py: Python<'_>,
+    o: ResponseStreamOutcome,
+) -> PyResponseStreamOutcome {
     let usage_py = o.usage.as_ref().map(|u| usage_to_py(py, u));
     PyResponseStreamOutcome {
         id: o.id,
@@ -583,8 +583,7 @@ impl PyStatusEmitter {
             callback: Arc::new(callback.clone_ref(py)),
         });
         let inner = Arc::clone(&self.inner);
-        runtime()
-            .block_on(inner.subscribe(subscriber as Arc<dyn StatusSubscriber>));
+        runtime().block_on(inner.subscribe(subscriber as Arc<dyn StatusSubscriber>));
         Ok(())
     }
 }
@@ -609,7 +608,9 @@ fn provider_credentials_from_api_keys(
     creds
 }
 
-fn provider_qps_from_map(map: &HashMap<String, u32>) -> HashMap<superglue::providers::ProviderId, u32> {
+fn provider_qps_from_map(
+    map: &HashMap<String, u32>,
+) -> HashMap<superglue::providers::ProviderId, u32> {
     let mut out = HashMap::new();
     for (name, qps) in map {
         if let Some(pid) = provider_id_from_str(name) {
@@ -624,7 +625,9 @@ fn file_purpose_from_str(s: &str) -> PyResult<FilePurpose> {
         "assistants" => Ok(FilePurpose::Assistants),
         "user_data" => Ok(FilePurpose::UserData),
         "batch" => Ok(FilePurpose::Batch),
-        other => Err(PyValueError::new_err(format!("unknown file purpose: {other}"))),
+        other => Err(PyValueError::new_err(format!(
+            "unknown file purpose: {other}"
+        ))),
     }
 }
 
@@ -773,9 +776,9 @@ impl PyClient {
             let m = py_str_dict(&d)?;
             let mut out: HashMap<String, u32> = HashMap::new();
             for (k, v) in m {
-                let n: u32 = v.parse().map_err(|_| {
-                    PyValueError::new_err(format!("invalid qps for {k}: {v}"))
-                })?;
+                let n: u32 = v
+                    .parse()
+                    .map_err(|_| PyValueError::new_err(format!("invalid qps for {k}: {v}")))?;
                 out.insert(k, n);
             }
             out
@@ -860,9 +863,7 @@ impl PyClient {
         let provider_id = provider
             .as_deref()
             .and_then(provider_id_from_str)
-            .or_else(|| {
-                Some(superglue::providers::parse_model_ref(&self.options.model).provider)
-            })
+            .or_else(|| Some(superglue::providers::parse_model_ref(&self.options.model).provider))
             .expect("model provider");
         let creds = superglue::chat::credentials_for(&self.options);
         let uploaded = runtime()
@@ -1376,12 +1377,7 @@ impl PyClient {
         let registry = Arc::clone(&self.registry);
         let hooks = Arc::clone(&self.hooks);
         let guardrails = Arc::clone(&self.guardrails);
-        let options = finalize_call_options(
-            &self.options,
-            &self.status_emitter,
-            request_id,
-            None,
-        );
+        let options = finalize_call_options(&self.options, &self.status_emitter, request_id, None);
 
         #[cfg(not(Py_GIL_DISABLED))]
         let outcome = {
@@ -1611,9 +1607,15 @@ impl PyClient {
                 let on_delta = move |delta: String| {
                     let _ = tx.send(delta);
                 };
-                let stream_result =
-                    stream_response_api(&http, &hooks, &guardrails, user_message, &options, on_delta)
-                        .await;
+                let stream_result = stream_response_api(
+                    &http,
+                    &hooks,
+                    &guardrails,
+                    user_message,
+                    &options,
+                    on_delta,
+                )
+                .await;
                 let _ = consumer.await;
                 stream_result
             }
@@ -2412,12 +2414,8 @@ impl PyAgentEngine {
             .with_hooks(hooks)
             .with_guardrails(guardrails);
 
-        let opts = finalize_call_options(
-            &self.base_options,
-            &self.status_emitter,
-            request_id,
-            None,
-        );
+        let opts =
+            finalize_call_options(&self.base_options, &self.status_emitter, request_id, None);
 
         #[cfg(not(Py_GIL_DISABLED))]
         let outcome = {

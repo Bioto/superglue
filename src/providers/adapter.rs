@@ -57,7 +57,8 @@ pub trait LlmProvider: Send + Sync {
 
     fn build_chat_request(&self, ctx: &ProviderRequestContext<'_>) -> ProviderRequest;
 
-    fn parse_chat_response(&self, json: &Value) -> Result<NormalizedCompletion, ProviderParseError>;
+    fn parse_chat_response(&self, json: &Value)
+    -> Result<NormalizedCompletion, ProviderParseError>;
 
     fn supports_file_upload(&self) -> bool {
         false
@@ -85,7 +86,9 @@ pub fn rate_limit_key_for(
 
 pub fn resolve_provider(model_ref: &ModelRef) -> Box<dyn LlmProvider> {
     if model_ref.provider.uses_openai_compat() {
-        Box::new(super::openai_compat::OpenAiCompatProvider::new(model_ref.provider))
+        Box::new(super::openai_compat::OpenAiCompatProvider::new(
+            model_ref.provider,
+        ))
     } else {
         Box::new(super::anthropic::AnthropicProvider::new())
     }

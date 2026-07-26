@@ -8,8 +8,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 use superglue::chat::CompletionOutcome;
-use superglue::{Client, ClientBuildError};
 use superglue::tools::{Tool, ToolInvokeError, ToolSpec};
+use superglue::{Client, ClientBuildError};
 
 pub const DEFAULT_MODEL: &str = "gpt-5.4-nano";
 
@@ -93,8 +93,7 @@ where
     }
 
     async fn call(&self, arguments: Value) -> Result<Value, ToolInvokeError> {
-        (self.callback)(arguments).map_err(|message| {
-            ToolInvokeError::handler(message, Some(self.spec.name.clone()))
-        })
+        (self.callback)(arguments)
+            .map_err(|message| ToolInvokeError::handler(message, Some(self.spec.name.clone())))
     }
 }

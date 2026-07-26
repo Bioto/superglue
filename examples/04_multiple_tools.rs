@@ -3,8 +3,8 @@
 mod support;
 
 use serde_json::json;
-use support::{FnTool, usage_line};
 use superglue::tools::ToolSpec;
+use support::{FnTool, usage_line};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

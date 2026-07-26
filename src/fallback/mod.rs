@@ -6,7 +6,7 @@ use reqwest::StatusCode;
 use serde_json::Value;
 
 use crate::chat::ChatError;
-use crate::events::{emit_safe, ProcessEvent, ProcessEventKind, StatusEmitter};
+use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
 use crate::http::Error as HttpError;
 use crate::http::RetryPolicy;
 
@@ -113,8 +113,10 @@ pub async fn emit_model_fallback(
         let mut ev = ProcessEvent::new(ProcessEventKind::LlmCallError, request_id, to);
         ev.round = round;
         ev.error_type = Some("model_fallback".to_string());
-        ev.metadata.insert("fallback_from".to_string(), from.to_string());
-        ev.metadata.insert("fallback_to".to_string(), to.to_string());
+        ev.metadata
+            .insert("fallback_from".to_string(), from.to_string());
+        ev.metadata
+            .insert("fallback_to".to_string(), to.to_string());
         emit_safe(Some(emitter), ev).await;
     }
 }

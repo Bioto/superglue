@@ -1,9 +1,9 @@
 //! Direct `serde_json::Value` ↔ Python object conversion (no `json.loads`/`dumps`).
 
+use pyo3::IntoPyObject;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyList};
-use pyo3::IntoPyObject;
 use serde_json::{Map, Number, Value};
 
 pub(crate) fn json_to_py<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyAny>> {
@@ -62,11 +62,9 @@ pub(crate) fn py_to_json(py: Python<'_>, obj: Bound<'_, PyAny>) -> PyResult<Valu
         return Ok(Value::Number(u.into()));
     }
     if let Ok(f) = obj.extract::<f64>() {
-        return Ok(
-            Number::from_f64(f)
-                .map(Value::Number)
-                .unwrap_or(Value::Null),
-        );
+        return Ok(Number::from_f64(f)
+            .map(Value::Number)
+            .unwrap_or(Value::Null));
     }
     if let Ok(s) = obj.extract::<String>() {
         return Ok(Value::String(s));

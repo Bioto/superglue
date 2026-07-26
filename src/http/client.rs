@@ -427,7 +427,9 @@ fn warn_http_retry(kind: &'static str, url: &str, attempt: u32, delay_ms: u64, e
 
 fn retry_delay_ms(policy: &RetryPolicy, attempt: u32, err: &Error) -> u64 {
     let base = policy.delay_ms_for_attempt(attempt);
-    let from_server = err.retry_after_hint().map(|d| d.as_millis().min(600_000) as u64);
+    let from_server = err
+        .retry_after_hint()
+        .map(|d| d.as_millis().min(600_000) as u64);
     let mut ms = from_server.unwrap_or(base).max(base);
     ms = ms.saturating_add(((attempt as u64).wrapping_mul(31)) % 50);
     ms

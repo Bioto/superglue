@@ -2,16 +2,16 @@
 
 use secrecy::ExposeSecret;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::http::join_base_url;
 use crate::openai::{
-    ChatMessage, ContentPart, FileContent, MessageContent, FunctionCall, ToolCall,
+    ChatMessage, ContentPart, FileContent, FunctionCall, MessageContent, ToolCall,
 };
 
 use super::adapter::{
-    LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest,
-    ProviderRequestContext, rate_limit_key_for,
+    LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest, ProviderRequestContext,
+    rate_limit_key_for,
 };
 use super::provider_id::ProviderId;
 
@@ -49,10 +49,7 @@ impl LlmProvider for AnthropicProvider {
         ];
 
         let (system, messages) = map_messages(ctx.messages);
-        let max_tokens = ctx
-            .options
-            .max_completion_tokens
-            .unwrap_or(4096);
+        let max_tokens = ctx.options.max_completion_tokens.unwrap_or(4096);
 
         let mut body = json!({
             "model": ctx.model_ref.model,
@@ -104,7 +101,10 @@ impl LlmProvider for AnthropicProvider {
         }
     }
 
-    fn parse_chat_response(&self, json: &Value) -> Result<NormalizedCompletion, ProviderParseError> {
+    fn parse_chat_response(
+        &self,
+        json: &Value,
+    ) -> Result<NormalizedCompletion, ProviderParseError> {
         let resp: AnthropicMessageResponse = serde_json::from_value(json.clone())?;
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -163,7 +163,9 @@ struct AnthropicMessageResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -222,11 +224,7 @@ fn map_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
                 }
             }
             "tool" => {
-                let content = msg
-                    .content
-                    .as_ref()
-                    .and_then(|c| c.as_text())
-                    .unwrap_or("");
+                let content = msg.content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
                 out.push(json!({
                     "role": "user",
                     "content": [{
@@ -353,6 +351,8 @@ mod tests {
     #[test]
     fn older_sonnet_keeps_sampling_params() {
         assert!(anthropic_supports_sampling_params("claude-sonnet-4-6"));
-        assert!(anthropic_supports_sampling_params("claude-3-5-sonnet-20241022"));
+        assert!(anthropic_supports_sampling_params(
+            "claude-3-5-sonnet-20241022"
+        ));
     }
 }

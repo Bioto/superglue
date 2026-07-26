@@ -10,10 +10,10 @@ mod provider_id;
 mod rate_limit;
 
 pub use adapter::{
-    LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest,
-    ProviderRequestContext, StreamRoundOutcome, resolve_provider, rate_limit_key_for,
+    LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest, ProviderRequestContext,
+    StreamRoundOutcome, rate_limit_key_for, resolve_provider,
 };
-pub use credentials::{api_key_id, ApiKeyId, CredentialsError, ProviderCredentials};
-pub use model_ref::{parse_model_ref, ModelRef};
+pub use credentials::{ApiKeyId, CredentialsError, ProviderCredentials, api_key_id};
+pub use model_ref::{ModelRef, parse_model_ref};
 pub use provider_id::{ProviderId, UnknownProvider};
 pub use rate_limit::{RateLimitKey, RateLimitRegistry};

@@ -124,12 +124,13 @@ async fn custom_policy_fallback_on_401() {
         .mount(&server)
         .await;
 
-    let chain = ModelFallbackChain::new(vec!["primary".into(), "backup".into()])
-        .with_policy(FallbackPolicy {
+    let chain = ModelFallbackChain::new(vec!["primary".into(), "backup".into()]).with_policy(
+        FallbackPolicy {
             retryable_statuses: vec![401, 429, 500, 502, 503, 504],
             on_transport_error: true,
             on_auth_errors: true,
-        });
+        },
+    );
     let options = ChatOptions {
         base_url: server.uri(),
         api_key: secrecy::SecretString::from("sk-test".to_string()),

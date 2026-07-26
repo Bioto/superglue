@@ -4,25 +4,22 @@
 mod context_fixtures;
 
 use context_fixtures::{
-    chat_options_for_run, run_multiturn_wiremock, run_scenario, BENCH_CONFIGS, ConversationProfile,
-    MultiTurnMetrics,
+    BENCH_CONFIGS, ConversationProfile, MultiTurnMetrics, chat_options_for_run,
+    run_multiturn_wiremock, run_scenario,
 };
 
-async fn metrics_for(label: &str, profile: ConversationProfile) -> context_fixtures::ScenarioMetrics {
-    let cfg = BENCH_CONFIGS
-        .iter()
-        .find(|c| c.label == label)
-        .unwrap();
+async fn metrics_for(
+    label: &str,
+    profile: ConversationProfile,
+) -> context_fixtures::ScenarioMetrics {
+    let cfg = BENCH_CONFIGS.iter().find(|c| c.label == label).unwrap();
     let opts = chat_options_for_run(cfg, profile);
     let (_outcome, metrics) = run_scenario(opts, profile).await.unwrap();
     metrics
 }
 
 async fn multiturn_metrics_for(label: &str) -> MultiTurnMetrics {
-    let cfg = BENCH_CONFIGS
-        .iter()
-        .find(|c| c.label == label)
-        .unwrap();
+    let cfg = BENCH_CONFIGS.iter().find(|c| c.label == label).unwrap();
     run_multiturn_wiremock(cfg).await.unwrap()
 }
 

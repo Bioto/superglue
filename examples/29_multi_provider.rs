@@ -5,8 +5,8 @@ use superglue::providers::ProviderId;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let base = std::env::var("OPENAI_BASE_URL")
-        .unwrap_or_else(|_| "https://api.openai.com".to_string());
+    let base =
+        std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com".to_string());
 
     let openai_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
     if openai_key.is_empty() {

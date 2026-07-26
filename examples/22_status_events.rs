@@ -5,8 +5,8 @@ mod support;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use support::{model, require_api_key};
 use superglue::events::{ProcessEvent, StatusEmitter, StatusSubscriber};
+use support::{model, require_api_key};
 
 struct PrintSubscriber;
 

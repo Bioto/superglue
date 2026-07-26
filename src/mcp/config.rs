@@ -94,10 +94,7 @@ pub fn default_mcp_servers() -> McpServersFile {
             url: DEFAULT_CONTEXT7_MCP_URL.into(),
             auth: McpAuthKind::None,
             bearer_env_var: None,
-            headers: HashMap::from([(
-                "CONTEXT7_API_KEY".into(),
-                "$CONTEXT7_API_KEY".into(),
-            )]),
+            headers: HashMap::from([("CONTEXT7_API_KEY".into(), "$CONTEXT7_API_KEY".into())]),
             tools: McpToolPolicy::default(),
         }],
     }
@@ -197,14 +194,19 @@ pub fn format_config_status(config_path: &Path, status_path: &Path) -> String {
     let mut lines = vec![format!("config: {}", config_path.display())];
 
     for server in &config.servers {
-        let state = if server.enabled { "enabled" } else { "disabled" };
+        let state = if server.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
         lines.push(format!("  {} ({state}): {}", server.id, server.url));
         if let Some(entry) = status.servers.get(&server.id) {
             if let Some(ok) = entry.last_connect_ok {
-                let msg = entry
-                    .last_connect_message
-                    .as_deref()
-                    .unwrap_or(if ok { "ok" } else { "failed" });
+                let msg = entry.last_connect_message.as_deref().unwrap_or(if ok {
+                    "ok"
+                } else {
+                    "failed"
+                });
                 lines.push(format!(
                     "    last connect: {} ({msg})",
                     if ok { "ok" } else { "failed" }

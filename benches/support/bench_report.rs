@@ -1,6 +1,6 @@
 //! Shared benchmark table formatting for wiremock and live runs.
 
-use super::bench_configs::{self, BenchConfig, ConfigKind, BENCH_CONFIGS};
+use super::bench_configs::{self, BENCH_CONFIGS, BenchConfig, ConfigKind};
 use super::conversation_profiles::ConversationProfile;
 
 /// One row in a benchmark comparison table.
@@ -20,7 +20,10 @@ pub struct BenchmarkRow {
 }
 
 fn config_for_label(row_label: &str) -> Option<&'static BenchConfig> {
-    let cfg_label = row_label.split_once('_').map(|(_, rest)| rest).unwrap_or(row_label);
+    let cfg_label = row_label
+        .split_once('_')
+        .map(|(_, rest)| rest)
+        .unwrap_or(row_label);
     // Profile names contain underscores (short_chain, long_chain).
     for cfg in BENCH_CONFIGS {
         if row_label.ends_with(&format!("_{}", cfg.label)) {
@@ -97,7 +100,8 @@ pub fn print_benchmark_table(rows: &[BenchmarkRow], baseline_standard_total: u32
             .map(BenchConfig::kind)
             .unwrap_or(ConfigKind::Standard);
 
-        let vs_standard = bench_configs::token_savings_label(kind, baseline_standard_total, row.cum_total_tokens);
+        let vs_standard =
+            bench_configs::token_savings_label(kind, baseline_standard_total, row.cum_total_tokens);
 
         let expected_tools = profile_for_label(&row.label)
             .map(ConversationProfile::expected_tools)

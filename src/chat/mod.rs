@@ -1,10 +1,13 @@
 //! Chat completions: non-streaming tool-loop and streaming (SSE) variants.
 
+mod context_ops;
 mod conversation;
+mod loop_guard;
 pub mod reasoning;
 pub(crate) mod stream_tools;
-mod context_ops;
 mod tool_summary;
+
+pub(crate) use loop_guard::{SharedToolLoopGuard, new_tool_loop_guard};
 
 pub(crate) use context_ops::{condense_tool_round, maybe_summarize_messages};
 
@@ -12,21 +15,23 @@ use std::sync::Arc;
 
 pub use conversation::Conversation;
 
-use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
+use secrecy::ExposeSecret;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::pin::Pin;
-use secrecy::ExposeSecret;
-use serde_json::{json, Value};
 use thiserror::Error;
 use tokio::time::{Duration, sleep};
 use tracing::instrument;
 
 use std::time::Instant;
 
+use self::context_ops::{resolve_tool_route, user_context_for_route};
 use crate::cancel::CancellationToken;
+use crate::context::SummarizeContextConfig;
 use crate::costing::estimate_model_call_cost_usd;
-use crate::events::{emit_safe, ProcessEvent, ProcessEventKind, StatusEmitter};
+use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
 use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookContext, HookError, HookRegistry, HookStage};
 use crate::http::{Error as HttpError, HttpClient, sse::SseParser};
@@ -34,12 +39,10 @@ use crate::openai::{
     ChatCompletionChunk, ChatMessage, MessageContent, ResponseFormat, StopSequence, ToolCall,
     ToolChoice,
 };
-use self::context_ops::{resolve_tool_route, user_context_for_route};
-use crate::context::SummarizeContextConfig;
 use crate::proto;
 use crate::tools::{
-    ActiveToolSet, OnToolError, ToolInvokeError, ToolMode, ToolRegistry, ToolRetryPolicy,
-    DEFAULT_TOOL_ROUTE_MODEL, is_router_call, router_query_from_calls,
+    ActiveToolSet, DEFAULT_TOOL_ROUTE_MODEL, OnToolError, ToolInvokeError, ToolMode, ToolRegistry,
+    ToolRetryPolicy, is_router_call, router_query_from_calls,
 };
 
 /// Provider and model settings for [`complete_with_tools`].
@@ -350,10 +353,7 @@ pub fn credentials_for(options: &ChatOptions) -> crate::providers::ProviderCrede
         return creds.as_ref().clone();
     }
     let mut creds = crate::providers::ProviderCredentials::new();
-    creds.with_legacy_openai_key(
-        options.api_key.expose_secret(),
-        Some(&options.base_url),
-    );
+    creds.with_legacy_openai_key(options.api_key.expose_secret(), Some(&options.base_url));
     creds
 }
 
@@ -391,8 +391,7 @@ pub(crate) async fn provider_chat_post(
     round: u32,
     stream: bool,
 ) -> Result<(Value, crate::providers::ModelRef), ChatError> {
-    let models =
-        crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
+    let models = crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
     let default_policy = crate::fallback::FallbackPolicy::default();
     let policy = options
         .model_fallback
@@ -457,9 +456,9 @@ pub(crate) async fn provider_chat_post(
             }
         }
     }
-    Err(last_err.unwrap_or(ChatError::Http(
-        HttpError::InvalidJson("model fallback exhausted".into()),
-    )))
+    Err(last_err.unwrap_or(ChatError::Http(HttpError::InvalidJson(
+        "model fallback exhausted".into(),
+    ))))
 }
 
 /// Open a streaming POST via provider adapter with per-model HTTP retries and optional fallback.
@@ -479,8 +478,7 @@ pub(crate) async fn provider_chat_stream(
     ),
     ChatError,
 > {
-    let models =
-        crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
+    let models = crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
     let default_policy = crate::fallback::FallbackPolicy::default();
     let policy = options
         .model_fallback
@@ -549,9 +547,9 @@ pub(crate) async fn provider_chat_stream(
             }
         }
     }
-    Err(last_err.unwrap_or(ChatError::Http(
-        HttpError::InvalidJson("model fallback exhausted".into()),
-    )))
+    Err(last_err.unwrap_or(ChatError::Http(HttpError::InvalidJson(
+        "model fallback exhausted".into(),
+    ))))
 }
 
 /// Gateway-facing wrapper around [`provider_chat_post`].
@@ -618,8 +616,7 @@ pub(crate) async fn post_json_with_model_fallback(
     round: u32,
     rate_limit_key: Option<crate::providers::RateLimitKey>,
 ) -> Result<(Value, String), ChatError> {
-    let models =
-        crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
+    let models = crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
     let default_policy = crate::fallback::FallbackPolicy::default();
     let policy = options
         .model_fallback
@@ -664,9 +661,9 @@ pub(crate) async fn post_json_with_model_fallback(
             }
         }
     }
-    Err(last_err.unwrap_or(ChatError::Http(
-        HttpError::InvalidJson("model fallback exhausted".into()),
-    )))
+    Err(last_err.unwrap_or(ChatError::Http(HttpError::InvalidJson(
+        "model fallback exhausted".into(),
+    ))))
 }
 
 pub(crate) fn observation_hook_ctx(
@@ -784,10 +781,7 @@ pub(crate) fn truncate_tool_result(content: String, max_chars: usize) -> String 
     if max_chars == 0 || content.len() <= max_chars {
         return content;
     }
-    format!(
-        "{}…\n[truncated]",
-        truncate_bytes(&content, max_chars)
-    )
+    format!("{}…\n[truncated]", truncate_bytes(&content, max_chars))
 }
 
 /// Dispatch a single `"function"` tool call through the full pre/post hook pipeline.
@@ -809,6 +803,7 @@ pub(crate) async fn dispatch_one(
     model: &str,
     emit_start: bool,
     tool_result_max_chars: usize,
+    loop_guard: Option<&SharedToolLoopGuard>,
 ) -> Result<ChatMessage, ChatError> {
     let tool_name = tc.function.name.clone();
     if emit_start && let Some(emitter) = status_emitter {
@@ -874,27 +869,38 @@ pub(crate) async fn dispatch_one(
             .resolve_invocation(&tc.function.name)
             .await
             .map_err(ChatError::Tool)?;
-        let result = invoke_with_policy(&tool, &tc.function.name, args, &policy).await?;
+
+        if let Some(guard) = loop_guard {
+            let mut g = guard.lock().await;
+            if let Some(cached) = g.check_cached(&tc.function.name, &args) {
+                return Ok(cached);
+            }
+        }
+
+        let result = invoke_with_policy(&tool, &tc.function.name, args.clone(), &policy).await?;
         let result_json = serde_json::to_string(&result)?;
+
+        if let Some(guard) = loop_guard {
+            guard
+                .lock()
+                .await
+                .record(&tc.function.name, &args, &result_json);
+        }
+
+        let mut post_ctx = HookContext::with_meta(
+            HookStage::PostTool,
+            &result_json,
+            "tool_name",
+            tc.function.name.as_str(),
+        );
+        post_ctx.metadata.insert(
+            "context_policy".into(),
+            json!(tool.context_policy().as_str()),
+        );
         let post_ctx = if hooks.is_empty_for(&HookStage::PostTool).await {
-            HookContext::with_meta(
-                HookStage::PostTool,
-                &result_json,
-                "tool_name",
-                tc.function.name.as_str(),
-            )
+            post_ctx
         } else {
-            hooks
-                .run(
-                    HookStage::PostTool,
-                    HookContext::with_meta(
-                        HookStage::PostTool,
-                        &result_json,
-                        "tool_name",
-                        tc.function.name.as_str(),
-                    ),
-                )
-                .await?
+            hooks.run(HookStage::PostTool, post_ctx).await?
         };
         Ok(post_ctx.content)
     }
@@ -903,7 +909,8 @@ pub(crate) async fn dispatch_one(
     if let Some(emitter) = status_emitter {
         let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallEnd, request_id, model);
         ev.round = round;
-        ev.metadata.insert("tool_name".to_string(), tool_name.clone());
+        ev.metadata
+            .insert("tool_name".to_string(), tool_name.clone());
         ev.metadata.insert(
             "arguments".to_string(),
             truncate_tool_event_metadata(tc.function.arguments.trim()),
@@ -911,13 +918,10 @@ pub(crate) async fn dispatch_one(
         match &exec_result {
             Ok(content) => {
                 if let Some(summary) = tool_summary::tool_result_summary(&tool_name, content) {
-                    ev.metadata
-                        .insert("result_summary".to_string(), summary);
+                    ev.metadata.insert("result_summary".to_string(), summary);
                 }
-                ev.metadata.insert(
-                    "result".to_string(),
-                    truncate_tool_event_metadata(content),
-                );
+                ev.metadata
+                    .insert("result".to_string(), truncate_tool_event_metadata(content));
             }
             Err(err) => {
                 ev.error_type = Some(err.to_string());
@@ -1018,6 +1022,7 @@ pub async fn complete_with_tools(
     let mut model_used;
     // One automatic re-request when a provider returns a blank round (Groq flake).
     let mut empty_round_retries: u32 = 0;
+    let loop_guard = new_tool_loop_guard();
 
     let all_specs = registry.list_specs().await;
     let mut active_set = ActiveToolSet::new(all_specs, options.tool_mode);
@@ -1072,18 +1077,12 @@ pub async fn complete_with_tools(
         )
         .await?;
 
-        emit_safe(
-            options.status_emitter.as_ref(),
-            {
-                let mut ev = ProcessEvent::new(
-                    ProcessEventKind::LlmCallStart,
-                    &request_id,
-                    &options.model,
-                );
-                ev.round = api_calls;
-                ev
-            },
-        )
+        emit_safe(options.status_emitter.as_ref(), {
+            let mut ev =
+                ProcessEvent::new(ProcessEventKind::LlmCallStart, &request_id, &options.model);
+            ev.round = api_calls;
+            ev
+        })
         .await;
 
         let tool_specs = active_set.specs_for_llm();
@@ -1104,11 +1103,8 @@ pub async fn complete_with_tools(
         {
             Ok(pair) => pair,
             Err(e) => {
-                let mut ev = ProcessEvent::new(
-                    ProcessEventKind::LlmCallError,
-                    &request_id,
-                    &options.model,
-                );
+                let mut ev =
+                    ProcessEvent::new(ProcessEventKind::LlmCallError, &request_id, &options.model);
                 ev.round = api_calls;
                 ev.error_type = Some(http_error_type(&e));
                 emit_safe(options.status_emitter.as_ref(), ev).await;
@@ -1117,22 +1113,17 @@ pub async fn complete_with_tools(
         };
         model_used = model_ref.raw.clone();
         let provider = crate::providers::resolve_provider(&model_ref);
-        let normalized = provider
-            .parse_chat_response(&val)
-            .map_err(|e| {
-                if e.to_string().contains("no choices") {
-                    ChatError::NoChoice
-                } else {
-                    ChatError::Http(HttpError::InvalidJson(e.to_string()))
-                }
-            })?;
+        let normalized = provider.parse_chat_response(&val).map_err(|e| {
+            if e.to_string().contains("no choices") {
+                ChatError::NoChoice
+            } else {
+                ChatError::Http(HttpError::InvalidJson(e.to_string()))
+            }
+        })?;
 
         let msg = ChatMessage {
             role: "assistant".to_string(),
-            content: normalized
-                .content
-                .clone()
-                .map(MessageContent::Text),
+            content: normalized.content.clone().map(MessageContent::Text),
             tool_calls: if normalized.tool_calls.is_empty() {
                 None
             } else {
@@ -1153,21 +1144,14 @@ pub async fn complete_with_tools(
             .as_ref()
             .map(|u| estimate_model_call_cost_usd(&model_used, u));
 
-        emit_safe(
-            options.status_emitter.as_ref(),
-            {
-                let mut ev = ProcessEvent::new(
-                    ProcessEventKind::LlmCallEnd,
-                    &request_id,
-                    &model_used,
-                );
-                ev.round = api_calls;
-                ev.tool_call_count = tool_call_count;
-                ev.usage = usage_proto.clone();
-                ev.estimated_cost_usd = estimated_cost;
-                ev
-            },
-        )
+        emit_safe(options.status_emitter.as_ref(), {
+            let mut ev = ProcessEvent::new(ProcessEventKind::LlmCallEnd, &request_id, &model_used);
+            ev.round = api_calls;
+            ev.tool_call_count = tool_call_count;
+            ev.usage = usage_proto.clone();
+            ev.estimated_cost_usd = estimated_cost;
+            ev
+        })
         .await;
 
         // --- PostCompletion hook (observation only) ---
@@ -1214,24 +1198,15 @@ pub async fn complete_with_tools(
                     .filter(|s| !s.static_tool && s.name != crate::tools::ROUTER_TOOL_NAME)
                     .map(|s| s.name.clone())
                     .collect();
-                emit_safe(
-                    options.status_emitter.as_ref(),
-                    {
-                        let mut ev = ProcessEvent::new(
-                            ProcessEventKind::ToolRoute,
-                            &request_id,
-                            route_model,
-                        );
-                        ev.round = api_calls;
-                        ev.metadata
-                            .insert("route_query".to_string(), query.clone());
-                        ev.metadata.insert(
-                            "matched_tools".to_string(),
-                            matched_names.join(","),
-                        );
-                        ev
-                    },
-                )
+                emit_safe(options.status_emitter.as_ref(), {
+                    let mut ev =
+                        ProcessEvent::new(ProcessEventKind::ToolRoute, &request_id, route_model);
+                    ev.round = api_calls;
+                    ev.metadata.insert("route_query".to_string(), query.clone());
+                    ev.metadata
+                        .insert("matched_tools".to_string(), matched_names.join(","));
+                    ev
+                })
                 .await;
                 continue;
             }
@@ -1244,21 +1219,20 @@ pub async fn complete_with_tools(
                 request_id = %request_id,
                 "tool_calls_batch"
             );
-            let results = futures_util::future::join_all(
-                function_tcs.iter().map(|tc| {
-                    dispatch_one(
-                        tc,
-                        hooks,
-                        registry,
-                        options.status_emitter.as_ref(),
-                        &request_id,
-                        api_calls,
-                        &options.model,
-                        true,
-                        options.tool_result_max_chars,
-                    )
-                }),
-            )
+            let results = futures_util::future::join_all(function_tcs.iter().map(|tc| {
+                dispatch_one(
+                    tc,
+                    hooks,
+                    registry,
+                    options.status_emitter.as_ref(),
+                    &request_id,
+                    api_calls,
+                    &options.model,
+                    true,
+                    options.tool_result_max_chars,
+                    Some(&loop_guard),
+                )
+            }))
             .await;
             for r in results {
                 messages.push(r?); // first Err propagates, respects FailFast / Retry / Skip
@@ -1381,9 +1355,7 @@ pub async fn complete_with_tools(
                         let provider = crate::providers::resolve_provider(&model_ref);
                         let normalized = provider
                             .parse_chat_response(&val)
-                            .map_err(|e| {
-                                ChatError::Http(HttpError::InvalidJson(e.to_string()))
-                            })?;
+                            .map_err(|e| ChatError::Http(HttpError::InvalidJson(e.to_string())))?;
                         let retry_text = normalized.content.clone().unwrap_or_default();
                         let (out2, gn2) = guardrails.run_output(&retry_text).await;
                         match out2 {
@@ -1744,12 +1716,14 @@ fn push_early_stream_tool<'a>(
     round: u32,
     model: &'a str,
     tool_result_max_chars: usize,
+    loop_guard: &'a SharedToolLoopGuard,
 ) {
     if dispatched_ids.contains_key(&tc.id) {
         return;
     }
     dispatched_ids.insert(tc.id.clone(), ());
     let tool_id = tc.id.clone();
+    let loop_guard = Arc::clone(loop_guard);
     in_flight.push(Box::pin(async move {
         let msg = dispatch_one(
             &tc,
@@ -1761,6 +1735,7 @@ fn push_early_stream_tool<'a>(
             model,
             true,
             tool_result_max_chars,
+            Some(&loop_guard),
         )
         .await?;
         Ok((tool_id, msg))
@@ -1849,6 +1824,7 @@ where
     let mut model_used;
     // One automatic re-request when a provider returns a blank round (Groq flake).
     let mut empty_round_retries: u32 = 0;
+    let loop_guard = new_tool_loop_guard();
 
     let all_specs = registry.list_specs().await;
     let mut active_set = ActiveToolSet::new(all_specs, options.tool_mode);
@@ -1896,18 +1872,12 @@ where
         )
         .await?;
 
-        emit_safe(
-            options.status_emitter.as_ref(),
-            {
-                let mut ev = ProcessEvent::new(
-                    ProcessEventKind::LlmCallStart,
-                    &request_id,
-                    &options.model,
-                );
-                ev.round = api_calls;
-                ev
-            },
-        )
+        emit_safe(options.status_emitter.as_ref(), {
+            let mut ev =
+                ProcessEvent::new(ProcessEventKind::LlmCallStart, &request_id, &options.model);
+            ev.round = api_calls;
+            ev
+        })
         .await;
 
         let tool_specs = active_set.specs_for_llm();
@@ -2021,6 +1991,7 @@ where
                                     api_calls,
                                     &options.model,
                                     options.tool_result_max_chars,
+                                    &loop_guard,
                                 );
                             }
                         }
@@ -2042,6 +2013,7 @@ where
                     api_calls,
                     &options.model,
                     options.tool_result_max_chars,
+                    &loop_guard,
                 );
             }
             while let Some(result) = in_flight.next().await {
@@ -2067,24 +2039,17 @@ where
             .iter()
             .filter(|tc| tc.kind == "function")
             .count() as u32;
-        emit_safe(
-            options.status_emitter.as_ref(),
-            {
-                let mut ev = ProcessEvent::new(
-                    ProcessEventKind::LlmCallEnd,
-                    &request_id,
-                    &model_used,
-                );
-                ev.round = api_calls;
-                ev.tool_call_count = tool_call_count;
-                ev.usage = round.usage.clone();
-                ev.estimated_cost_usd = round
-                    .usage
-                    .as_ref()
-                    .map(|u| estimate_model_call_cost_usd(&model_used, u));
-                ev
-            },
-        )
+        emit_safe(options.status_emitter.as_ref(), {
+            let mut ev = ProcessEvent::new(ProcessEventKind::LlmCallEnd, &request_id, &model_used);
+            ev.round = api_calls;
+            ev.tool_call_count = tool_call_count;
+            ev.usage = round.usage.clone();
+            ev.estimated_cost_usd = round
+                .usage
+                .as_ref()
+                .map(|u| estimate_model_call_cost_usd(&model_used, u));
+            ev
+        })
         .await;
 
         hooks
@@ -2143,8 +2108,8 @@ where
 
         if !round.tool_calls.is_empty() {
             if active_set.has_router() && is_router_call(&round.tool_calls) {
-                let query = router_query_from_calls(&round.tool_calls)
-                    .unwrap_or_else(|| last_user.clone());
+                let query =
+                    router_query_from_calls(&round.tool_calls).unwrap_or_else(|| last_user.clone());
                 let user_context = user_context_for_route(&messages, &query);
                 let matched = resolve_tool_route(
                     http,
@@ -2164,24 +2129,15 @@ where
                     .filter(|s| !s.static_tool && s.name != crate::tools::ROUTER_TOOL_NAME)
                     .map(|s| s.name.clone())
                     .collect();
-                emit_safe(
-                    options.status_emitter.as_ref(),
-                    {
-                        let mut ev = ProcessEvent::new(
-                            ProcessEventKind::ToolRoute,
-                            &request_id,
-                            route_model,
-                        );
-                        ev.round = api_calls;
-                        ev.metadata
-                            .insert("route_query".to_string(), query.clone());
-                        ev.metadata.insert(
-                            "matched_tools".to_string(),
-                            matched_names.join(","),
-                        );
-                        ev
-                    },
-                )
+                emit_safe(options.status_emitter.as_ref(), {
+                    let mut ev =
+                        ProcessEvent::new(ProcessEventKind::ToolRoute, &request_id, route_model);
+                    ev.round = api_calls;
+                    ev.metadata.insert("route_query".to_string(), query.clone());
+                    ev.metadata
+                        .insert("matched_tools".to_string(), matched_names.join(","));
+                    ev
+                })
                 .await;
                 continue;
             }
@@ -2234,21 +2190,20 @@ where
                     }
                 }
             } else {
-                let results = futures_util::future::join_all(
-                    function_tcs.iter().map(|tc| {
-                        dispatch_one(
-                            tc,
-                            hooks,
-                            registry,
-                            options.status_emitter.as_ref(),
-                            &request_id,
-                            api_calls,
-                            &options.model,
-                            true,
-                            options.tool_result_max_chars,
-                        )
-                    }),
-                )
+                let results = futures_util::future::join_all(function_tcs.iter().map(|tc| {
+                    dispatch_one(
+                        tc,
+                        hooks,
+                        registry,
+                        options.status_emitter.as_ref(),
+                        &request_id,
+                        api_calls,
+                        &options.model,
+                        true,
+                        options.tool_result_max_chars,
+                        Some(&loop_guard),
+                    )
+                }))
                 .await;
                 for r in results {
                     messages.push(r?);

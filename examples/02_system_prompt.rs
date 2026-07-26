@@ -14,7 +14,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let outcome = client
-        .complete("What is the capital of France?", superglue::CallOptions::default())
+        .complete(
+            "What is the capital of France?",
+            superglue::CallOptions::default(),
+        )
         .await?;
     println!("content: {:?}", outcome.content);
     Ok(())

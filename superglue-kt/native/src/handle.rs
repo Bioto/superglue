@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use superglue::agents::AgentSpec;
+use superglue::chat::ChatOptions;
 use superglue::events::StatusEmitter;
+use superglue::guardrails::GuardrailRegistry;
+use superglue::hooks::HookRegistry;
 use superglue::http::HttpClient;
 use superglue::openai::ChatMessage;
 use superglue::tools::ToolRegistry;
-use superglue::guardrails::GuardrailRegistry;
-use superglue::hooks::HookRegistry;
-use superglue::chat::ChatOptions;
 use tokio::sync::watch;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);

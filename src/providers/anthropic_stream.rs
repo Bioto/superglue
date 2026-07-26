@@ -33,15 +33,13 @@ impl AnthropicStreamAccumulator {
             return Ok(None);
         }
         let v: Value = serde_json::from_str(data)?;
-        let event_type = v
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or_default();
+        let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or_default();
         match event_type {
             "message_start" => {
                 if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                     let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                    let output = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                    let output =
+                        u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                     self.usage = Some(proto::Usage {
                         prompt_tokens: input,
                         completion_tokens: output,
@@ -52,11 +50,7 @@ impl AnthropicStreamAccumulator {
             "content_block_start" => {
                 let index = v.get("index").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                 let block = v.get("content_block");
-                if block
-                    .and_then(|b| b.get("type"))
-                    .and_then(|t| t.as_str())
-                    == Some("tool_use")
-                {
+                if block.and_then(|b| b.get("type")).and_then(|t| t.as_str()) == Some("tool_use") {
                     let entry = self.tool_blocks.entry(index).or_default();
                     entry.id = block
                         .and_then(|b| b.get("id"))
@@ -102,7 +96,8 @@ impl AnthropicStreamAccumulator {
                 }
                 if let Some(u) = v.get("usage") {
                     let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                    let output = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                    let output =
+                        u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                     self.usage = Some(proto::Usage {
                         prompt_tokens: input,
                         completion_tokens: output,

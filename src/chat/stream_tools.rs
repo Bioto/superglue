@@ -4,9 +4,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::openai::{
-    ChatCompletionChunk, FunctionCall, StreamToolCallDelta, ToolCall,
-};
+use crate::openai::{ChatCompletionChunk, FunctionCall, StreamToolCallDelta, ToolCall};
 
 /// Accumulates OpenAI-compat `tool_calls` deltas by stable `index`.
 #[derive(Debug, Default)]
@@ -249,17 +247,15 @@ mod tests {
     #[test]
     fn streaming_dispatch_emits_complete_json_before_round_end() {
         let mut dispatch = StreamingToolDispatch::new();
-        let ready = dispatch.push_deltas(&[
-            StreamToolCallDelta {
-                index: 0,
-                id: Some("call_1".into()),
-                kind: Some("function".into()),
-                function: Some(StreamFunctionDelta {
-                    name: Some("echo".into()),
-                    arguments: Some("{\"x\":1}".into()),
-                }),
-            },
-        ]);
+        let ready = dispatch.push_deltas(&[StreamToolCallDelta {
+            index: 0,
+            id: Some("call_1".into()),
+            kind: Some("function".into()),
+            function: Some(StreamFunctionDelta {
+                name: Some("echo".into()),
+                arguments: Some("{\"x\":1}".into()),
+            }),
+        }]);
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].function.name, "echo");
         assert!(dispatch.drain_at_round_end().is_empty());

@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
 use axum::Json;
+use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 
+use crate::gateway::GatewayState;
 use crate::gateway::auth::Auth;
 use crate::gateway::error::{GatewayError, GatewayResult};
 use crate::gateway::routes::json_ok;
-use crate::gateway::GatewayState;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateKeyBody {
@@ -109,12 +109,9 @@ pub async fn update_key(
     Json(body): Json<UpdateKeyBody>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
     let expires = body.expires_at.as_ref().map(|v| Some(v.as_str()));
-    let key = state.db.update_api_key(
-        &id,
-        body.active,
-        body.allowed_models.as_deref(),
-        expires,
-    )?;
+    let key = state
+        .db
+        .update_api_key(&id, body.active, body.allowed_models.as_deref(), expires)?;
     Ok(json_ok(key))
 }
 
@@ -167,7 +164,9 @@ pub async fn create_budget(
     Auth(_auth): Auth,
     Json(body): Json<CreateBudgetBody>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let budget = state.db.create_budget(body.max_budget, body.duration_sec, body.enforce)?;
+    let budget = state
+        .db
+        .create_budget(body.max_budget, body.duration_sec, body.enforce)?;
     Ok(json_ok(budget))
 }
 

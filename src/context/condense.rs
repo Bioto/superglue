@@ -4,6 +4,18 @@ use crate::openai::{ChatMessage, MessageContent, ToolCall};
 
 use super::aaak::{AaakCompressor, CONDENSE_ANTI_LOOP_SUFFIX};
 
+/// Cap argument previews in condensed summaries so large patch bodies cannot bloat context.
+const CONDENSE_ARGS_MAX_CHARS: usize = 240;
+
+fn truncate_args_preview(args: &str) -> String {
+    let trimmed = args.trim();
+    if trimmed.chars().count() <= CONDENSE_ARGS_MAX_CHARS {
+        return trimmed.to_string();
+    }
+    let preview: String = trimmed.chars().take(CONDENSE_ARGS_MAX_CHARS).collect();
+    format!("{preview}…")
+}
+
 /// Replace the last pure tool-call round with a single condensed user message.
 ///
 /// Only condenses when the assistant message has tool calls and no visible text content.
@@ -52,9 +64,15 @@ pub fn condense_tool_round(messages: &mut Vec<ChatMessage>, aaak_tool_condensing
         return;
     }
 
-    let mut id_to_name = std::collections::HashMap::new();
+    // Keep name + arguments so the model still knows *what* it already called
+    // after we drain the assistant message (which owns `tool_calls`).
+    let mut id_to_call: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
     for tc in &tool_calls {
-        id_to_name.insert(tc.id.clone(), tc.function.name.clone());
+        id_to_call.insert(
+            tc.id.clone(),
+            (tc.function.name.clone(), tc.function.arguments.clone()),
+        );
     }
 
     let condensed_content = if aaak_tool_condensing {
@@ -67,19 +85,27 @@ pub fn condense_tool_round(messages: &mut Vec<ChatMessage>, aaak_tool_condensing
             .iter()
             .map(|&i| messages[i].clone())
             .collect();
+        let id_to_name: std::collections::HashMap<String, String> = id_to_call
+            .iter()
+            .map(|(id, (name, _))| (id.clone(), name.clone()))
+            .collect();
         AaakCompressor::encode_tool_round(&tool_calls, &tool_messages, &id_to_name)
     } else {
         let mut lines = vec!["[Tool Results]".to_string()];
         for &ti in &tool_response_indices {
             let tool_msg = &messages[ti];
             let tc_id = tool_msg.tool_call_id.as_deref().unwrap_or("");
-            let name = id_to_name.get(tc_id).map(String::as_str).unwrap_or(tc_id);
+            let (name, args) = id_to_call
+                .get(tc_id)
+                .map(|(n, a)| (n.as_str(), a.as_str()))
+                .unwrap_or((tc_id, ""));
+            let args_preview = truncate_args_preview(args);
             let result = tool_msg
                 .content
                 .as_ref()
                 .and_then(|c| c.as_text())
                 .unwrap_or("");
-            lines.push(format!("- {name} -> {result}"));
+            lines.push(format!("- {name}({args_preview}) -> {result}"));
         }
         lines.join("\n")
     };
@@ -136,20 +162,107 @@ mod tests {
         condense_tool_round(&mut messages, false);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, "user");
-        assert!(messages[0]
-            .content
-            .as_ref()
-            .and_then(|c| c.as_text())
-            .unwrap()
-            .contains("[Tool Results]"));
+        assert!(
+            messages[0]
+                .content
+                .as_ref()
+                .and_then(|c| c.as_text())
+                .unwrap()
+                .contains("[Tool Results]")
+        );
         let text = messages[0]
             .content
             .as_ref()
             .and_then(|c| c.as_text())
             .unwrap();
+        assert!(text.contains("echo({\"x\":1})"));
         assert!(text.contains("do not re-invoke these same tool calls"));
         assert!(text.contains("you may call new tools"));
         assert!(!text.contains("do not call tools"));
+    }
+
+    #[test]
+    fn condense_preserves_tool_call_arguments() {
+        let mut messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "g1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "grep".into(),
+                        arguments: r#"{"pattern":"condense_tool_round","path":"src/context"}"#
+                            .into(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+                refusal: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: Some(MessageContent::Text(r#"{"match_count":0}"#.into())),
+                tool_calls: None,
+                tool_call_id: Some("g1".into()),
+                name: Some("grep".into()),
+                refusal: None,
+            },
+        ];
+        condense_tool_round(&mut messages, false);
+        let text = messages[0]
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text())
+            .unwrap();
+        assert!(text.contains("grep("));
+        assert!(text.contains("condense_tool_round"));
+        assert!(text.contains("src/context"));
+        assert!(text.contains(r#"{"match_count":0}"#));
+    }
+
+    #[test]
+    fn condense_truncates_long_arguments() {
+        let long_args = format!(r#"{{"patch":"{}"}}"#, "x".repeat(CONDENSE_ARGS_MAX_CHARS + 80));
+        let mut messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "p1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "patch".into(),
+                        arguments: long_args,
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+                refusal: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: Some(MessageContent::Text(r#"{"ok":true}"#.into())),
+                tool_calls: None,
+                tool_call_id: Some("p1".into()),
+                name: Some("patch".into()),
+                refusal: None,
+            },
+        ];
+        condense_tool_round(&mut messages, false);
+        let text = messages[0]
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text())
+            .unwrap();
+        assert!(text.contains("patch("));
+        assert!(text.contains('…'));
+        let args_span = text
+            .split("patch(")
+            .nth(1)
+            .and_then(|rest| rest.split(") ->").next())
+            .unwrap_or("");
+        assert!(args_span.chars().count() <= CONDENSE_ARGS_MAX_CHARS + 1);
     }
 
     #[test]

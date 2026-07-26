@@ -12,7 +12,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let defaults = ClientConfig::default();
     println!("ClientConfig defaults:");
     println!("  connect_timeout = {:?}", defaults.connect_timeout);
-    println!("  pool_max_idle_per_host = {}", defaults.pool_max_idle_per_host);
+    println!(
+        "  pool_max_idle_per_host = {}",
+        defaults.pool_max_idle_per_host
+    );
     println!("  timeout = {:?}", defaults.timeout);
     println!();
 
@@ -32,7 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let outcome = client
-        .complete("Say 'pool ok' in two words.", superglue::CallOptions::default())
+        .complete(
+            "Say 'pool ok' in two words.",
+            superglue::CallOptions::default(),
+        )
         .await?;
 
     println!("Chat completion: {}", outcome.content.unwrap_or_default());

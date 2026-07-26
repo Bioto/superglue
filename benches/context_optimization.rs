@@ -2,9 +2,9 @@ mod support;
 
 use std::hint::black_box;
 
-use criterion::{black_box as cblack_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use superglue::context::condense_tool_round;
+use criterion::{BenchmarkId, Criterion, black_box as cblack_box, criterion_group, criterion_main};
 use superglue::context::AaakCompressor;
+use superglue::context::condense_tool_round;
 use superglue::openai::{ChatMessage, FunctionCall, MessageContent, ToolCall};
 
 fn multi_tool_round_messages() -> Vec<ChatMessage> {

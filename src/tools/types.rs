@@ -5,6 +5,39 @@ use serde_json::Value;
 
 use crate::proto;
 
+/// Whether a tool's output may be replaced by a notepad offload stub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToolContextPolicy {
+    /// Output is the state the model asked for — never offload.
+    Inline,
+    /// Bulk payload; offload when over the configured size threshold. (default)
+    #[default]
+    OffloadWhenLarge,
+    /// Always offload when extractable content exists.
+    AlwaysOffload,
+}
+
+impl ToolContextPolicy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inline => "inline",
+            Self::OffloadWhenLarge => "offload_when_large",
+            Self::AlwaysOffload => "always_offload",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "inline" => Some(Self::Inline),
+            "offload_when_large" => Some(Self::OffloadWhenLarge),
+            "always_offload" => Some(Self::AlwaysOffload),
+            _ => None,
+        }
+    }
+}
+
 /// Registered tool metadata: name plus opaque JSON Schema for parameters.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolSpec {

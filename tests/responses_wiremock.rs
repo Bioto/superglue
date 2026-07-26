@@ -8,10 +8,10 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use superglue::chat::ChatOptions;
 use superglue::guardrails::GuardrailRegistry;
 use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
-use superglue::chat::ChatOptions;
 use superglue::responses::{complete_with_tools, stream_response};
 use superglue::tools::{Tool, ToolRegistry, ToolSpec};
 
@@ -74,7 +74,7 @@ impl Tool for EchoTool {
             name: "echo".to_string(),
             description: None,
             parameters_schema: json!({"type": "object"}),
-                    static_tool: false,
+            static_tool: false,
         }
     }
 
@@ -121,8 +121,7 @@ async fn responses_tool_round_threads_previous_response_id() {
         .and(path("/v1/responses"))
         .respond_with(move |req: &wiremock::Request| {
             let i = n2.fetch_add(1, Ordering::SeqCst);
-            let body = serde_json::from_slice::<serde_json::Value>(&req.body)
-                .unwrap_or(json!({}));
+            let body = serde_json::from_slice::<serde_json::Value>(&req.body).unwrap_or(json!({}));
             if i == 0 {
                 assert!(body.get("previous_response_id").is_none());
                 ResponseTemplate::new(200).set_body_json(tool_call_response())
@@ -161,38 +160,32 @@ async fn responses_tool_round_threads_previous_response_id() {
 async fn responses_stream_text_deltas() {
     let server = MockServer::start().await;
     let mut body = String::new();
-    body.push_str(
-        &format!(
-            "data: {}\n\n",
-            json!({
-                "type": "response.created",
-                "response": { "id": "resp_stream" }
-            })
-        ),
-    );
+    body.push_str(&format!(
+        "data: {}\n\n",
+        json!({
+            "type": "response.created",
+            "response": { "id": "resp_stream" }
+        })
+    ));
     for token in ["Hi", " there"] {
-        body.push_str(
-            &format!(
-                "data: {}\n\n",
-                json!({
-                    "type": "response.output_text.delta",
-                    "delta": token
-                })
-            ),
-        );
-    }
-    body.push_str(
-        &format!(
+        body.push_str(&format!(
             "data: {}\n\n",
             json!({
-                "type": "response.completed",
-                "response": {
-                    "id": "resp_stream",
-                    "usage": { "input_tokens": 1, "output_tokens": 2, "total_tokens": 3 }
-                }
+                "type": "response.output_text.delta",
+                "delta": token
             })
-        ),
-    );
+        ));
+    }
+    body.push_str(&format!(
+        "data: {}\n\n",
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_stream",
+                "usage": { "input_tokens": 1, "output_tokens": 2, "total_tokens": 3 }
+            }
+        })
+    ));
 
     Mock::given(method("POST"))
         .and(path("/v1/responses"))

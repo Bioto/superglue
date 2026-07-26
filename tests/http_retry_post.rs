@@ -357,7 +357,12 @@ async fn post_sends_custom_headers() {
 
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let result = http
-        .post_json_with_headers(&server.uri(), &json!({}), &[("X-Custom-Key", "secret")], None)
+        .post_json_with_headers(
+            &server.uri(),
+            &json!({}),
+            &[("X-Custom-Key", "secret")],
+            None,
+        )
         .await;
     assert!(result.is_ok(), "custom header not forwarded: {result:?}");
 }

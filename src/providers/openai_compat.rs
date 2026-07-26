@@ -8,8 +8,8 @@ use crate::http::join_base_url;
 use crate::openai::{ChatCompletionRequest, ChatTool, StreamOptions};
 
 use super::adapter::{
-    LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest,
-    ProviderRequestContext, rate_limit_key_for,
+    LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest, ProviderRequestContext,
+    rate_limit_key_for,
 };
 use super::provider_id::ProviderId;
 
@@ -43,23 +43,17 @@ impl LlmProvider for OpenAiCompatProvider {
             ("Content-Type".to_string(), "application/json".to_string()),
         ];
 
-        let tools = ctx
-            .chat_tools
-            .map(|t| t.to_vec())
-            .or_else(|| {
-                ctx.tools.map(|specs| {
-                    specs
-                        .iter()
-                        .map(|s| ChatTool::from(s.clone()))
-                        .collect::<Vec<ChatTool>>()
-                })
-            });
+        let tools = ctx.chat_tools.map(|t| t.to_vec()).or_else(|| {
+            ctx.tools.map(|specs| {
+                specs
+                    .iter()
+                    .map(|s| ChatTool::from(s.clone()))
+                    .collect::<Vec<ChatTool>>()
+            })
+        });
 
-        let mut req = ChatCompletionRequest::new(
-            ctx.model_ref.model.clone(),
-            ctx.messages.to_vec(),
-            tools,
-        );
+        let mut req =
+            ChatCompletionRequest::new(ctx.model_ref.model.clone(), ctx.messages.to_vec(), tools);
         let options = ctx.options;
         req.temperature = options.temperature;
         req.top_p = options.top_p;
@@ -106,7 +100,10 @@ impl LlmProvider for OpenAiCompatProvider {
         }
     }
 
-    fn parse_chat_response(&self, json: &Value) -> Result<NormalizedCompletion, ProviderParseError> {
+    fn parse_chat_response(
+        &self,
+        json: &Value,
+    ) -> Result<NormalizedCompletion, ProviderParseError> {
         let response: crate::openai::ChatCompletionResponse = serde_json::from_value(json.clone())?;
         let choice = response
             .choices

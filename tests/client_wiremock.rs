@@ -21,11 +21,14 @@ impl Tool for EchoTool {
             name: "echo".to_string(),
             description: Some("echo args".into()),
             parameters_schema: json!({"type": "object"}),
-                    static_tool: false,
+            static_tool: false,
         }
     }
 
-    async fn call(&self, arguments: serde_json::Value) -> Result<serde_json::Value, ToolInvokeError> {
+    async fn call(
+        &self,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolInvokeError> {
         Ok(json!({ "echo": arguments }))
     }
 }

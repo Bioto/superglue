@@ -4,8 +4,8 @@
 mod context_fixtures;
 
 use context_fixtures::{
-    chat_options_for_run, print_comparison_table, print_multiturn_comparison,
-    run_multiturn_wiremock, run_scenario, BENCH_CONFIGS, ConversationProfile, ScenarioMetrics,
+    BENCH_CONFIGS, ConversationProfile, ScenarioMetrics, chat_options_for_run,
+    print_comparison_table, print_multiturn_comparison, run_multiturn_wiremock, run_scenario,
 };
 
 #[tokio::main]

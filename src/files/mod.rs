@@ -7,11 +7,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::http::{join_base_url, Error as HttpError, HttpClient};
+use crate::http::{Error as HttpError, HttpClient, join_base_url};
 use crate::openai::{ChatMessage, ContentPart, FileContent, MessageContent};
-use crate::providers::{
-    parse_model_ref, ProviderCredentials, ProviderId, rate_limit_key_for,
-};
+use crate::providers::{ProviderCredentials, ProviderId, parse_model_ref, rate_limit_key_for};
 
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 32 * 1024 * 1024;
 
@@ -156,12 +154,8 @@ startxref\n380\n%%EOF\n"
 
 /// Build a user message with inline file bytes (base64 data URL) for chat.
 #[must_use]
-pub fn message_with_file_bytes(
-    text: Option<&str>,
-    filename: &str,
-    bytes: &[u8],
-) -> ChatMessage {
-    use base64::{engine::general_purpose::STANDARD, Engine};
+pub fn message_with_file_bytes(text: Option<&str>, filename: &str, bytes: &[u8]) -> ChatMessage {
+    use base64::{Engine, engine::general_purpose::STANDARD};
     let mime = mime_from_filename(filename);
     let file_data = format!("data:{};base64,{}", mime, STANDARD.encode(bytes));
     let mut parts = Vec::new();

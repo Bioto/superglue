@@ -27,9 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "batch ok={} fail={} elapsed={:.2}s",
-        response.successful,
-        response.failed,
-        response.elapsed_secs
+        response.successful, response.failed, response.elapsed_secs
     );
 
     for r in &response.results {
@@ -37,7 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{} success={} content={:?}",
             r.id,
             r.success,
-            r.content.as_deref().map(|c| c.chars().take(80).collect::<String>())
+            r.content
+                .as_deref()
+                .map(|c| c.chars().take(80).collect::<String>())
         );
     }
 

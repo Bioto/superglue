@@ -76,7 +76,9 @@ impl Default for BindingBootstrapConfig {
 }
 
 /// Build [`HttpClient`] and [`ChatOptions`] with multi-provider credentials and per-key rate limits.
-pub fn bootstrap_from_parts(config: BindingBootstrapConfig) -> Result<BindingBootstrap, ClientBuildError> {
+pub fn bootstrap_from_parts(
+    config: BindingBootstrapConfig,
+) -> Result<BindingBootstrap, ClientBuildError> {
     let api_key = config.api_key;
     if api_key.is_empty() {
         return Err(ClientBuildError::MissingApiKey);
@@ -87,17 +89,18 @@ pub fn bootstrap_from_parts(config: BindingBootstrapConfig) -> Result<BindingBoo
         .unwrap_or_else(ProviderCredentials::from_env);
     creds.with_legacy_openai_key(&api_key, Some(&config.base_url));
 
-    let rate_limit_registry = if let Some(qps) = config.requests_per_second.and_then(NonZeroU32::new) {
-        let reg = RateLimitRegistry::new(qps);
-        for (provider, qps) in &config.provider_qps {
-            if let Some(nz) = NonZeroU32::new(*qps) {
-                reg.set_default_qps_for_provider(*provider, nz);
+    let rate_limit_registry =
+        if let Some(qps) = config.requests_per_second.and_then(NonZeroU32::new) {
+            let reg = RateLimitRegistry::new(qps);
+            for (provider, qps) in &config.provider_qps {
+                if let Some(nz) = NonZeroU32::new(*qps) {
+                    reg.set_default_qps_for_provider(*provider, nz);
+                }
             }
-        }
-        Some(Arc::new(reg))
-    } else {
-        None
-    };
+            Some(Arc::new(reg))
+        } else {
+            None
+        };
 
     let http_cfg = ClientConfig {
         retry: RetryPolicy {

@@ -19,7 +19,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let outcome = client
-        .complete("Reply with exactly one word: ok.", superglue::CallOptions::default())
+        .complete(
+            "Reply with exactly one word: ok.",
+            superglue::CallOptions::default(),
+        )
         .await?;
 
     println!("content: {:?}", outcome.content);

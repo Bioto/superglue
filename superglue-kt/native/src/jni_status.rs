@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use jni::JNIEnv;
+use jni::JavaVM;
 use jni::objects::{GlobalRef, JClass, JObject, JValue};
 use jni::sys::jlong;
-use jni::JavaVM;
-use jni::JNIEnv;
 use superglue::events::{ProcessEvent, StatusEmitter, StatusSubscriber};
 
-use crate::handle::{alloc, get_status_emitter, remove, KHandle};
+use crate::handle::{KHandle, alloc, get_status_emitter, remove};
 use crate::jni_base::{ensure_jvm, jthrow, runtime};
 
 pub fn process_event_json(event: &ProcessEvent) -> String {
@@ -106,7 +106,5 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_statusEmi
         jvm,
         callback: global,
     });
-    runtime().block_on(
-        emitter.subscribe(subscriber as Arc<dyn StatusSubscriber>),
-    );
+    runtime().block_on(emitter.subscribe(subscriber as Arc<dyn StatusSubscriber>));
 }

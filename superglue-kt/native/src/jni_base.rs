@@ -3,9 +3,9 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use jni::sys::jstring;
-use jni::JavaVM;
 use jni::JNIEnv;
+use jni::JavaVM;
+use jni::sys::jstring;
 use serde_json::json;
 use superglue::http::HttpClient;
 use tokio::runtime::Runtime;
@@ -38,11 +38,7 @@ pub fn jstr_from_str(env: &mut JNIEnv, s: &str) -> jstring {
 
 /// Map per-request `long` timeout: `-1` = use client default.
 pub fn opt_i64(n: i64) -> Option<i64> {
-    if n < 0 {
-        None
-    } else {
-        Some(n)
-    }
+    if n < 0 { None } else { Some(n) }
 }
 
 pub fn effective_http(
@@ -59,8 +55,7 @@ pub fn effective_http(
     let ct = connect_timeout_secs
         .map(|s| Duration::from_secs(s.max(0) as u64))
         .unwrap_or(base.config.connect_timeout);
-    base
-        .clone_with_timeouts(t, ct)
+    base.clone_with_timeouts(t, ct)
         .map(Arc::new)
         .map_err(|e| e.to_string())
 }

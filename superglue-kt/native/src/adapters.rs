@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use jni::JNIEnv;
+use jni::JavaVM;
 use jni::objects::GlobalRef;
 use jni::objects::JString;
 use jni::objects::JValue;
-use jni::JavaVM;
-use jni::JNIEnv;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use superglue::guardrails::{GuardrailHandler, GuardrailOutcome, GuardrailStage};
 use superglue::hooks::{HookContext, HookError, HookHandler, HookStage};
@@ -87,9 +87,8 @@ impl Tool for KotlinJsonTool {
             call_json_callback(&mut env, &cb, &args_str)
                 .map_err(|e| ToolInvokeError::handler(e, None))
                 .and_then(|s| {
-                    serde_json::from_str(&s).map_err(|e| {
-                        ToolInvokeError::handler(e.to_string(), None)
-                    })
+                    serde_json::from_str(&s)
+                        .map_err(|e| ToolInvokeError::handler(e.to_string(), None))
                 })
         })
         .await
@@ -128,8 +127,7 @@ impl HookHandler for KotlinHook {
             let mut env = jvm
                 .attach_current_thread()
                 .map_err(|e| HookError::new(&name_in, format!("attach: {e}")))?;
-            call_json_callback(&mut env, &cb, &json_in)
-                .map_err(|e| HookError::new(&name_in, e))
+            call_json_callback(&mut env, &cb, &json_in).map_err(|e| HookError::new(&name_in, e))
         })
         .await
         {
@@ -199,10 +197,7 @@ impl GuardrailHandler for KotlinGuardrail {
                     &cb,
                     "invoke",
                     "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
-                    &[
-                        JValue::Object(&s1),
-                        JValue::Object(&s2),
-                    ],
+                    &[JValue::Object(&s1), JValue::Object(&s2)],
                 )
                 .map_err(|e| e.to_string())?;
             let j_obj = out.l().map_err(|e| e.to_string())?;

@@ -3,8 +3,8 @@
 mod support;
 
 use serde_json::json;
-use support::{FnTool, model};
 use superglue::tools::ToolSpec;
+use support::{FnTool, model};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -84,7 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let outcome = client
-        .complete("What is the weather in Paris?", superglue::CallOptions::default())
+        .complete(
+            "What is the weather in Paris?",
+            superglue::CallOptions::default(),
+        )
         .await?;
 
     println!("\ncontent: {:?}", outcome.content);

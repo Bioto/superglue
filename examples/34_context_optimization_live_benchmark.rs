@@ -13,17 +13,20 @@ mod bench_report;
 #[path = "../benches/support/conversation_profiles.rs"]
 mod conversation_profiles;
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use bench_configs::{BENCH_CONFIGS, ConfigKind};
-use bench_report::{print_benchmark_table, print_multiturn_table, BenchmarkRow, MultiTurnReport, LIVE_BENCHMARK_NOTE};
-use conversation_profiles::{
-    benchmark_system_prompt, multiturn_system_prompt, summarize_config_multiturn, ConversationProfile,
-    MULTITURN_MAX_TOOL_ROUNDS, MULTITURN_PROMPTS,
+use bench_report::{
+    BenchmarkRow, LIVE_BENCHMARK_NOTE, MultiTurnReport, print_benchmark_table,
+    print_multiturn_table,
 };
 use conversation_profiles::aaak_compression_enabled_multiturn;
+use conversation_profiles::{
+    ConversationProfile, MULTITURN_MAX_TOOL_ROUNDS, MULTITURN_PROMPTS, benchmark_system_prompt,
+    multiturn_system_prompt, summarize_config_multiturn,
+};
 use superglue::events::{ProcessEvent, ProcessEventKind, StatusEmitter, StatusSubscriber};
 use superglue::openai::ChatMessage;
 use support::context_tools::register_context_optimization_tools;
@@ -140,7 +143,8 @@ async fn run_live_config(
                 .map(|s| s.len())
                 .unwrap_or(0);
             let tool_calls = bench_metrics::count_tool_calls(&outcome.messages);
-            let completed = bench_metrics::completed_expected(&outcome.messages, profile.expected_tools());
+            let completed =
+                bench_metrics::completed_expected(&outcome.messages, profile.expected_tools());
             let cum_total = token_collector.total();
             let cum_prompt = token_collector.prompt();
             eprintln!(

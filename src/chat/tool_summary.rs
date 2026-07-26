@@ -17,8 +17,15 @@ pub fn tool_result_summary(tool_name: &str, content: &str) -> Option<String> {
     }
     Some(match tool_name {
         "list_dir" => {
-            let n = v.get("entries").and_then(|e| e.as_array()).map(|a| a.len()).unwrap_or(0);
-            let truncated = v.get("truncated").and_then(|t| t.as_bool()).unwrap_or(false);
+            let n = v
+                .get("entries")
+                .and_then(|e| e.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let truncated = v
+                .get("truncated")
+                .and_then(|t| t.as_bool())
+                .unwrap_or(false);
             let mut out = if n == 1 {
                 "Scanned 1 entry".into()
             } else {
@@ -35,11 +42,12 @@ pub fn tool_result_summary(tool_name: &str, content: &str) -> Option<String> {
         }
         "grep" => {
             let n = v.get("match_count").and_then(|c| c.as_u64()).unwrap_or(0);
-            let unit = if v.get("output_mode").and_then(|m| m.as_str()) == Some("files_with_matches") {
-                "file"
-            } else {
-                "match"
-            };
+            let unit =
+                if v.get("output_mode").and_then(|m| m.as_str()) == Some("files_with_matches") {
+                    "file"
+                } else {
+                    "match"
+                };
             format_found(n, unit)
         }
         "read_file" => {
@@ -78,7 +86,11 @@ pub fn tool_result_summary(tool_name: &str, content: &str) -> Option<String> {
             let n = v
                 .get("result_count")
                 .and_then(|c| c.as_u64())
-                .or_else(|| v.get("results").and_then(|r| r.as_array()).map(|a| a.len() as u64))
+                .or_else(|| {
+                    v.get("results")
+                        .and_then(|r| r.as_array())
+                        .map(|a| a.len() as u64)
+                })
                 .unwrap_or(0);
             format!("Found {n} results")
         }
@@ -98,10 +110,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
     }
-    format!(
-        "{}…",
-        text.chars().take(max).collect::<String>()
-    )
+    format!("{}…", text.chars().take(max).collect::<String>())
 }
 
 #[cfg(test)]

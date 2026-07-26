@@ -1,7 +1,7 @@
 //! Streaming tool-round tests (OpenAI SSE format).
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -23,7 +23,7 @@ impl Tool for EchoTool {
             name: "echo".to_string(),
             description: None,
             parameters_schema: json!({"type": "object"}),
-                    static_tool: false,
+            static_tool: false,
         }
     }
 

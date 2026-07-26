@@ -6,11 +6,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
-use support::{model, require_api_key, FnTool};
 use superglue::hooks::{
     HookConfig, HookContext, HookError, HookErrorStrategy, HookHandler, HookRegistry, HookStage,
 };
 use superglue::tools::ToolSpec;
+use support::{FnTool, model, require_api_key};
 
 struct LogHook {
     prefix: String,
@@ -179,7 +179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = hooks;
 
     let outcome = client
-        .complete("Say 'hooks ok' in two words.", superglue::CallOptions::default())
+        .complete(
+            "Say 'hooks ok' in two words.",
+            superglue::CallOptions::default(),
+        )
         .await?;
     println!("  content: {:?}", outcome.content);
 

@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use superglue::agents::AgentSpec;
-use superglue::client::{bootstrap_from_parts, provider_id_from_str, BindingBootstrapConfig};
+use superglue::client::{BindingBootstrapConfig, bootstrap_from_parts, provider_id_from_str};
 use superglue::fallback::ModelFallbackChain;
 use superglue::http::{ClientConfig, HttpClient, RetryPolicy};
 use superglue::providers::ProviderCredentials;
@@ -215,7 +215,6 @@ pub fn apply_status_emitter(
     state.options.status_emitter = Some(emitter);
 }
 
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSpecJson {
@@ -314,9 +313,8 @@ pub fn build_engine_state(spec_json: &str, http_json: &str) -> Result<EngineStat
     } else {
         spec.model.clone()
     };
-    let guardrails = Arc::new(
-        GuardrailRegistry::new().with_max_output_retries(spec.max_output_retries),
-    );
+    let guardrails =
+        Arc::new(GuardrailRegistry::new().with_max_output_retries(spec.max_output_retries));
     Ok(EngineState {
         spec: spec.clone(),
         base_options: ChatOptions::new(

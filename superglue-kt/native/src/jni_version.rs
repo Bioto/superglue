@@ -1,6 +1,6 @@
+use jni::JNIEnv;
 use jni::objects::JClass;
 use jni::sys::jstring;
-use jni::JNIEnv;
 
 use crate::jni_base::{ensure_jvm, jstr_from_str};
 

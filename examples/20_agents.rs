@@ -3,9 +3,9 @@
 mod support;
 
 use serde_json::json;
-use support::{model, require_api_key, FnTool};
 use superglue::agents::{AgentEngine, AgentSpec};
 use superglue::tools::ToolSpec;
+use support::{FnTool, model, require_api_key};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +27,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     let outcome = client
-        .run_agent(spec, "What is 2 + 2? Answer in one sentence.", superglue::CallOptions::default())
+        .run_agent(
+            spec,
+            "What is 2 + 2? Answer in one sentence.",
+            superglue::CallOptions::default(),
+        )
         .await?;
     println!("Response: {:?}", outcome.content);
     println!();
@@ -40,12 +44,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "ResearchAssistant",
         "an expert research assistant specialising in science and technology",
     )
-        .with_goal("Provide accurate, well-sourced answers backed by evidence.")
-        .with_goal("Explain complex concepts clearly for a general audience.")
-        .with_constraint("Never speculate without clearly labelling it as speculation.")
-        .with_constraint("Keep responses concise — prefer bullet points over long paragraphs.")
-        .with_model(model.clone())
-        .with_max_tool_rounds(4);
+    .with_goal("Provide accurate, well-sourced answers backed by evidence.")
+    .with_goal("Explain complex concepts clearly for a general audience.")
+    .with_constraint("Never speculate without clearly labelling it as speculation.")
+    .with_constraint("Keep responses concise — prefer bullet points over long paragraphs.")
+    .with_model(model.clone())
+    .with_max_tool_rounds(4);
 
     println!("Compiled system prompt:");
     println!("{}", research_spec.compile_system_prompt());
@@ -69,8 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_goal("Provide accurate weather data for any city asked.")
         .with_model(model.clone());
 
-    let http_client =
-        superglue::http::HttpClient::new(superglue::http::ClientConfig::default())?;
+    let http_client = superglue::http::HttpClient::new(superglue::http::ClientConfig::default())?;
     let registry = superglue::tools::ToolRegistry::new();
     registry
         .register(
@@ -104,11 +107,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     let engine = AgentEngine::new(agent_spec);
-    let opts = superglue::chat::ChatOptions::new(
-        support::base_url(),
-        api_key.clone(),
-        model.clone(),
-    );
+    let opts =
+        superglue::chat::ChatOptions::new(support::base_url(), api_key.clone(), model.clone());
     let outcome = engine
         .run(
             &http_client,
@@ -124,8 +124,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Example 4: reasoning_effort on agent");
     println!("{}", "=".repeat(60));
 
-    let mut reasoning_spec = AgentSpec::new("DeepThinker", "a careful analyst")
-        .with_model(model);
+    let mut reasoning_spec = AgentSpec::new("DeepThinker", "a careful analyst").with_model(model);
     reasoning_spec.reasoning_effort = Some("high".to_string());
 
     let outcome = client

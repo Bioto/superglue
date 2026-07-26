@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
-use crate::http::{direct_per_second, DirectRateLimiter};
+use crate::http::{DirectRateLimiter, direct_per_second};
 
 use super::credentials::ApiKeyId;
 use super::provider_id::ProviderId;

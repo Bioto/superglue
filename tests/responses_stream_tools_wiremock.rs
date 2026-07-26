@@ -1,7 +1,7 @@
 //! Responses API streaming tool + reasoning round tests.
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -24,7 +24,7 @@ impl Tool for EchoTool {
             name: "echo".to_string(),
             description: None,
             parameters_schema: json!({"type": "object"}),
-                    static_tool: false,
+            static_tool: false,
         }
     }
 
@@ -140,10 +140,7 @@ fn output_item_done_text_round_sse() -> String {
 fn content_part_done_text_round_sse() -> String {
     let mut body = String::new();
     let chunks = [
-        (
-            "response.created",
-            r#"{"response":{"id":"resp_part_1"}}"#,
-        ),
+        ("response.created", r#"{"response":{"id":"resp_part_1"}}"#),
         (
             "response.content_part.done",
             r#"{"item_id":"msg_1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"hello from content part","annotations":[]}}"#,
@@ -219,9 +216,21 @@ async fn responses_stream_tool_then_text() {
     assert_eq!(reasoning.join(""), "scan workspace");
 
     let events = collector.take_events().await;
-    assert!(events.iter().any(|e| e.kind == ProcessEventKind::ToolCallStart));
-    assert!(events.iter().any(|e| e.kind == ProcessEventKind::ToolCallEnd));
-    assert!(events.iter().any(|e| e.kind == ProcessEventKind::ReasoningDelta));
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == ProcessEventKind::ToolCallStart)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == ProcessEventKind::ToolCallEnd)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == ProcessEventKind::ReasoningDelta)
+    );
 }
 
 #[tokio::test]
@@ -282,7 +291,10 @@ async fn responses_stream_tool_round_uses_call_id_from_completed_output() {
         .and_then(|v| v.as_array())
         .expect("second request should send tool outputs");
     assert_eq!(tool_outputs.len(), 1);
-    assert_eq!(tool_outputs[0].get("type").and_then(|v| v.as_str()), Some("function_call_output"));
+    assert_eq!(
+        tool_outputs[0].get("type").and_then(|v| v.as_str()),
+        Some("function_call_output")
+    );
     assert_eq!(
         tool_outputs[0].get("call_id").and_then(|v| v.as_str()),
         Some("call_1")
@@ -299,7 +311,8 @@ async fn responses_stream_output_item_done_only_text() {
     Mock::given(method("POST"))
         .and(path("/v1/responses"))
         .respond_with(move |_req: &wiremock::Request| {
-            ResponseTemplate::new(200).set_body_raw(output_item_done_text_round_sse(), "text/event-stream")
+            ResponseTemplate::new(200)
+                .set_body_raw(output_item_done_text_round_sse(), "text/event-stream")
         })
         .mount(&server)
         .await;

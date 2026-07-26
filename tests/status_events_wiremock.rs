@@ -76,7 +76,11 @@ async fn completion_emits_llm_call_end_with_cost() {
     assert_eq!(outcome.content.as_deref(), Some("hello"));
 
     let events = collector.take_events().await;
-    assert!(events.iter().any(|e| e.kind == ProcessEventKind::LlmCallStart));
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == ProcessEventKind::LlmCallStart)
+    );
     let end = events
         .iter()
         .find(|e| e.kind == ProcessEventKind::LlmCallEnd)
@@ -113,7 +117,9 @@ async fn http_error_emits_llm_call_error() {
     .expect_err("should fail on 500");
 
     let events = collector.take_events().await;
-    assert!(events
-        .iter()
-        .any(|e| e.kind == ProcessEventKind::LlmCallError));
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == ProcessEventKind::LlmCallError)
+    );
 }

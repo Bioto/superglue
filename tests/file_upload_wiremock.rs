@@ -1,7 +1,7 @@
 //! File upload wiremock: POST /v1/files then chat with file_id.
 
 use serde_json::json;
-use superglue::files::{upload_file, FilePurpose};
+use superglue::files::{FilePurpose, upload_file};
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::{ChatMessage, ContentPart, FileContent, MessageContent};
 use superglue::providers::ProviderCredentials;
@@ -13,12 +13,10 @@ async fn openai_upload_returns_file_id() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/files"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "id": "file-abc",
-                "bytes": 12,
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "file-abc",
+            "bytes": 12,
+        })))
         .mount(&server)
         .await;
 

@@ -17,14 +17,21 @@ async fn body_to_json(body: Body) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or(json!({ "raw": String::from_utf8_lossy(&bytes) }))
 }
 
-fn auth_request(method: &str, uri: &str, key: &str, body: Option<serde_json::Value>) -> Request<Body> {
+fn auth_request(
+    method: &str,
+    uri: &str,
+    key: &str,
+    body: Option<serde_json::Value>,
+) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
         .header("X-Superglue-Key", format!("Bearer {key}"));
     if let Some(b) = body {
         builder = builder.header("content-type", "application/json");
-        builder.body(Body::from(serde_json::to_vec(&b).unwrap())).unwrap()
+        builder
+            .body(Body::from(serde_json::to_vec(&b).unwrap()))
+            .unwrap()
     } else {
         builder.body(Body::empty()).unwrap()
     }
@@ -51,7 +58,12 @@ async fn virtual_key_allowed_model_proxies_and_logs_usage() {
         .await;
 
     let dir = tempfile::tempdir().unwrap();
-    let state = test_state_with_openai(MASTER_KEY, &dir.path().join("gw.db"), &server.uri(), "sk-test");
+    let state = test_state_with_openai(
+        MASTER_KEY,
+        &dir.path().join("gw.db"),
+        &server.uri(),
+        "sk-test",
+    );
     let app = router(state.clone());
 
     // Setup user + key via admin
@@ -181,7 +193,12 @@ async fn virtual_key_creation_requires_user_id() {
 async fn master_key_requires_user_field() {
     let dir = tempfile::tempdir().unwrap();
     let server = MockServer::start().await;
-    let state = test_state_with_openai(MASTER_KEY, &dir.path().join("gw.db"), &server.uri(), "sk-test");
+    let state = test_state_with_openai(
+        MASTER_KEY,
+        &dir.path().join("gw.db"),
+        &server.uri(),
+        "sk-test",
+    );
     let app = router(state);
 
     let resp = app
@@ -251,8 +268,16 @@ async fn budget_enforce_returns_429() {
     // Set spend over budget
     {
         let conn = state.db.clone();
-        conn.record_usage(None, "user-1", "openai:gpt-4o-mini", 1000, 1000, 0.05, "req-1")
-            .unwrap();
+        conn.record_usage(
+            None,
+            "user-1",
+            "openai:gpt-4o-mini",
+            1000,
+            1000,
+            0.05,
+            "req-1",
+        )
+        .unwrap();
     }
 
     let resp = app
@@ -305,12 +330,7 @@ async fn list_models_returns_allowlist() {
         .to_string();
 
     let resp = app
-        .oneshot(auth_request(
-            "GET",
-            "/v1/models",
-            &virtual_key,
-            None,
-        ))
+        .oneshot(auth_request("GET", "/v1/models", &virtual_key, None))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -333,13 +353,23 @@ async fn health_endpoints_work() {
 
     let live = app
         .clone()
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(live.status(), StatusCode::OK);
 
     let ready = app
-        .oneshot(Request::builder().uri("/health/ready").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(ready.status(), StatusCode::OK);

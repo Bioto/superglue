@@ -2,27 +2,26 @@
 
 use std::sync::Arc;
 
+use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jboolean, jlong, jstring};
-use jni::JNIEnv;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 use superglue::agents::AgentEngine as SgAgentEngine;
 use superglue::batch::{BatchConfig, BatchRequest, ErrorStrategy, batch_complete};
 use superglue::chat::{
     ChatOptions, complete_with_tools, stream_complete, stream_complete_with_tools,
-};
-use superglue::mcp::{McpHttpConfig, McpSession, McpStdioConfig};
-use superglue::responses::{
-    complete_with_tools as complete_response_with_tools,
-    stream_response as stream_response_api,
 };
 use superglue::guardrails::{
     BlocklistAction, BlocklistGuardrail, GuardrailConfig, GuardrailHandler, GuardrailStage,
     LengthStrategy, MaxLengthGuardrail, PiiRedactGuardrail,
 };
 use superglue::hooks::{HookConfig, HookErrorStrategy, HookStage};
+use superglue::mcp::{McpHttpConfig, McpSession, McpStdioConfig};
 use superglue::openai::ChatMessage;
+use superglue::responses::{
+    complete_with_tools as complete_response_with_tools, stream_response as stream_response_api,
+};
 use superglue::tools::{Tool, ToolSpec};
 
 use crate::adapters::{GuardrailStateFilter, KotlinGuardrail, KotlinHook, KotlinJsonTool};
@@ -30,14 +29,14 @@ use crate::config::apply_status_emitter;
 use crate::config::build_client_state;
 use crate::config::parse_agent_spec;
 use crate::config::value_from_str;
+use crate::handle::KHandle;
 use crate::handle::alloc;
 use crate::handle::get_client;
 use crate::handle::get_status_emitter;
 use crate::handle::remove;
-use crate::handle::KHandle;
 use crate::jni_base::{
-    completion_outcome_json, ensure_jvm, effective_http, jstr_from_str, jthrow, opt_i64, runtime,
-    response_outcome_json, response_stream_outcome_json, stream_outcome_json,
+    completion_outcome_json, effective_http, ensure_jvm, jstr_from_str, jthrow, opt_i64,
+    response_outcome_json, response_stream_outcome_json, runtime, stream_outcome_json,
 };
 
 pub(crate) fn jstring_to_rust(env: &mut JNIEnv, s: &JString) -> Result<String, jni::errors::Error> {
@@ -47,7 +46,9 @@ pub(crate) fn jstring_to_rust(env: &mut JNIEnv, s: &JString) -> Result<String, j
 
 pub(crate) fn opt_request_id(_env: &mut JNIEnv, request_id: &JString) -> Option<String> {
     // Empty string means None (callers use "" for absent).
-    jstring_to_rust(_env, request_id).ok().filter(|s| !s.is_empty())
+    jstring_to_rust(_env, request_id)
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 pub(crate) fn opt_reasoning_effort(env: &mut JNIEnv, effort: &JString) -> Option<String> {
@@ -260,14 +261,13 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientReg
         name_s
     };
     let es = jstring_to_rust(&mut env, &error_strategy).unwrap_or_default();
-    let strategy = match HookErrorStrategy::from_str(if es.is_empty() {
-        "skip"
-    } else {
-        &es
-    }) {
+    let strategy = match HookErrorStrategy::from_str(if es.is_empty() { "skip" } else { &es }) {
         Some(s) => s,
         None => {
-            jthrow(&mut env, "invalid error_strategy; expected 'skip' or 'abort'");
+            jthrow(
+                &mut env,
+                "invalid error_strategy; expected 'skip' or 'abort'",
+            );
             return;
         }
     };
@@ -425,24 +425,22 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientAdd
                 Ok(b) => b.for_stages(vec![GuardrailStage::Input]),
                 Err(e) => return Err(e.to_string()),
             };
-            gds
-                .add_input(GuardrailConfig {
-                    name: name_str.clone(),
-                    handler: Arc::new(h_in),
-                })
-                .await;
+            gds.add_input(GuardrailConfig {
+                name: name_str.clone(),
+                handler: Arc::new(h_in),
+            })
+            .await;
         }
         if stages.contains(&GuardrailStage::Output) {
             let h_out = match BlocklistGuardrail::new(&patterns_ref, bl_action) {
                 Ok(b) => b.for_stages(vec![GuardrailStage::Output]),
                 Err(e) => return Err(e.to_string()),
             };
-            gds
-                .add_output(GuardrailConfig {
-                    name: name_str,
-                    handler: Arc::new(h_out),
-                })
-                .await;
+            gds.add_output(GuardrailConfig {
+                name: name_str,
+                handler: Arc::new(h_out),
+            })
+            .await;
         }
         Ok::<(), String>(())
     }) {
@@ -491,27 +489,24 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientAdd
     } else {
         Some(max_output as usize)
     };
-    let handler: Arc<dyn superglue::guardrails::GuardrailHandler> = Arc::new(
-        MaxLengthGuardrail::new(max_in, max_out, len_strategy),
-    );
+    let handler: Arc<dyn superglue::guardrails::GuardrailHandler> =
+        Arc::new(MaxLengthGuardrail::new(max_in, max_out, len_strategy));
     let name_s = jstring_to_rust(&mut env, &name).unwrap_or_else(|_| "max_length".to_string());
     let gds = Arc::clone(&state.guardrails);
     runtime().block_on(async move {
         if max_in.is_some() {
-            gds
-                .add_input(GuardrailConfig {
-                    name: name_s.clone(),
-                    handler: Arc::clone(&handler),
-                })
-                .await;
+            gds.add_input(GuardrailConfig {
+                name: name_s.clone(),
+                handler: Arc::clone(&handler),
+            })
+            .await;
         }
         if max_out.is_some() {
-            gds
-                .add_output(GuardrailConfig {
-                    name: name_s,
-                    handler,
-                })
-                .await;
+            gds.add_output(GuardrailConfig {
+                name: name_s,
+                handler,
+            })
+            .await;
         }
     });
 }
@@ -548,24 +543,22 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientAdd
     let gds = Arc::clone(&state.guardrails);
     runtime().block_on(async move {
         if stages.contains(&GuardrailStage::Input) {
-            gds
-                .add_input(GuardrailConfig {
-                    name: name_s.clone(),
-                    handler: Arc::new(
-                        PiiRedactGuardrail::new().for_stages(vec![GuardrailStage::Input]),
-                    ),
-                })
-                .await;
+            gds.add_input(GuardrailConfig {
+                name: name_s.clone(),
+                handler: Arc::new(
+                    PiiRedactGuardrail::new().for_stages(vec![GuardrailStage::Input]),
+                ),
+            })
+            .await;
         }
         if stages.contains(&GuardrailStage::Output) {
-            gds
-                .add_output(GuardrailConfig {
-                    name: name_s,
-                    handler: Arc::new(
-                        PiiRedactGuardrail::new().for_stages(vec![GuardrailStage::Output]),
-                    ),
-                })
-                .await;
+            gds.add_output(GuardrailConfig {
+                name: name_s,
+                handler: Arc::new(
+                    PiiRedactGuardrail::new().for_stages(vec![GuardrailStage::Output]),
+                ),
+            })
+            .await;
         }
     });
 }
@@ -588,9 +581,7 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientRun
             return std::ptr::null_mut();
         }
     };
-    let spec = match parse_agent_spec(
-        &jstring_to_rust(&mut env, &spec_json).unwrap_or_default(),
-    ) {
+    let spec = match parse_agent_spec(&jstring_to_rust(&mut env, &spec_json).unwrap_or_default()) {
         Ok(s) => s,
         Err(err) => {
             jthrow(&mut env, &err);
@@ -622,9 +613,7 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientRun
     let engine = SgAgentEngine::new(spec)
         .with_hooks(hooks)
         .with_guardrails(gds);
-    let outcome = match runtime().block_on(
-        engine.run(&http, &reg, user_message, &opts),
-    ) {
+    let outcome = match runtime().block_on(engine.run(&http, &reg, user_message, &opts)) {
         Ok(o) => o,
         Err(e) => {
             jthrow(&mut env, &e.to_string());
@@ -754,7 +743,12 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientCom
     let mut options = state.options.clone();
     options.request_id = opt_request_id(&mut env, &request_id);
     let outcome = match runtime().block_on(complete_with_tools(
-        &http, &reg, &hooks, &gds, rust_messages, &options,
+        &http,
+        &reg,
+        &hooks,
+        &gds,
+        rust_messages,
+        &options,
     )) {
         Ok(o) => o,
         Err(e) => {
@@ -889,35 +883,33 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientBat
         }
     };
     let rj = jstring_to_rust(&mut env, &requests_json).unwrap_or_default();
-    let batch_requests: Vec<BatchRequest> = match serde_json::from_str::<
-        Vec<serde_json::Value>,
-    >(&rj)
-    {
-        Ok(vs) => {
-            let mut out = vec![];
-            for v in vs {
-                let id = v.get("id").and_then(|x| x.as_str()).map(String::from);
-                let sp = v
-                    .get("systemPrompt")
-                    .and_then(|x| x.as_str())
-                    .map(String::from);
-                let prompt = v
-                    .get("prompt")
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let mut br = BatchRequest::new(prompt);
-                br.id = id;
-                br.system_prompt = sp;
-                out.push(br);
+    let batch_requests: Vec<BatchRequest> =
+        match serde_json::from_str::<Vec<serde_json::Value>>(&rj) {
+            Ok(vs) => {
+                let mut out = vec![];
+                for v in vs {
+                    let id = v.get("id").and_then(|x| x.as_str()).map(String::from);
+                    let sp = v
+                        .get("systemPrompt")
+                        .and_then(|x| x.as_str())
+                        .map(String::from);
+                    let prompt = v
+                        .get("prompt")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let mut br = BatchRequest::new(prompt);
+                    br.id = id;
+                    br.system_prompt = sp;
+                    out.push(br);
+                }
+                out
             }
-            out
-        }
-        Err(e) => {
-            jthrow(&mut env, &format!("batch requests: {e}"));
-            return std::ptr::null_mut();
-        }
-    };
+            Err(e) => {
+                jthrow(&mut env, &format!("batch requests: {e}"));
+                return std::ptr::null_mut();
+            }
+        };
     let strategy = match ErrorStrategy::from_str(
         &jstring_to_rust(&mut env, &error_strategy).unwrap_or_else(|_| "continue".to_string()),
     ) {
@@ -931,10 +923,13 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientBat
         }
     };
     let config = BatchConfig {
-        max_concurrent: (if max_concurrent < 0 { 5 } else { max_concurrent }) as usize,
+        max_concurrent: (if max_concurrent < 0 {
+            5
+        } else {
+            max_concurrent
+        }) as usize,
         error_strategy: strategy,
-        timeout: opt_i64(timeout_secs)
-            .map(|s| std::time::Duration::from_secs(s.max(0) as u64)),
+        timeout: opt_i64(timeout_secs).map(|s| std::time::Duration::from_secs(s.max(0) as u64)),
         connect_timeout: opt_i64(connect_timeout_secs)
             .map(|s| std::time::Duration::from_secs(s.max(0) as u64)),
         cancel: None,
@@ -945,7 +940,13 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientBat
     let gds = Arc::clone(&state.guardrails);
     let options = state.options.clone();
     let response = match runtime().block_on(batch_complete(
-        http, reg, hooks, gds, batch_requests, &options, config,
+        http,
+        reg,
+        hooks,
+        gds,
+        batch_requests,
+        &options,
+        config,
     )) {
         Ok(r) => r,
         Err(e) => {
@@ -1237,7 +1238,8 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientUpl
         }
     };
     let path = jstring_to_rust(&mut env, &path).unwrap_or_default();
-    let purpose_str = jstring_to_rust(&mut env, &purpose).unwrap_or_else(|_| "user_data".to_string());
+    let purpose_str =
+        jstring_to_rust(&mut env, &purpose).unwrap_or_else(|_| "user_data".to_string());
     let purpose = match purpose_str.as_str() {
         "assistants" => superglue::files::FilePurpose::Assistants,
         "user_data" => superglue::files::FilePurpose::UserData,
@@ -1294,8 +1296,7 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_clientMes
             return std::ptr::null_mut();
         }
     };
-    let msg =
-        superglue::files::message_with_file_bytes(text_opt.as_deref(), &filename, &bytes);
+    let msg = superglue::files::message_with_file_bytes(text_opt.as_deref(), &filename, &bytes);
     let json = match serde_json::to_string(&msg) {
         Ok(s) => s,
         Err(e) => {

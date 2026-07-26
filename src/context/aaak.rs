@@ -27,7 +27,8 @@ the extracted facts using the same rules. Output ONLY the AAAK-encoded lines \
 (no markdown fences, no preamble). Every fact from the transcript must be \
 recoverable from your encoding. No explanations.";
 
-pub(crate) const COMPRESS_USER_PREFIX: &str = "Encode in AAAK. MUST preserve ALL technical facts exactly. Output ONLY AAAK lines.\n\n";
+pub(crate) const COMPRESS_USER_PREFIX: &str =
+    "Encode in AAAK. MUST preserve ALL technical facts exactly. Output ONLY AAAK lines.\n\n";
 
 pub struct AaakCompressor;
 
@@ -141,8 +142,7 @@ pub(crate) fn passthrough_aaak_context(messages: &[ChatMessage]) -> String {
 }
 
 /// When condensing replaces a tool round, tell the model not to re-invoke the same tools.
-pub(crate) const CONDENSE_ANTI_LOOP_SUFFIX: &str =
-    "\n(completed tool results for this round — do not re-invoke these same tool calls; \
+pub(crate) const CONDENSE_ANTI_LOOP_SUFFIX: &str = "\n(completed tool results for this round — do not re-invoke these same tool calls; \
      you may call new tools if still needed to finish the user request)";
 
 pub(crate) fn passthrough_at_messages(messages: &[ChatMessage]) -> String {
@@ -175,10 +175,7 @@ pub(crate) fn transcript_from_messages(messages: &[ChatMessage]) -> String {
             "assistant" if msg.tool_calls.as_ref().is_some_and(|t| !t.is_empty()) => {
                 let mut tc_parts = Vec::new();
                 for tc in msg.tool_calls.as_ref().unwrap_or(&vec![]) {
-                    tc_parts.push(format!(
-                        "{}({})",
-                        tc.function.name, tc.function.arguments
-                    ));
+                    tc_parts.push(format!("{}({})", tc.function.name, tc.function.arguments));
                 }
                 let content = message_text(msg);
                 let suffix = if tc_parts.is_empty() {
@@ -198,7 +195,10 @@ pub(crate) fn transcript_from_messages(messages: &[ChatMessage]) -> String {
 }
 
 fn escape_aaak_value(value: &str, max_len: usize) -> String {
-    let s = value.replace('\n', "\\n").replace('\r', "\\r").replace('|', "\\|");
+    let s = value
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('|', "\\|");
     if s.chars().count() > max_len {
         format!("{}...", s.chars().take(max_len - 3).collect::<String>())
     } else {
@@ -221,7 +221,11 @@ fn format_scalar_for_flatten(v: &Value) -> String {
             }
         }
         Value::String(s) => {
-            let escaped = s.replace('\\', "\\\\").replace('\n', "\\n").replace('\r', "\\r").replace('|', "\\|");
+            let escaped = s
+                .replace('\\', "\\\\")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('|', "\\|");
             if s.is_empty() || s.contains([' ', '\t', '"', '=']) {
                 format!("\"{}\"", escaped.replace('"', "\\\""))
             } else {
@@ -309,7 +313,14 @@ fn flatten_json_to_body(obj: &Value) -> String {
         Value::Array(a) => flatten_list_lines(a, ""),
         other => vec![format_scalar_for_flatten(other)],
     };
-    format!("\n{}", inner.iter().map(|ln| format!("  {ln}")).collect::<Vec<_>>().join("\n"))
+    format!(
+        "\n{}",
+        inner
+            .iter()
+            .map(|ln| format!("  {ln}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
 }
 
 fn format_tool_result(raw: &str, max_len: usize) -> String {
@@ -397,7 +408,12 @@ fn csv_stats_comment(col_names: Vec<&str>, data_rows: &[&str]) -> String {
             .find(|r| r[ci].parse::<f64>().ok() == Some(peak_val))
             .unwrap();
         let labels: Vec<&str> = label_cols.iter().map(|&lc| peak_row[lc]).collect();
-        parts.push(format!("{}={}({})", col_names[ci], peak_val, labels.join(",")));
+        parts.push(format!(
+            "{}={}({})",
+            col_names[ci],
+            peak_val,
+            labels.join(",")
+        ));
     }
     format!("# peak: {}", parts.join(" "))
 }
@@ -416,7 +432,13 @@ fn format_tool_args(args_str: &str) -> String {
     let mut pairs = Vec::new();
     for (k, v) in map {
         let val = match v {
-            Value::Array(a) => format!("[{}]", a.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")),
+            Value::Array(a) => format!(
+                "[{}]",
+                a.iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             Value::Object(_) => serde_json::to_string(v).unwrap_or_default(),
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".into(),
@@ -434,10 +456,7 @@ mod tests {
 
     #[test]
     fn passthrough_aaak_context_preserves_existing_block() {
-        let msg = ChatMessage::text(
-            "user",
-            "[AAAK CTX]\nUSR: rate limits 3000 RPM\n[/AAAK CTX]",
-        );
+        let msg = ChatMessage::text("user", "[AAAK CTX]\nUSR: rate limits 3000 RPM\n[/AAAK CTX]");
         let out = passthrough_aaak_context(&[msg]);
         assert!(out.contains("rate limits 3000 RPM"));
     }

@@ -3,8 +3,8 @@
 mod support;
 
 use serde_json::json;
-use support::{FnTool, model, require_api_key};
 use superglue::tools::ToolSpec;
+use support::{FnTool, model, require_api_key};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,7 +47,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     match client
-        .complete("Please use the broken_tool now.", superglue::CallOptions::default())
+        .complete(
+            "Please use the broken_tool now.",
+            superglue::CallOptions::default(),
+        )
         .await
     {
         Ok(o) => println!("Model did not invoke tool; response: {:?}", o.content),
@@ -60,7 +63,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .model(model)
         .build()?;
     match good
-        .complete("Say 'hello' and nothing else.", superglue::CallOptions::default())
+        .complete(
+            "Say 'hello' and nothing else.",
+            superglue::CallOptions::default(),
+        )
         .await
     {
         Ok(o) => println!("Response: {:?}", o.content),

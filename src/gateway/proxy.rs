@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use uuid::Uuid;
 
-use crate::chat::{proxy_chat_post, proxy_chat_stream, ChatError, ChatOptions};
+use crate::chat::{ChatError, ChatOptions, proxy_chat_post, proxy_chat_stream};
 use crate::costing::estimate_model_call_cost_usd;
 use crate::gateway::auth::AuthContext;
 use crate::gateway::budget::check_budget;
@@ -17,7 +17,7 @@ use crate::gateway::db::Database;
 use crate::gateway::error::{GatewayError, GatewayResult};
 use crate::gateway::model_access::{self, is_unrestricted};
 use crate::http::{HttpClient, sse::SseParser};
-use crate::openai::{ChatCompletionRequest, ChatCompletionResponse, ChatCompletionChunk};
+use crate::openai::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
 use crate::proto;
 use crate::providers::ProviderId;
 use crate::tools::ToolSpec;
@@ -113,7 +113,9 @@ pub fn preflight(
         }
     }
     if !db.user_exists(user_id)? {
-        return Err(GatewayError::bad_request(format!("user {user_id} does not exist")));
+        return Err(GatewayError::bad_request(format!(
+            "user {user_id} does not exist"
+        )));
     }
     check_budget(db, user_id)
 }
@@ -172,8 +174,9 @@ pub async fn proxy_completion_stream(
     db: Database,
     auth: AuthContext,
     body: GatewayCompletionBody,
-) -> GatewayResult<impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static>
-{
+) -> GatewayResult<
+    impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+> {
     let request_id = Uuid::new_v4().to_string();
     let user_id = crate::gateway::auth::resolve_user_id(&auth, body.user.as_deref())?;
     let model = body.completion.model.clone();

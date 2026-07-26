@@ -12,7 +12,7 @@ use superglue::guardrails::GuardrailRegistry;
 use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
-use superglue::tools::{Tool, ToolMode, ToolRegistry, ToolSpec, ROUTER_TOOL_NAME};
+use superglue::tools::{ROUTER_TOOL_NAME, Tool, ToolMode, ToolRegistry, ToolSpec};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

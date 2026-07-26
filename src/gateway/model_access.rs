@@ -8,9 +8,7 @@ pub fn is_allowed(model: &str, patterns: &[String]) -> bool {
     if patterns.is_empty() {
         return false;
     }
-    patterns
-        .iter()
-        .any(|pattern| glob_match(pattern, model))
+    patterns.iter().any(|pattern| glob_match(pattern, model))
 }
 
 /// Returns true when the caller has unrestricted model access (master key).
@@ -66,10 +64,7 @@ mod tests {
             "openai:gpt-4o-mini",
             &["openai:gpt-4o-mini".into()]
         ));
-        assert!(!is_allowed(
-            "openai:gpt-4o",
-            &["openai:gpt-4o-mini".into()]
-        ));
+        assert!(!is_allowed("openai:gpt-4o", &["openai:gpt-4o-mini".into()]));
     }
 
     #[test]

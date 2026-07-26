@@ -22,7 +22,10 @@ impl Tool for EchoTool {
         }
     }
 
-    async fn call(&self, arguments: serde_json::Value) -> Result<serde_json::Value, ToolInvokeError> {
+    async fn call(
+        &self,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolInvokeError> {
         Ok(json!({ "echo": arguments }))
     }
 }

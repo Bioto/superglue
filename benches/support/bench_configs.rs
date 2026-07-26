@@ -25,7 +25,11 @@ pub enum ConfigKind {
 impl BenchConfig {
     #[must_use]
     pub const fn kind(&self) -> ConfigKind {
-        match (self.tool_mode, self.condense_tool_messages, self.aaak_tool_condensing) {
+        match (
+            self.tool_mode,
+            self.condense_tool_messages,
+            self.aaak_tool_condensing,
+        ) {
             (ToolMode::Standard, false, _) => ConfigKind::Standard,
             (ToolMode::Dynamic, false, _) => ConfigKind::Dynamic,
             (ToolMode::Standard, true, false) => ConfigKind::CondensePlain,

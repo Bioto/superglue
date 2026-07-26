@@ -3,21 +3,21 @@
 use super::bench_configs::{BenchConfig, ConfigKind};
 use super::benchmark_tools;
 use super::conversation_profiles::{
-    aaak_compression_enabled_multiturn, multiturn_system_prompt, summarize_config_multiturn,
-    MULTITURN_MAX_TOOL_ROUNDS, MULTITURN_PROMPTS,
+    MULTITURN_MAX_TOOL_ROUNDS, MULTITURN_PROMPTS, aaak_compression_enabled_multiturn,
+    multiturn_system_prompt, summarize_config_multiturn,
 };
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use superglue::chat::{ChatError, ChatOptions, complete_with_tools};
 use superglue::context::SummarizeContextConfig;
 use superglue::guardrails::GuardrailRegistry;
 use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
-use superglue::tools::{ToolMode, ToolRegistry, ROUTER_TOOL_NAME};
+use superglue::tools::{ROUTER_TOOL_NAME, ToolMode, ToolRegistry};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -184,11 +184,7 @@ fn record_tokens(body: &[u8], collector: &Mutex<TokenCollector>) {
     guard.cum_total_tokens += prompt_est + COMPLETION_TOKENS_ESTIMATE;
 }
 
-fn scripted_turn_response(
-    local_call: u32,
-    dynamic: bool,
-    tool_turn: bool,
-) -> Value {
+fn scripted_turn_response(local_call: u32, dynamic: bool, tool_turn: bool) -> Value {
     if !tool_turn {
         return final_text_response();
     }

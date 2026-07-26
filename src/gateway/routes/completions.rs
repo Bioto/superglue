@@ -2,16 +2,16 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
+use crate::gateway::GatewayState;
 use crate::gateway::auth::Auth;
 use crate::gateway::error::GatewayError;
 use crate::gateway::proxy::{self, GatewayCompletionBody};
-use crate::gateway::GatewayState;
 
 pub async fn chat_completions(
     State(state): State<Arc<GatewayState>>,
@@ -36,21 +36,14 @@ pub async fn chat_completions(
             .body(body)
             .unwrap())
     } else {
-        let (val, _request_id) = proxy::proxy_completion(
-            &state.http,
-            &state.credentials,
-            &state.db,
-            &auth,
-            body,
-        )
-        .await?;
+        let (val, _request_id) =
+            proxy::proxy_completion(&state.http, &state.credentials, &state.db, &auth, body)
+                .await?;
         Ok(Json(val).into_response())
     }
 }
 
-pub async fn list_models(
-    Auth(auth): Auth,
-) -> Result<impl IntoResponse, GatewayError> {
+pub async fn list_models(Auth(auth): Auth) -> Result<impl IntoResponse, GatewayError> {
     let data = proxy::models_for_auth(&auth);
     Ok(Json(serde_json::json!({
         "object": "list",

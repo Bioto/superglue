@@ -20,7 +20,10 @@ impl Tool for EchoTool {
         }
     }
 
-    async fn call(&self, arguments: serde_json::Value) -> Result<serde_json::Value, ToolInvokeError> {
+    async fn call(
+        &self,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, ToolInvokeError> {
         Ok(json!({ "echo": arguments }))
     }
 }
@@ -29,9 +32,7 @@ impl Tool for EchoTool {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = ClientBuilder::new()
         .api_key(std::env::var("OPENAI_API_KEY").unwrap_or_default())
-        .model(
-            std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "openai:gpt-4o-mini".into()),
-        )
+        .model(std::env::var("OPENAI_MODEL").unwrap_or_else(|_| "openai:gpt-4o-mini".into()))
         .build()?;
     client.register_tool(Arc::new(EchoTool)).await?;
 
@@ -46,6 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         )
         .await?;
-    println!("\nfinish={:?} rounds_stream_content={printed}", out.finish_reason);
+    println!(
+        "\nfinish={:?} rounds_stream_content={printed}",
+        out.finish_reason
+    );
     Ok(())
 }

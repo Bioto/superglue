@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -210,7 +210,9 @@ impl Database {
     ) -> GatewayResult<UserRecord> {
         let conn = self.lock()?;
         let created_at = chrono::Utc::now().to_rfc3339();
-        let next_reset = budget_id.map(|bid| compute_next_reset(&conn, bid)).transpose()?;
+        let next_reset = budget_id
+            .map(|bid| compute_next_reset(&conn, bid))
+            .transpose()?;
         conn.execute(
             "INSERT INTO users (id, alias, budget_id, spend, next_budget_reset_at, created_at) VALUES (?1, ?2, ?3, 0.0, ?4, ?5)",
             params![user_id, alias, budget_id, next_reset, created_at],
@@ -259,9 +261,7 @@ impl Database {
             )?;
         }
         if let Some(b) = budget_id {
-            let next_reset = b
-                .map(|bid| compute_next_reset(&conn, bid))
-                .transpose()?;
+            let next_reset = b.map(|bid| compute_next_reset(&conn, bid)).transpose()?;
             conn.execute(
                 "UPDATE users SET budget_id = ?1, next_budget_reset_at = ?2 WHERE id = ?3",
                 params![b, next_reset, user_id],
@@ -385,8 +385,9 @@ impl Database {
         conn: &Connection,
         key_id: &str,
     ) -> GatewayResult<Vec<String>> {
-        let mut stmt =
-            conn.prepare("SELECT model_pattern FROM api_key_models WHERE key_id = ?1 ORDER BY model_pattern")?;
+        let mut stmt = conn.prepare(
+            "SELECT model_pattern FROM api_key_models WHERE key_id = ?1 ORDER BY model_pattern",
+        )?;
         let rows = stmt.query_map(params![key_id], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -461,11 +462,19 @@ impl Database {
     pub fn prepare_user_budget(&self, user_id: &str) -> GatewayResult<(bool, f64, f64)> {
         let conn = self.lock()?;
         let tx = conn.unchecked_transaction()?;
-        let (budget_id, spend, next_reset) = tx.query_row(
-            "SELECT budget_id, spend, next_budget_reset_at FROM users WHERE id = ?1",
-            params![user_id],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, f64>(1)?, row.get::<_, Option<String>>(2)?)),
-        ).map_err(|_| GatewayError::not_found(format!("user {user_id} not found")))?;
+        let (budget_id, spend, next_reset) = tx
+            .query_row(
+                "SELECT budget_id, spend, next_budget_reset_at FROM users WHERE id = ?1",
+                params![user_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .map_err(|_| GatewayError::not_found(format!("user {user_id} not found")))?;
 
         let Some(budget_id) = budget_id else {
             tx.commit()?;
@@ -674,13 +683,7 @@ mod tests {
         let db = Database::open(&path).unwrap();
         db.create_user("user-1", Some("Alice"), None).unwrap();
         let key = db
-            .create_api_key(
-                Some("test"),
-                "user-1",
-                &["openai:*".into()],
-                None,
-                None,
-            )
+            .create_api_key(Some("test"), "user-1", &["openai:*".into()], None, None)
             .unwrap();
         assert!(key.plaintext_key.starts_with("sgw-"));
         let auth = hash_key(&key.plaintext_key);

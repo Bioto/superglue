@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use jni::JNIEnv;
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jboolean, jlong, jstring};
-use jni::JNIEnv;
 use serde_json::Value;
 use superglue::agents::AgentEngine as SgAgentEngine;
 use superglue::guardrails::GuardrailConfig;
@@ -16,12 +16,12 @@ use superglue::tools::ToolSpec;
 
 use crate::adapters::{GuardrailStateFilter, KotlinGuardrail, KotlinHook, KotlinJsonTool};
 use crate::config::build_engine_state;
+use crate::handle::KHandle;
 use crate::handle::alloc;
 use crate::handle::get_engine;
 use crate::handle::remove;
-use crate::handle::KHandle;
 use crate::jni_base::{
-    completion_outcome_json, ensure_jvm, effective_http, jstr_from_str, jthrow, opt_i64, runtime,
+    completion_outcome_json, effective_http, ensure_jvm, jstr_from_str, jthrow, opt_i64, runtime,
     stream_outcome_json,
 };
 
@@ -142,11 +142,7 @@ pub unsafe extern "system" fn Java_com_superglue_kt_SuperglueNativeJni_agentEngi
         name_s
     };
     let es = jstring_to_rust(&mut env, &error_strategy).unwrap_or_default();
-    let strategy = match HookErrorStrategy::from_str(if es.is_empty() {
-        "skip"
-    } else {
-        &es
-    }) {
+    let strategy = match HookErrorStrategy::from_str(if es.is_empty() { "skip" } else { &es }) {
         Some(s) => s,
         None => {
             jthrow(&mut env, "invalid error_strategy");

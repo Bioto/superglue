@@ -14,7 +14,7 @@ pub mod url;
 pub use client::{ClientConfig, HttpClient};
 pub use download::{DownloadConfig, download_throttled};
 pub use error::Error;
-pub use rate_limit::{direct_per_second, DirectRateLimiter};
+pub use rate_limit::{DirectRateLimiter, direct_per_second};
 pub use retry::RetryPolicy;
 pub use sse::{SseEvent, SseParser};
 pub use url::join_base_url;

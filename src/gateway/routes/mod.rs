@@ -6,15 +6,15 @@ pub mod health;
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::{Request, State};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, patch, post};
-use axum::Router;
 
-use crate::gateway::auth::{authenticate, extract_raw_key, AuthContext};
-use crate::gateway::error::GatewayError;
 use crate::gateway::GatewayState;
+use crate::gateway::auth::{AuthContext, authenticate, extract_raw_key};
+use crate::gateway::error::GatewayError;
 
 /// Build the full gateway router.
 pub fn router(state: Arc<GatewayState>) -> Router {
@@ -40,7 +40,10 @@ pub fn router(state: Arc<GatewayState>) -> Router {
         )
         .route("/v1/users", post(admin::create_user).get(admin::list_users))
         .route("/v1/users/{id}", patch(admin::update_user))
-        .route("/v1/budgets", post(admin::create_budget).get(admin::list_budgets))
+        .route(
+            "/v1/budgets",
+            post(admin::create_budget).get(admin::list_budgets),
+        )
         .route("/v1/usage", get(admin::list_usage))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -48,10 +51,7 @@ pub fn router(state: Arc<GatewayState>) -> Router {
         ))
         .with_state(state.clone());
 
-    Router::new()
-        .merge(public)
-        .merge(proxy)
-        .merge(admin)
+    Router::new().merge(public).merge(proxy).merge(admin)
 }
 
 async fn auth_middleware(

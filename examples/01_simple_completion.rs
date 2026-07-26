@@ -8,7 +8,10 @@ use support::{client_from_env, usage_line};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = client_from_env()?;
     let outcome = client
-        .complete("What is the capital of France? Reply in one sentence.", superglue::CallOptions::default())
+        .complete(
+            "What is the capital of France? Reply in one sentence.",
+            superglue::CallOptions::default(),
+        )
         .await?;
     println!("content: {:?}", outcome.content);
     println!("rounds: {}", outcome.rounds);

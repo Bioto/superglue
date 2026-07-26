@@ -12,9 +12,9 @@ mod routes;
 
 pub use routes::router;
 
+pub use cli::{DbArgs, GatewayCommand, OutputFormat};
 pub use config::GatewayConfig;
 pub use error::GatewayError;
-pub use cli::{DbArgs, GatewayCommand, OutputFormat};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -101,7 +101,5 @@ pub fn test_state_with_openai(
     let mut credentials = ProviderCredentials::new();
     credentials.insert_key(ProviderId::OpenAi, api_key);
     credentials.insert_base_url(ProviderId::OpenAi, base_url);
-    Arc::new(
-        GatewayState::with_credentials(config, credentials).expect("test gateway state"),
-    )
+    Arc::new(GatewayState::with_credentials(config, credentials).expect("test gateway state"))
 }

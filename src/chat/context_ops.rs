@@ -2,17 +2,19 @@
 
 use tracing::warn;
 
-use crate::context::{
-    condense_tool_round as condense_round, AaakCompressor, COMPRESS_SYSTEM, COMPRESS_USER_PREFIX,
-};
-use crate::context::{message_text, passthrough_aaak_context, passthrough_at_messages, transcript_from_messages};
 use crate::context::SummarizeContextConfig;
+use crate::context::{
+    AaakCompressor, COMPRESS_SYSTEM, COMPRESS_USER_PREFIX, condense_tool_round as condense_round,
+};
+use crate::context::{
+    message_text, passthrough_aaak_context, passthrough_at_messages, transcript_from_messages,
+};
 use crate::http::HttpClient;
 use crate::openai::{ChatMessage, MessageContent};
 use crate::providers::ProviderCredentials;
 use crate::tools::ToolSpec;
 
-use super::{provider_chat_post, ChatError, ChatOptions};
+use super::{ChatError, ChatOptions, provider_chat_post};
 
 /// Use a fast LLM to select relevant tools; falls back to all dynamic tools on error.
 pub async fn resolve_tool_route(
@@ -108,10 +110,8 @@ pub async fn resolve_tool_route(
         return dynamic_specs.to_vec();
     };
 
-    let name_to_spec: std::collections::HashMap<&str, &ToolSpec> = dynamic_specs
-        .iter()
-        .map(|s| (s.name.as_str(), s))
-        .collect();
+    let name_to_spec: std::collections::HashMap<&str, &ToolSpec> =
+        dynamic_specs.iter().map(|s| (s.name.as_str(), s)).collect();
 
     let mut result = Vec::new();
     for name_val in names {
@@ -215,11 +215,7 @@ pub async fn maybe_summarize_messages(
             .iter()
             .map(|m| {
                 let role = m.role.to_uppercase();
-                let text = m
-                    .content
-                    .as_ref()
-                    .and_then(|c| c.as_text())
-                    .unwrap_or("");
+                let text = m.content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
                 format!("{role}: {text}")
             })
             .collect::<Vec<_>>()
@@ -245,12 +241,11 @@ pub async fn maybe_summarize_messages(
         )
         .await?;
 
-        let provider = crate::providers::resolve_provider(
-            &crate::providers::parse_model_ref(summarize_model),
-        );
-        let normalized = provider.parse_chat_response(&val).map_err(|e| {
-            ChatError::Http(crate::http::Error::InvalidJson(e.to_string()))
-        })?;
+        let provider =
+            crate::providers::resolve_provider(&crate::providers::parse_model_ref(summarize_model));
+        let normalized = provider
+            .parse_chat_response(&val)
+            .map_err(|e| ChatError::Http(crate::http::Error::InvalidJson(e.to_string())))?;
         let text = normalized.content.unwrap_or_default();
         if text.trim().is_empty() {
             return Ok(());
@@ -325,9 +320,9 @@ async fn compress_messages_aaak(
 
     let provider =
         crate::providers::resolve_provider(&crate::providers::parse_model_ref(compress_model));
-    let normalized = provider.parse_chat_response(&val).map_err(|e| {
-        ChatError::Http(crate::http::Error::InvalidJson(e.to_string()))
-    })?;
+    let normalized = provider
+        .parse_chat_response(&val)
+        .map_err(|e| ChatError::Http(crate::http::Error::InvalidJson(e.to_string())))?;
 
     Ok(normalized.content.unwrap_or_default().trim().to_string())
 }

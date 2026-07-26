@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::gateway::db::Database;
 use crate::gateway::error::{GatewayError, GatewayResult};
-use crate::gateway::{serve, GatewayConfig};
+use crate::gateway::{GatewayConfig, serve};
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum OutputFormat {
@@ -410,7 +410,10 @@ fn run_usage(path: &PathBuf, command: UsageCommand) -> GatewayResult<()> {
 fn print_value<T: Serialize>(value: &T, format: OutputFormat, pretty: impl FnOnce(&T)) {
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(value).expect("serialize"));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(value).expect("serialize")
+            );
         }
         OutputFormat::Pretty => pretty(value),
     }

@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-  let _ = RetryPolicy::default();
+    let _ = RetryPolicy::default();
 
     let outcome = client
         .complete(

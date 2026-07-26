@@ -521,7 +521,13 @@ mod secret_redact_tests {
     #[tokio::test]
     async fn redacts_openai_key() {
         let g = SecretRedactGuardrail::new();
-        let (outcome, _) = match g.check(GuardrailStage::Output, "key sk-abcdefghijklmnopqrstuvwxyz123456").await {
+        let (outcome, _) = match g
+            .check(
+                GuardrailStage::Output,
+                "key sk-abcdefghijklmnopqrstuvwxyz123456",
+            )
+            .await
+        {
             GuardrailOutcome::Allow(s) => (s, ()),
             GuardrailOutcome::Block(r) => panic!("unexpected block: {r}"),
         };

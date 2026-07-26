@@ -31,14 +31,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     println!("\n--- stream ended ---\n");
-  println!("content: {}", outcome.content);
+    println!("content: {}", outcome.content);
     let numbers: Vec<_> = outcome
         .content
         .split_whitespace()
         .filter(|w| w.chars().any(|c| c.is_ascii_digit()))
         .collect();
     println!("Number-like tokens: {:?}", numbers);
-    println!("Callback fired: {} times", TOKEN_COUNT.load(Ordering::SeqCst));
+    println!(
+        "Callback fired: {} times",
+        TOKEN_COUNT.load(Ordering::SeqCst)
+    );
     println!("finish_reason: {:?}", outcome.finish_reason);
     if let Some(u) = &outcome.usage {
         println!(

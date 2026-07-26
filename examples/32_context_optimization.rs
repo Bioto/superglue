@@ -6,10 +6,10 @@
 
 mod support;
 
-use support::context_tools::register_context_optimization_tools;
-use support::usage_line;
 use superglue::context::SummarizeContextConfig;
 use superglue::tools::ToolMode;
+use support::context_tools::register_context_optimization_tools;
+use support::usage_line;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

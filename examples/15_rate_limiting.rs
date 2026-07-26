@@ -22,7 +22,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "What is 7 multiplied by 8? One number.",
     ];
 
-    println!("Sending {} requests with requests_per_second=2 …\n", questions.len());
+    println!(
+        "Sending {} requests with requests_per_second=2 …\n",
+        questions.len()
+    );
     let start = std::time::Instant::now();
 
     for (i, question) in questions.iter().enumerate() {

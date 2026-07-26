@@ -5,11 +5,11 @@ mod support;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use support::{model, require_api_key};
 use superglue::guardrails::{
     BlocklistAction, GuardrailHandler, GuardrailOutcome, GuardrailRegistry, GuardrailStage,
     LengthStrategy,
 };
+use support::{model, require_api_key};
 
 struct CompetitorGuardrail;
 
@@ -100,7 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
         match client
-            .complete("Please say the word badword.", superglue::CallOptions::default())
+            .complete(
+                "Please say the word badword.",
+                superglue::CallOptions::default(),
+            )
             .await
         {
             Ok(o) => println!("Content: {:?}", o.content),
@@ -143,13 +146,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .model(model.clone())
             .build()?;
         client
-            .add_max_length_guardrail(Some(50), Some(200), LengthStrategy::Truncate, "length-limits")
+            .add_max_length_guardrail(
+                Some(50),
+                Some(200),
+                LengthStrategy::Truncate,
+                "length-limits",
+            )
             .await;
         let long = "A".repeat(100);
-        match client.complete(long, superglue::CallOptions::default()).await {
+        match client
+            .complete(long, superglue::CallOptions::default())
+            .await
+        {
             Ok(o) => {
                 let c = o.content.unwrap_or_default();
-                println!("Content (truncated): {}...", c.chars().take(80).collect::<String>());
+                println!(
+                    "Content (truncated): {}...",
+                    c.chars().take(80).collect::<String>()
+                );
             }
             Err(e) => println!("Blocked long input: {e}"),
         }
@@ -190,7 +204,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await;
         match client
-            .complete("Tell me about competitor_a.", superglue::CallOptions::default())
+            .complete(
+                "Tell me about competitor_a.",
+                superglue::CallOptions::default(),
+            )
             .await
         {
             Ok(o) => println!("Content: {:?}", o.content),
@@ -205,7 +222,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             Ok(o) => println!(
                 "Safe message — content: {}",
-                o.content.unwrap_or_default().chars().take(80).collect::<String>()
+                o.content
+                    .unwrap_or_default()
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
             ),
             Err(e) => println!("Unexpected error: {e}"),
         }
@@ -219,7 +240,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .model(model.clone())
             .build()?;
         client
-            .register_guardrail(&output_only, "api-key-redact", Arc::new(ApiKeyRedactGuardrail))
+            .register_guardrail(
+                &output_only,
+                "api-key-redact",
+                Arc::new(ApiKeyRedactGuardrail),
+            )
             .await;
         match client
             .complete(
@@ -248,7 +273,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .register_guardrail(&output_only, "quality-checker", Arc::new(checker))
             .await;
         match client
-            .complete("Say 'hi' in exactly two letters.", superglue::CallOptions::default())
+            .complete(
+                "Say 'hi' in exactly two letters.",
+                superglue::CallOptions::default(),
+            )
             .await
         {
             Ok(o) => println!("Content after retry: {:?}", o.content),
@@ -300,7 +328,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         {
             Ok(o) => println!(
                 "  Content: {}",
-                o.content.unwrap_or_default().chars().take(80).collect::<String>()
+                o.content
+                    .unwrap_or_default()
+                    .chars()
+                    .take(80)
+                    .collect::<String>()
             ),
             Err(e) => println!("  Error: {e}"),
         }

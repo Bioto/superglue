@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use tracing::instrument;
 
 use super::error::ToolInvokeError;
-use super::types::{ToolRetryPolicy, ToolSpec};
+use super::types::{ToolContextPolicy, ToolRetryPolicy, ToolSpec};
 
 /// Async tool implementation (JSON args in, JSON value out).
 #[async_trait]
@@ -17,6 +17,11 @@ pub trait Tool: Send + Sync {
     fn spec(&self) -> ToolSpec;
 
     async fn call(&self, arguments: Value) -> Result<Value, ToolInvokeError>;
+
+    /// Whether PostTool offload may replace this tool's result with a notepad stub.
+    fn context_policy(&self) -> ToolContextPolicy {
+        ToolContextPolicy::OffloadWhenLarge
+    }
 }
 
 /// Registry of tools keyed by name, each with an optional per-tool error policy.
@@ -147,9 +152,7 @@ mod tests {
         registry.register(make_tool("foo")).await.unwrap();
         registry.register(make_tool("bar")).await.unwrap();
 
-        let removed = registry
-            .unregister(&["foo".into(), "bar".into()])
-            .await;
+        let removed = registry.unregister(&["foo".into(), "bar".into()]).await;
         assert_eq!(removed, 2);
 
         let specs = registry.list_specs().await;

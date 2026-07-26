@@ -6,24 +6,24 @@ use std::time::Instant;
 use futures_util::StreamExt;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 use tracing::instrument;
 
 use crate::chat::{
-    condense_tool_round, conversation_messages_for_client, credentials_for,
-    maybe_summarize_messages, post_json_with_model_fallback, stream_tools, ChatError, ChatOptions,
-    dispatch_one, observation_hook_ctx, StreamToolOutcome,
+    ChatError, ChatOptions, StreamToolOutcome, condense_tool_round,
+    conversation_messages_for_client, credentials_for, dispatch_one, maybe_summarize_messages,
+    new_tool_loop_guard, observation_hook_ctx, post_json_with_model_fallback, stream_tools,
 };
-use crate::openai::ChatCompletionChunk;
 use crate::costing::estimate_model_call_cost_usd;
-use crate::events::{emit_safe, ProcessEvent, ProcessEventKind, StatusEmitter};
-use crate::guardrails::{
-    GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage,
-};
+use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
+use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookRegistry, HookStage};
-use crate::http::{join_base_url, HttpClient, sse::SseParser};
-use crate::openai::{ChatMessage, ContentPart, FunctionCall, ImageDetail, MessageContent, ToolCall, ToolChoice};
+use crate::http::{HttpClient, join_base_url, sse::SseParser};
+use crate::openai::ChatCompletionChunk;
+use crate::openai::{
+    ChatMessage, ContentPart, FunctionCall, ImageDetail, MessageContent, ToolCall, ToolChoice,
+};
 use crate::proto;
 use crate::tools::{ToolRegistry, ToolSpec};
 
@@ -140,7 +140,9 @@ pub enum ResponseOutputItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputContentPart {
-    OutputText { text: String },
+    OutputText {
+        text: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -176,10 +178,7 @@ fn reasoning_from_options(options: &ChatOptions) -> Option<ResponseReasoning> {
         .as_ref()
         .map(|effort| ResponseReasoning {
             effort: effort.clone(),
-            summary: options
-                .reasoning_summary
-                .api_value()
-                .map(str::to_string),
+            summary: options.reasoning_summary.api_value().map(str::to_string),
         })
 }
 
@@ -362,7 +361,7 @@ async fn post_response(
         round,
         responses_rate_limit_key(options),
     )
-        .await?;
+    .await?;
     let resp: ResponseObject = serde_json::from_value(val)?;
     Ok((resp, model))
 }
@@ -415,6 +414,7 @@ pub async fn complete_with_tools(
     let mut model_used;
     let mut previous_response_id: Option<String> = None;
     let mut tool_input: Option<Vec<ResponseInputItem>> = None;
+    let loop_guard = new_tool_loop_guard();
 
     let outcome = loop {
         if api_calls >= options.max_tool_rounds {
@@ -435,14 +435,12 @@ pub async fn complete_with_tools(
             )
             .await?;
 
-        emit_safe(
-            options.status_emitter.as_ref(),
-            {
-                let mut ev = ProcessEvent::new(ProcessEventKind::LlmCallStart, &request_id, &options.model);
-                ev.round = api_calls;
-                ev
-            },
-        )
+        emit_safe(options.status_emitter.as_ref(), {
+            let mut ev =
+                ProcessEvent::new(ProcessEventKind::LlmCallStart, &request_id, &options.model);
+            ev.round = api_calls;
+            ev
+        })
         .await;
 
         let input = if let Some(items) = &tool_input {
@@ -471,16 +469,8 @@ pub async fn complete_with_tools(
             }
         }
 
-        let (resp, round_model) = post_response(
-            http,
-            &url,
-            &body,
-            &headers,
-            options,
-            &request_id,
-            api_calls,
-        )
-        .await?;
+        let (resp, round_model) =
+            post_response(http, &url, &body, &headers, options, &request_id, api_calls).await?;
 
         model_used = round_model;
         previous_response_id = Some(resp.id.clone());
@@ -492,17 +482,14 @@ pub async fn complete_with_tools(
 
         let calls = function_calls(&resp.output);
         let tool_call_count = calls.len() as u32;
-        emit_safe(
-            options.status_emitter.as_ref(),
-            {
-                let mut ev = ProcessEvent::new(ProcessEventKind::LlmCallEnd, &request_id, &model_used);
-                ev.round = api_calls;
-                ev.tool_call_count = tool_call_count;
-                ev.usage = usage_proto.clone();
-                ev.estimated_cost_usd = estimated_cost;
-                ev
-            },
-        )
+        emit_safe(options.status_emitter.as_ref(), {
+            let mut ev = ProcessEvent::new(ProcessEventKind::LlmCallEnd, &request_id, &model_used);
+            ev.round = api_calls;
+            ev.tool_call_count = tool_call_count;
+            ev.usage = usage_proto.clone();
+            ev.estimated_cost_usd = estimated_cost;
+            ev
+        })
         .await;
 
         if !calls.is_empty() {
@@ -528,6 +515,7 @@ pub async fn complete_with_tools(
                     &model_used,
                     true,
                     options.tool_result_max_chars,
+                    Some(&loop_guard),
                 )
             }))
             .await;
@@ -654,9 +642,7 @@ where
     while let Some(chunk) = stream.next().await {
         let bytes = chunk?;
         let text = String::from_utf8_lossy(&bytes);
-        let events = parser
-            .push_str(&text)
-            .map_err(ResponseError::Http)?;
+        let events = parser.push_str(&text).map_err(ResponseError::Http)?;
         for event in events {
             let data = event.data.trim();
             if data.is_empty() {
@@ -828,7 +814,11 @@ pub(crate) fn chat_messages_to_response_input(messages: &[ChatMessage]) -> Respo
             }
             continue;
         }
-        if let Some(content) = msg.content.as_ref().and_then(message_content_to_response_value) {
+        if let Some(content) = msg
+            .content
+            .as_ref()
+            .and_then(message_content_to_response_value)
+        {
             items.push(ResponseInputItem::Message {
                 role: msg.role.clone(),
                 content,
@@ -970,7 +960,10 @@ fn format_sse_error_object(err: &Value) -> Option<String> {
 }
 
 fn extract_sse_error_message(v: &Value) -> Option<String> {
-    if let Some(err) = v.pointer("/response/error").and_then(format_sse_error_object) {
+    if let Some(err) = v
+        .pointer("/response/error")
+        .and_then(format_sse_error_object)
+    {
         return Some(err);
     }
     if let Some(err) = v.get("error").and_then(format_sse_error_object) {
@@ -986,7 +979,11 @@ fn extract_stream_delta(v: &Value) -> Option<String> {
     v.get("delta")
         .and_then(|d| d.as_str())
         .map(str::to_string)
-        .or_else(|| v.pointer("/delta/text").and_then(|t| t.as_str()).map(str::to_string))
+        .or_else(|| {
+            v.pointer("/delta/text")
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        })
         .or_else(|| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
         .or_else(|| {
             v.pointer("/part/text")
@@ -1043,7 +1040,11 @@ fn function_calls_from_output(output: &[ResponseOutputItem]) -> Vec<StreamedFunc
 }
 
 fn resolve_sse_event_type(sse_event: Option<&str>, v: &Value) -> String {
-    if let Some(t) = v.get("type").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
+    if let Some(t) = v
+        .get("type")
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+    {
         return t.to_string();
     }
     sse_event
@@ -1074,8 +1075,7 @@ fn parse_response_output_items(output: &Value) -> Vec<ResponseOutputItem> {
     if arr.is_empty() {
         return Vec::new();
     }
-    if let Ok(parsed) =
-        serde_json::from_value::<Vec<ResponseOutputItem>>(Value::Array(arr.clone()))
+    if let Ok(parsed) = serde_json::from_value::<Vec<ResponseOutputItem>>(Value::Array(arr.clone()))
     {
         return parsed;
     }
@@ -1111,8 +1111,7 @@ async fn ingest_stream_output_item(
             if push_streamed_function_call(round_state, call)
                 && let Some(emitter) = status_emitter
             {
-                let mut ev =
-                    ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
+                let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
                 ev.round = round;
                 ev.metadata.insert("tool_name".to_string(), name);
                 ev.metadata.insert(
@@ -1291,18 +1290,12 @@ async fn apply_responses_stream_event(
         "response.completed" => {
             if let Some(u) = v.pointer("/response/usage") {
                 round_state.usage = Some(proto::Usage {
-                    prompt_tokens: u
-                        .get("input_tokens")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0) as u32,
-                    completion_tokens: u
-                        .get("output_tokens")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0) as u32,
-                    total_tokens: u
-                        .get("total_tokens")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0) as u32,
+                    prompt_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                        as u32,
+                    completion_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                        as u32,
+                    total_tokens: u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
+                        as u32,
                 });
             }
             if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
@@ -1378,7 +1371,12 @@ where
         .post_json_stream_with_headers(url, body, headers, responses_rate_limit_key(options))
         .await
         .map_err(|e| {
-            emit_llm_call_error(options.status_emitter.as_ref(), request_id, &options.model, round);
+            emit_llm_call_error(
+                options.status_emitter.as_ref(),
+                request_id,
+                &options.model,
+                round,
+            );
             ResponseError::Http(e)
         })?;
 
@@ -1422,7 +1420,12 @@ where
     }
 
     if let Some(err) = round_state.stream_error {
-        emit_llm_call_error(options.status_emitter.as_ref(), request_id, &options.model, round);
+        emit_llm_call_error(
+            options.status_emitter.as_ref(),
+            request_id,
+            &options.model,
+            round,
+        );
         return Err(ResponseError::StreamFailed(err));
     }
 
@@ -1522,6 +1525,7 @@ where
     let mut api_calls = 0u32;
     let mut previous_response_id: Option<String> = None;
     let mut tool_input: Option<Vec<ResponseInputItem>> = None;
+    let loop_guard = new_tool_loop_guard();
     let credentials = credentials_for(options);
 
     let outcome = loop {
@@ -1569,18 +1573,12 @@ where
             reset_chain_after_context_mutation(&mut previous_response_id, &mut tool_input);
         }
 
-        emit_safe(
-            options.status_emitter.as_ref(),
-            {
-                let mut ev = ProcessEvent::new(
-                    ProcessEventKind::LlmCallStart,
-                    &request_id,
-                    &options.model,
-                );
-                ev.round = api_calls;
-                ev
-            },
-        )
+        emit_safe(options.status_emitter.as_ref(), {
+            let mut ev =
+                ProcessEvent::new(ProcessEventKind::LlmCallStart, &request_id, &options.model);
+            ev.round = api_calls;
+            ev
+        })
         .await;
 
         if tool_input.is_some()
@@ -1644,21 +1642,14 @@ where
             .as_ref()
             .map(|u| estimate_model_call_cost_usd(&model_used, u));
 
-        emit_safe(
-            options.status_emitter.as_ref(),
-            {
-                let mut ev = ProcessEvent::new(
-                    ProcessEventKind::LlmCallEnd,
-                    &request_id,
-                    &model_used,
-                );
-                ev.round = api_calls;
-                ev.tool_call_count = tool_call_count;
-                ev.usage = round_state.usage.clone();
-                ev.estimated_cost_usd = estimated_cost;
-                ev
-            },
-        )
+        emit_safe(options.status_emitter.as_ref(), {
+            let mut ev = ProcessEvent::new(ProcessEventKind::LlmCallEnd, &request_id, &model_used);
+            ev.round = api_calls;
+            ev.tool_call_count = tool_call_count;
+            ev.usage = round_state.usage.clone();
+            ev.estimated_cost_usd = estimated_cost;
+            ev
+        })
         .await;
 
         if !calls.is_empty() {
@@ -1698,6 +1689,7 @@ where
                     &model_used,
                     false,
                     options.tool_result_max_chars,
+                    Some(&loop_guard),
                 )
             }))
             .await;
@@ -1760,8 +1752,7 @@ where
             match out_outcome {
                 GuardrailOutcome::Allow(transformed) => {
                     final_content = transformed;
-                    if let Some(last) = messages.iter_mut().rev().find(|m| m.role == "assistant")
-                    {
+                    if let Some(last) = messages.iter_mut().rev().find(|m| m.role == "assistant") {
                         last.content = Some(MessageContent::Text(final_content.clone()));
                     }
                 }
@@ -2346,7 +2337,10 @@ mod tests {
             panic!("expected message");
         };
         let arr = content.as_array().expect("multipart content");
-        assert!(arr.iter().any(|p| p.get("type").and_then(|v| v.as_str()) == Some("input_image")));
+        assert!(
+            arr.iter()
+                .any(|p| p.get("type").and_then(|v| v.as_str()) == Some("input_image"))
+        );
     }
 
     #[test]
@@ -2439,9 +2433,7 @@ mod tests {
             call_id: "call_1".into(),
             output: "{}".into(),
         }]);
-        let ResponseInput::Items(items) =
-            next_response_input(&messages, &None, &tool_input)
-        else {
+        let ResponseInput::Items(items) = next_response_input(&messages, &None, &tool_input) else {
             panic!("expected items");
         };
         assert!(

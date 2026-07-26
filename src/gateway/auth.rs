@@ -32,10 +32,7 @@ impl std::ops::Deref for Auth {
 impl<S: Send + Sync> FromRequestParts<S> for Auth {
     type Rejection = GatewayError;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         parts
             .extensions
             .get::<AuthContext>()
@@ -70,9 +67,7 @@ pub fn parse_bearer(header_value: &str) -> Option<&str> {
 
 /// Extract raw key from request headers (`X-Superglue-Key` preferred).
 pub fn extract_raw_key(headers: &axum::http::HeaderMap) -> GatewayResult<String> {
-    let superglue = headers
-        .get("X-Superglue-Key")
-        .and_then(|v| v.to_str().ok());
+    let superglue = headers.get("X-Superglue-Key").and_then(|v| v.to_str().ok());
     let authorization = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
@@ -131,11 +126,9 @@ fn validate_virtual_key(record: &ApiKeyRecord) -> GatewayResult<()> {
 /// Resolve the effective user id for a proxied completion request.
 pub fn resolve_user_id(auth: &AuthContext, body_user: Option<&str>) -> GatewayResult<String> {
     if auth.is_master {
-        let user = body_user
-            .filter(|u| !u.is_empty())
-            .ok_or_else(|| {
-                GatewayError::bad_request("master key requests must include a \"user\" field")
-            })?;
+        let user = body_user.filter(|u| !u.is_empty()).ok_or_else(|| {
+            GatewayError::bad_request("master key requests must include a \"user\" field")
+        })?;
         return Ok(user.to_string());
     }
     Ok(auth.user_id.clone())

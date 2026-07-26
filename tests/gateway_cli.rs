@@ -44,13 +44,7 @@ fn user_create_and_list_via_cli() {
         .stdout(predicate::str::contains("Created user alice"));
 
     superglue_cmd()
-        .args([
-            "gateway",
-            "--db",
-            db.to_str().unwrap(),
-            "user",
-            "list",
-        ])
+        .args(["gateway", "--db", db.to_str().unwrap(), "user", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("alice"));
@@ -117,13 +111,7 @@ fn key_create_and_list_via_cli() {
         .stdout(predicate::str::contains("shown once"));
 
     superglue_cmd()
-        .args([
-            "gateway",
-            "--db",
-            db.to_str().unwrap(),
-            "key",
-            "list",
-        ])
+        .args(["gateway", "--db", db.to_str().unwrap(), "key", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("bob"))

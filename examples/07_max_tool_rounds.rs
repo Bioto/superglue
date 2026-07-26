@@ -5,9 +5,9 @@ mod support;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::json;
-use support::{model, require_api_key, FnTool};
 use superglue::chat::ChatError;
 use superglue::tools::ToolSpec;
+use support::{FnTool, model, require_api_key};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

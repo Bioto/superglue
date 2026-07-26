@@ -231,8 +231,11 @@ fn response_format_json_schema() {
 
 #[test]
 fn request_minimal_omits_all_optional() {
-    let req =
-        ChatCompletionRequest::new("gpt-5.4-nano-2026-03-17".into(), vec![ChatMessage::text("user", "hi")], None);
+    let req = ChatCompletionRequest::new(
+        "gpt-5.4-nano-2026-03-17".into(),
+        vec![ChatMessage::text("user", "hi")],
+        None,
+    );
     let v = serde_json::to_value(&req).unwrap();
     // Required
     assert_eq!(v["model"], "gpt-5.4-nano-2026-03-17");
@@ -268,8 +271,11 @@ fn request_minimal_omits_all_optional() {
 
 #[test]
 fn request_with_sampling_params_present() {
-    let mut req =
-        ChatCompletionRequest::new("gpt-5.4-nano-2026-03-17".into(), vec![ChatMessage::text("user", "hi")], None);
+    let mut req = ChatCompletionRequest::new(
+        "gpt-5.4-nano-2026-03-17".into(),
+        vec![ChatMessage::text("user", "hi")],
+        None,
+    );
     req.temperature = Some(0.7);
     req.top_p = Some(0.9);
     req.max_completion_tokens = Some(512);
@@ -291,8 +297,8 @@ fn request_with_tools_present() {
         name: "search".into(),
         description: Some("Search the web".into()),
         parameters_schema: json!({"type": "object"}),
-                static_tool: false,
-        });
+        static_tool: false,
+    });
     let req = ChatCompletionRequest::new(
         "gpt-5.4-nano-2026-03-17".into(),
         vec![ChatMessage::text("user", "search for Rust")],
@@ -520,8 +526,8 @@ fn chat_tool_from_spec_no_description_omitted() {
         name: "noop".into(),
         description: None,
         parameters_schema: json!({}),
-                static_tool: false,
-        };
+        static_tool: false,
+    };
     let tool = ChatTool::from(spec);
     let v = serde_json::to_value(&tool).unwrap();
     assert!(v["function"].get("description").is_none());

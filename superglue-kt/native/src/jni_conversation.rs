@@ -1,16 +1,16 @@
+use jni::JNIEnv;
 use jni::objects::{JClass, JString};
 use jni::sys::{jlong, jstring};
-use jni::JNIEnv;
 use std::sync::Arc;
 use superglue::chat::complete_with_tools;
 use superglue::openai::ChatMessage;
 
+use crate::handle::ConversationState;
+use crate::handle::KHandle;
 use crate::handle::alloc;
 use crate::handle::get_client;
 use crate::handle::get_convo;
 use crate::handle::remove;
-use crate::handle::ConversationState;
-use crate::handle::KHandle;
 use crate::jni_base::{
     completion_outcome_json, effective_http, jstr_from_str, jthrow, opt_i64, runtime,
 };
