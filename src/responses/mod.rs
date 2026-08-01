@@ -12,8 +12,9 @@ use tracing::instrument;
 
 use crate::chat::{
     ChatError, ChatOptions, StreamToolOutcome, condense_tool_round,
-    conversation_messages_for_client, credentials_for, dispatch_one, maybe_summarize_messages,
-    new_tool_loop_guard, observation_hook_ctx, post_json_with_model_fallback, stream_tools,
+    conversation_messages_for_client, credentials_for, dispatch_one, estimate_context_chars,
+    maybe_summarize_messages, new_tool_loop_guard, observation_hook_ctx,
+    post_json_with_model_fallback, stream_tools,
 };
 use crate::costing::estimate_model_call_cost_usd;
 use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
@@ -421,6 +422,14 @@ pub async fn complete_with_tools(
             return Err(ResponseError::MaxToolRounds(options.max_tool_rounds));
         }
         api_calls += 1;
+        if let Some(logger) = &options.context_event_logger {
+            logger.log(format!(
+                "context responses_round={} user_chars={} tool_items={}",
+                api_calls,
+                user_message.chars().count(),
+                tool_input.as_ref().map_or(0, Vec::len),
+            ));
+        }
 
         hooks
             .run(
@@ -1533,6 +1542,14 @@ where
             return Err(ResponseError::MaxToolRounds(options.max_tool_rounds));
         }
         api_calls += 1;
+        if let Some(logger) = &options.context_event_logger {
+            logger.log(format!(
+                "context responses_stream_round={} messages={} chars={}",
+                api_calls,
+                messages.len(),
+                estimate_context_chars(&messages),
+            ));
+        }
 
         let last_user = messages
             .iter()
@@ -1711,7 +1728,12 @@ where
 
             if options.condense_tool_messages {
                 let len_before = messages.len();
-                condense_tool_round(&mut messages, options.aaak_tool_condensing);
+                condense_tool_round(
+                    &mut messages,
+                    options.aaak_tool_condensing,
+                    options.context_block_provider.as_ref(),
+                    options.context_event_logger.as_ref(),
+                );
                 if messages.len() != len_before {
                     reset_chain_after_context_mutation(&mut previous_response_id, &mut tool_input);
                     continue;

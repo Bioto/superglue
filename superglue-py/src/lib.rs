@@ -726,7 +726,7 @@ impl PyClient {
         aaak_tool_condensing = false,
         summarize_context_enabled = false,
         summarize_context_threshold = 20usize,
-        summarize_context_keep_recent = 6usize,
+        summarize_context_keep_recent = 12usize,
         aaak_compression_enabled = false,
         aaak_compression_model = None,
     ))]
@@ -833,6 +833,7 @@ impl PyClient {
             enabled: summarize_context_enabled,
             threshold: summarize_context_threshold,
             keep_recent: summarize_context_keep_recent,
+            max_chars: 800_000,
         };
         options.aaak_compression_enabled = aaak_compression_enabled;
         options.aaak_compression_model = aaak_compression_model;

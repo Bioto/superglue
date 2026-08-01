@@ -63,8 +63,10 @@ pub struct ClientCreateJson {
     pub summarize_context_enabled: bool,
     #[serde(default = "default_u16_20")]
     pub summarize_context_threshold: u32,
-    #[serde(default = "default_u16_6")]
+    #[serde(default = "default_u16_12")]
     pub summarize_context_keep_recent: u32,
+    #[serde(default = "default_u32_800000")]
+    pub summarize_context_max_chars: u32,
     #[serde(default)]
     pub aaak_compression_enabled: bool,
     pub aaak_compression_model: Option<String>,
@@ -103,8 +105,11 @@ fn default_u16_50_pool() -> u32 {
 fn default_u16_20() -> u32 {
     20
 }
-fn default_u16_6() -> u32 {
-    6
+fn default_u16_12() -> u32 {
+    12
+}
+fn default_u32_800000() -> u32 {
+    800_000
 }
 fn default_tool_mode() -> String {
     "standard".to_string()
@@ -182,6 +187,7 @@ pub fn build_client_state(json: &str) -> Result<ClientState, String> {
         enabled: c.summarize_context_enabled,
         threshold: c.summarize_context_threshold as usize,
         keep_recent: c.summarize_context_keep_recent as usize,
+        max_chars: c.summarize_context_max_chars as usize,
     };
     options.aaak_compression_enabled = c.aaak_compression_enabled;
     options.aaak_compression_model = c.aaak_compression_model.clone();

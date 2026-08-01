@@ -631,7 +631,8 @@ impl Client {
         options.summarize_context = superglue::context::SummarizeContextConfig {
             enabled: summarize_context_enabled.unwrap_or(false),
             threshold: summarize_context_threshold.unwrap_or(20) as usize,
-            keep_recent: summarize_context_keep_recent.unwrap_or(6) as usize,
+            keep_recent: summarize_context_keep_recent.unwrap_or(12) as usize,
+            max_chars: 800_000,
         };
         options.aaak_compression_enabled = aaak_compression_enabled.unwrap_or(false);
         options.aaak_compression_model = aaak_compression_model;

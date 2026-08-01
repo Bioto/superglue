@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             enabled: false,
             threshold: 20,
             keep_recent: 6,
+            max_chars: 800_000,
         })
         .build()?;
 

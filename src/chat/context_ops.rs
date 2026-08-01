@@ -14,7 +14,7 @@ use crate::openai::{ChatMessage, MessageContent};
 use crate::providers::ProviderCredentials;
 use crate::tools::ToolSpec;
 
-use super::{ChatError, ChatOptions, provider_chat_post};
+use super::{ChatError, ChatOptions, ContextBlockProvider, ContextEventLogger, provider_chat_post};
 
 /// Use a fast LLM to select relevant tools; falls back to all dynamic tools on error.
 pub async fn resolve_tool_route(
@@ -162,7 +162,46 @@ fn auxiliary_chat_options(base: &ChatOptions, model: &str) -> ChatOptions {
     opts
 }
 
-/// Compress old messages when over threshold; mutates `messages` in place.
+/// Approximate the serialized context size without depending on a tokenizer.
+pub(crate) fn estimate_context_chars(messages: &[ChatMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| {
+            let content_chars = message
+                .content
+                .as_ref()
+                .and_then(MessageContent::as_text)
+                .map_or(0, |text| text.chars().count());
+            let tool_call_chars = message.tool_calls.as_ref().map_or(0, |calls| {
+                calls
+                    .iter()
+                    .map(|call| {
+                        call.function.name.chars().count()
+                            + call.function.arguments.chars().count()
+                            + call.id.chars().count()
+                    })
+                    .sum()
+            });
+            message.role.chars().count() + content_chars + tool_call_chars + 16
+        })
+        .sum()
+}
+
+fn should_summarize(messages: &[ChatMessage], config: &SummarizeContextConfig) -> bool {
+    if !config.enabled || messages.len() <= config.threshold {
+        return false;
+    }
+    if config.max_chars > 0 && estimate_context_chars(messages) <= config.max_chars {
+        return false;
+    }
+    let has_system = messages
+        .first()
+        .is_some_and(|message| message.role == "system");
+    let start = usize::from(has_system);
+    messages.len().saturating_sub(start) > config.keep_recent
+}
+
+/// Compress old messages when over the configured context-size budget.
 pub async fn maybe_summarize_messages(
     http: &HttpClient,
     credentials: &ProviderCredentials,
@@ -174,9 +213,10 @@ pub async fn maybe_summarize_messages(
     options: &ChatOptions,
     request_id: &str,
 ) -> Result<(), ChatError> {
-    if !config.enabled || messages.len() <= config.threshold {
+    if !should_summarize(messages, config) {
         return Ok(());
     }
+    let chars_before = estimate_context_chars(messages);
 
     let system_msg = messages.first().cloned();
     let has_system = system_msg.as_ref().is_some_and(|m| m.role == "system");
@@ -270,6 +310,19 @@ pub async fn maybe_summarize_messages(
         refusal: None,
     });
     new_messages.extend(tail);
+    let chars_after = estimate_context_chars(&new_messages);
+    if let Some(logger) = &options.context_event_logger {
+        logger.log(format!(
+            "context summarize before_messages={} after_messages={} before_chars={} after_chars={} threshold={} max_chars={} keep_recent={}",
+            messages.len(),
+            new_messages.len(),
+            chars_before,
+            chars_after,
+            config.threshold,
+            config.max_chars,
+            config.keep_recent,
+        ));
+    }
     *messages = new_messages;
     Ok(())
 }
@@ -327,6 +380,168 @@ async fn compress_messages_aaak(
     Ok(normalized.content.unwrap_or_default().trim().to_string())
 }
 
-pub fn condense_tool_round(messages: &mut Vec<ChatMessage>, aaak_tool_condensing: bool) {
+pub fn condense_tool_round(
+    messages: &mut Vec<ChatMessage>,
+    aaak_tool_condensing: bool,
+    context_block_provider: Option<&ContextBlockProvider>,
+    context_event_logger: Option<&ContextEventLogger>,
+) {
+    let len_before = messages.len();
+    let chars_before = estimate_context_chars(messages);
     condense_round(messages, aaak_tool_condensing);
+    if messages.len() != len_before
+        && let Some(logger) = context_event_logger
+    {
+        logger.log(format!(
+            "context condense before_messages={} after_messages={} before_chars={} after_chars={} aaak={}",
+            len_before,
+            messages.len(),
+            chars_before,
+            estimate_context_chars(messages),
+            aaak_tool_condensing,
+        ));
+    }
+    let Some(provider) = context_block_provider else {
+        return;
+    };
+    let context_block = provider.render();
+    if context_block.trim().is_empty() {
+        return;
+    }
+    if let Some(message) = messages.last_mut()
+        && message.role == "user"
+        && let Some(MessageContent::Text(content)) = message.content.as_mut()
+    {
+        content.push_str("\n\n");
+        content.push_str(&context_block);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::openai::{FunctionCall, ToolCall};
+
+    fn tool_round() -> Vec<ChatMessage> {
+        vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".into(),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "grep".into(),
+                        arguments: r#"{"pattern":"needle"}"#.into(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+                refusal: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: Some(MessageContent::Text(r#"{"count":1}"#.into())),
+                tool_calls: None,
+                tool_call_id: Some("call_1".into()),
+                name: Some("grep".into()),
+                refusal: None,
+            },
+        ]
+    }
+
+    #[test]
+    fn appends_context_block_to_condensed_round() {
+        let provider = ContextBlockProvider::new(|| "[Notepad index]\nentry-1".into());
+        let mut messages = tool_round();
+
+        condense_tool_round(&mut messages, false, Some(&provider), None);
+
+        let text = messages
+            .last()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .as_text()
+            .unwrap();
+        assert!(text.contains("[Notepad index]\nentry-1"));
+        assert!(text.contains("grep({\"pattern\":\"needle\"})"));
+    }
+
+    #[test]
+    fn does_not_append_empty_context_block() {
+        let provider = ContextBlockProvider::new(String::new);
+        let mut messages = tool_round();
+
+        condense_tool_round(&mut messages, false, Some(&provider), None);
+
+        let text = messages
+            .last()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .as_text()
+            .unwrap();
+        assert!(!text.contains("Notepad index"));
+    }
+
+    #[test]
+    fn message_count_alone_does_not_trigger_summarization() {
+        let config = SummarizeContextConfig {
+            enabled: true,
+            threshold: 3,
+            keep_recent: 2,
+            max_chars: 10_000,
+        };
+        let messages = (0..20)
+            .map(|index| ChatMessage::text("user", format!("small tool round {index}")))
+            .collect::<Vec<_>>();
+
+        assert!(!should_summarize(&messages, &config));
+    }
+
+    #[test]
+    fn oversized_history_triggers_summarization() {
+        let config = SummarizeContextConfig {
+            enabled: true,
+            threshold: 3,
+            keep_recent: 2,
+            max_chars: 100,
+        };
+        let messages = (0..5)
+            .map(|index| {
+                ChatMessage::text("user", format!("large result {index} {}", "x".repeat(50)))
+            })
+            .collect::<Vec<_>>();
+
+        assert!(should_summarize(&messages, &config));
+    }
+
+    #[test]
+    fn exact_tool_content_survives_long_condensed_turn_under_budget() {
+        let exact_old_string = "pub fn target() {\n    return_exact_bytes();\n}";
+        let config = SummarizeContextConfig {
+            enabled: true,
+            threshold: 3,
+            keep_recent: 12,
+            max_chars: 100_000,
+        };
+        let mut messages = (0..40)
+            .map(|index| ChatMessage::text("user", format!("[Tool Results]\nround {index}")))
+            .collect::<Vec<_>>();
+        messages[8] = ChatMessage::text("user", format!("[Tool Results]\n{exact_old_string}"));
+
+        assert!(!should_summarize(&messages, &config));
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.content.as_ref().is_some_and(|content| {
+                    content
+                        .as_text()
+                        .is_some_and(|text| text.contains(exact_old_string))
+                }))
+        );
+    }
 }

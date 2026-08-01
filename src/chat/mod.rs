@@ -2,6 +2,7 @@
 
 mod context_ops;
 mod conversation;
+mod file_locks;
 mod loop_guard;
 pub mod reasoning;
 pub(crate) mod stream_tools;
@@ -9,8 +10,11 @@ mod tool_summary;
 
 pub(crate) use loop_guard::{SharedToolLoopGuard, new_tool_loop_guard};
 
-pub(crate) use context_ops::{condense_tool_round, maybe_summarize_messages};
+pub(crate) use context_ops::{
+    condense_tool_round, estimate_context_chars, maybe_summarize_messages,
+};
 
+use std::fmt;
 use std::sync::Arc;
 
 pub use conversation::Conversation;
@@ -44,6 +48,46 @@ use crate::tools::{
     ActiveToolSet, DEFAULT_TOOL_ROUTE_MODEL, OnToolError, ToolInvokeError, ToolMode, ToolRegistry,
     ToolRetryPolicy, is_router_call, router_query_from_calls,
 };
+
+/// Callback for a compact context block appended after a condensed tool round.
+#[derive(Clone)]
+pub struct ContextBlockProvider(Arc<dyn Fn() -> String + Send + Sync>);
+
+impl ContextBlockProvider {
+    pub fn new(provider: impl Fn() -> String + Send + Sync + 'static) -> Self {
+        Self(Arc::new(provider))
+    }
+
+    pub fn render(&self) -> String {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for ContextBlockProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ContextBlockProvider(..)")
+    }
+}
+
+/// Callback for low-volume context lifecycle diagnostics.
+#[derive(Clone)]
+pub struct ContextEventLogger(Arc<dyn Fn(String) + Send + Sync>);
+
+impl ContextEventLogger {
+    pub fn new(logger: impl Fn(String) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(logger))
+    }
+
+    pub fn log(&self, event: impl Into<String>) {
+        (self.0)(event.into());
+    }
+}
+
+impl fmt::Debug for ContextEventLogger {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ContextEventLogger(..)")
+    }
+}
 
 /// Provider and model settings for [`complete_with_tools`].
 ///
@@ -134,6 +178,10 @@ pub struct ChatOptions {
     pub summarize_context: SummarizeContextConfig,
     pub aaak_compression_enabled: bool,
     pub aaak_compression_model: Option<String>,
+    /// Optional compact context block appended after each condensed tool round.
+    pub context_block_provider: Option<ContextBlockProvider>,
+    /// Optional sink for context lifecycle diagnostics.
+    pub context_event_logger: Option<ContextEventLogger>,
 }
 
 impl Default for ChatOptions {
@@ -175,6 +223,8 @@ impl Default for ChatOptions {
             summarize_context: SummarizeContextConfig::default(),
             aaak_compression_enabled: false,
             aaak_compression_model: None,
+            context_block_provider: None,
+            context_event_logger: None,
         }
     }
 }
@@ -250,11 +300,14 @@ impl From<proto::ChatOptions> for ChatOptions {
                 enabled: p.summarize_context_enabled.unwrap_or(false),
                 threshold: usize::try_from(p.summarize_context_threshold.unwrap_or(20))
                     .unwrap_or(20),
-                keep_recent: usize::try_from(p.summarize_context_keep_recent.unwrap_or(6))
-                    .unwrap_or(6),
+                keep_recent: usize::try_from(p.summarize_context_keep_recent.unwrap_or(12))
+                    .unwrap_or(12),
+                max_chars: 800_000,
             },
             aaak_compression_enabled: p.aaak_compression_enabled.unwrap_or(false),
             aaak_compression_model: p.aaak_compression_model,
+            context_block_provider: None,
+            context_event_logger: None,
         }
     }
 }
@@ -839,6 +892,14 @@ pub(crate) async fn dispatch_one(
                 )
                 .await?
         };
+        if pre_ctx.metadata.get("tool_skip").and_then(|v| v.as_bool()) == Some(true) {
+            let skip_result = pre_ctx
+                .metadata
+                .get("tool_skip_result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{\"ok\":false,\"error\":\"tool call blocked by hook\"}");
+            return Ok(skip_result.to_string());
+        }
         // If the LLM's argument JSON was truncated (e.g. by token limits), return a
         // soft error as a tool result so the model can retry rather than killing the turn.
         // An empty arguments string is treated as `{}` because some models omit braces for
@@ -877,6 +938,10 @@ pub(crate) async fn dispatch_one(
             }
         }
 
+        // Serialize same-file mutations so concurrent edits in one round cannot
+        // invalidate each other's anchors.
+        let _file_guard = file_locks::acquire_file_lock(&tc.function.name, &args).await;
+
         let result = invoke_with_policy(&tool, &tc.function.name, args.clone(), &policy).await?;
         let result_json = serde_json::to_string(&result)?;
 
@@ -897,11 +962,40 @@ pub(crate) async fn dispatch_one(
             "context_policy".into(),
             json!(tool.context_policy().as_str()),
         );
+        post_ctx
+            .metadata
+            .insert("arguments".into(), json!(tc.function.arguments.trim()));
         let post_ctx = if hooks.is_empty_for(&HookStage::PostTool).await {
             post_ctx
         } else {
             hooks.run(HookStage::PostTool, post_ctx).await?
         };
+        let offload_ref = serde_json::from_str::<Value>(&post_ctx.content)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("notepad_ref")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| {
+                        value
+                            .get("notepad_refs")
+                            .and_then(Value::as_array)
+                            .and_then(|refs| refs.first())
+                            .and_then(|reference| reference.get("notepad_ref"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+            });
+        if post_ctx.content != result_json && offload_ref.is_some() {
+            tracing::info!(
+                tool = %tc.function.name,
+                source_chars = result_json.chars().count(),
+                stub_chars = post_ctx.content.chars().count(),
+                entry_id = %offload_ref.as_deref().unwrap_or(""),
+                "tool result offloaded to notepad"
+            );
+        }
         Ok(post_ctx.content)
     }
     .await;
@@ -1037,6 +1131,14 @@ pub async fn complete_with_tools(
             return Err(ChatError::MaxToolRounds(options.max_tool_rounds));
         }
         api_calls += 1;
+        if let Some(logger) = &options.context_event_logger {
+            logger.log(format!(
+                "context round={} messages={} chars={}",
+                api_calls,
+                messages.len(),
+                estimate_context_chars(&messages),
+            ));
+        }
         tracing::info!(
             round = api_calls,
             request_id = %request_id,
@@ -1239,7 +1341,12 @@ pub async fn complete_with_tools(
             }
 
             if options.condense_tool_messages {
-                condense_tool_round(&mut messages, options.aaak_tool_condensing);
+                condense_tool_round(
+                    &mut messages,
+                    options.aaak_tool_condensing,
+                    options.context_block_provider.as_ref(),
+                    options.context_event_logger.as_ref(),
+                );
             }
             continue;
         }
@@ -2211,7 +2318,12 @@ where
             }
 
             if options.condense_tool_messages {
-                condense_tool_round(&mut messages, options.aaak_tool_condensing);
+                condense_tool_round(
+                    &mut messages,
+                    options.aaak_tool_condensing,
+                    options.context_block_provider.as_ref(),
+                    options.context_event_logger.as_ref(),
+                );
             }
             continue;
         }

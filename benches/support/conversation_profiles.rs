@@ -92,6 +92,7 @@ impl ConversationProfile {
             enabled: false,
             threshold: 20,
             keep_recent: 6,
+            max_chars: 800_000,
         }
     }
 
@@ -118,6 +119,7 @@ pub fn summarize_config_multiturn() -> SummarizeContextConfig {
         enabled: true,
         threshold: 12,
         keep_recent: 4,
+        max_chars: 800_000,
     }
 }
 
