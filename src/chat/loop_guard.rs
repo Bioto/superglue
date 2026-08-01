@@ -105,8 +105,14 @@ mod tests {
         assert!(cached.contains("\"cached\":true"));
         assert!(cached.contains("hello"));
         let parsed: Value = serde_json::from_str(&cached).expect("valid json");
-        assert_eq!(parsed.get("path").and_then(|p| p.as_str()), Some("src/foo.rs"));
-        assert_eq!(parsed.get("content").and_then(|c| c.as_str()), Some("hello"));
+        assert_eq!(
+            parsed.get("path").and_then(|p| p.as_str()),
+            Some("src/foo.rs")
+        );
+        assert_eq!(
+            parsed.get("content").and_then(|c| c.as_str()),
+            Some("hello")
+        );
         assert_eq!(parsed.get("cached").and_then(|c| c.as_bool()), Some(true));
         assert!(parsed.get("note").and_then(|n| n.as_str()).is_some());
         assert!(parsed.get("prior_result").is_none());

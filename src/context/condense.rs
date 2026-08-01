@@ -223,7 +223,10 @@ mod tests {
 
     #[test]
     fn condense_truncates_long_arguments() {
-        let long_args = format!(r#"{{"patch":"{}"}}"#, "x".repeat(CONDENSE_ARGS_MAX_CHARS + 80));
+        let long_args = format!(
+            r#"{{"patch":"{}"}}"#,
+            "x".repeat(CONDENSE_ARGS_MAX_CHARS + 80)
+        );
         let mut messages = vec![
             ChatMessage {
                 role: "assistant".into(),
