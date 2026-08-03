@@ -89,6 +89,75 @@ impl fmt::Debug for ContextEventLogger {
     }
 }
 
+/// One section of the system prompt. Anthropic uses [`SystemPromptBlock::cache`] for
+/// `cache_control: { type: "ephemeral" }`; OpenAI/xAI/Groq benefit from stable ordering.
+#[derive(Debug, Clone)]
+pub struct SystemPromptBlock {
+    pub text: String,
+    /// When true, Anthropic requests mark this block (and preceding tools) cacheable.
+    pub cache: bool,
+}
+
+impl SystemPromptBlock {
+    #[must_use]
+    pub fn cached(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache: true,
+        }
+    }
+
+    #[must_use]
+    pub fn uncached(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            cache: false,
+        }
+    }
+}
+
+/// Whether [`ChatOptions`] include a configured system prompt (legacy or blocks).
+#[must_use]
+pub(crate) fn has_system_prompt(options: &ChatOptions) -> bool {
+    options.system_prompt.is_some()
+        || options
+            .system_prompt_blocks
+            .as_ref()
+            .is_some_and(|blocks| !blocks.is_empty())
+}
+
+/// Concatenated system prompt for diagnostics and Responses `instructions`.
+#[must_use]
+pub(crate) fn effective_system_prompt(options: &ChatOptions) -> Option<String> {
+    if let Some(blocks) = &options.system_prompt_blocks {
+        let joined = blocks
+            .iter()
+            .map(|b| b.text.as_str())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        if joined.is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    } else {
+        options.system_prompt.clone()
+    }
+}
+
+pub(crate) fn prepend_system_messages(options: &ChatOptions, messages: &mut Vec<ChatMessage>) {
+    if let Some(blocks) = &options.system_prompt_blocks {
+        for block in blocks {
+            if !block.text.is_empty() {
+                messages.push(ChatMessage::text("system", &block.text));
+            }
+        }
+    } else if let Some(sp) = &options.system_prompt {
+        messages.push(ChatMessage::text("system", sp));
+    }
+}
+
 /// Snapshot of the full LLM request payload immediately before an HTTP completion call.
 #[derive(Debug, Clone)]
 pub struct LlmPayloadSnapshot {
@@ -130,7 +199,7 @@ pub(crate) fn notify_llm_payload(
             round,
             request_id: request_id.to_string(),
             model: options.model.clone(),
-            system_prompt: options.system_prompt.clone(),
+            system_prompt: effective_system_prompt(options),
             messages: messages.to_vec(),
         });
     }
@@ -151,6 +220,11 @@ pub struct ChatOptions {
     pub max_tool_rounds: u32,
     /// Prepended as a `"system"` message before all caller messages when set.
     pub system_prompt: Option<String>,
+    /// Structured system sections (stable cached prefix first, dynamic tail after).
+    /// When set, takes precedence over [`Self::system_prompt`] for message prepending.
+    pub system_prompt_blocks: Option<Vec<SystemPromptBlock>>,
+    /// Sticky cache routing key (OpenAI `prompt_cache_key`, xAI Responses).
+    pub prompt_cache_key: Option<String>,
 
     // --- Sampling ---
     pub temperature: Option<f32>,
@@ -242,6 +316,8 @@ impl Default for ChatOptions {
             model: String::new(),
             max_tool_rounds: 0,
             system_prompt: None,
+            system_prompt_blocks: None,
+            prompt_cache_key: None,
             temperature: None,
             top_p: None,
             n: None,
@@ -316,6 +392,8 @@ impl From<proto::ChatOptions> for ChatOptions {
                 p.max_tool_rounds
             },
             system_prompt: p.system_prompt,
+            system_prompt_blocks: None,
+            prompt_cache_key: None,
             temperature: p.temperature,
             top_p: p.top_p,
             n: None,
@@ -1170,11 +1248,9 @@ pub async fn complete_with_tools(
 
     // Prepend system prompt if configured.
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(caller_messages.len() + 1);
-    if let Some(sp) = &options.system_prompt {
-        messages.push(ChatMessage::text("system", sp));
-    }
+    prepend_system_messages(options, &mut messages);
     messages.extend(caller_messages);
-    let had_system_prompt = options.system_prompt.is_some();
+    let had_system_prompt = has_system_prompt(options);
 
     // --- Input guardrails: run on the last user message before first LLM call ---
     if !guardrails.input_is_empty().await {
@@ -1729,9 +1805,7 @@ where
     );
 
     let mut full_messages: Vec<ChatMessage> = Vec::with_capacity(messages.len() + 1);
-    if let Some(sp) = &options.system_prompt {
-        full_messages.push(ChatMessage::text("system", sp));
-    }
+    prepend_system_messages(options, &mut full_messages);
     full_messages.extend(messages);
 
     // --- Input guardrails ---
@@ -2028,11 +2102,9 @@ where
     let credentials = credentials_for(options);
 
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(caller_messages.len() + 1);
-    if let Some(sp) = &options.system_prompt {
-        messages.push(ChatMessage::text("system", sp));
-    }
+    prepend_system_messages(options, &mut messages);
     messages.extend(caller_messages);
-    let had_system_prompt = options.system_prompt.is_some();
+    let had_system_prompt = has_system_prompt(options);
 
     if !guardrails.input_is_empty().await {
         let last_user = messages

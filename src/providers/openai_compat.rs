@@ -38,10 +38,15 @@ impl LlmProvider for OpenAiCompatProvider {
             .key_for(ctx.model_ref.provider)
             .expect("credentials checked before build");
         let auth = format!("Bearer {}", api_key.expose_secret());
-        let headers = vec![
+        let mut headers = vec![
             ("Authorization".to_string(), auth),
             ("Content-Type".to_string(), "application/json".to_string()),
         ];
+        if ctx.model_ref.provider == ProviderId::Xai
+            && let Some(key) = &ctx.options.prompt_cache_key
+        {
+            headers.push(("x-grok-conv-id".to_string(), key.clone()));
+        }
 
         let tools = ctx.chat_tools.map(|t| t.to_vec()).or_else(|| {
             ctx.tools.map(|specs| {
@@ -81,6 +86,11 @@ impl LlmProvider for OpenAiCompatProvider {
             .reasoning_effort
             .as_ref()
             .and_then(|e| normalize_reasoning_effort_str(&ctx.model_ref.model, e));
+
+        if let Some(key) = &options.prompt_cache_key {
+            req.extra
+                .insert("prompt_cache_key".to_string(), serde_json::json!(key));
+        }
 
         let mut body = serde_json::to_value(&req).expect("ChatCompletionRequest serializes");
         if let Some(extra) = &options.extra_json {
@@ -139,5 +149,49 @@ fn merge_extra_json(body: &mut Value, extra: &Value) {
         for (k, v) in extra_map {
             body_map.insert(k.clone(), v.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::{ChatOptions, SystemPromptBlock};
+    use crate::openai::ChatMessage;
+    use crate::providers::credentials::ProviderCredentials;
+    use crate::providers::model_ref::ModelRef;
+
+    #[test]
+    fn xai_chat_request_sets_conv_id_header_and_cache_key() {
+        let mut creds = ProviderCredentials::new();
+        creds.insert_key(ProviderId::Xai, "xai-test");
+        let model_ref = ModelRef {
+            provider: ProviderId::Xai,
+            model: "grok-4.5".into(),
+            raw: "xai:grok-4.5".into(),
+        };
+        let options = ChatOptions {
+            prompt_cache_key: Some("session-abc".into()),
+            system_prompt_blocks: Some(vec![SystemPromptBlock::cached("base")]),
+            ..Default::default()
+        };
+        let ctx = ProviderRequestContext {
+            model_ref: &model_ref,
+            credentials: &creds,
+            messages: &[ChatMessage::text("user", "hi")],
+            tools: None,
+            chat_tools: None,
+            stream: false,
+            options: &options,
+        };
+        let req = OpenAiCompatProvider::new(ProviderId::Xai).build_chat_request(&ctx);
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, v)| k == "x-grok-conv-id" && v == "session-abc")
+        );
+        assert_eq!(
+            req.body.get("prompt_cache_key").and_then(|v| v.as_str()),
+            Some("session-abc")
+        );
     }
 }

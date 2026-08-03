@@ -37,12 +37,7 @@ impl AnthropicStreamAccumulator {
         match event_type {
             "message_start" => {
                 if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
-                    let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                    let output =
-                        u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                    self.usage = Some(crate::usage::usage_from_breakdown(
-                        crate::usage::UsageBreakdown::from_counts(input, output),
-                    ));
+                    self.usage = super::anthropic::usage_from_anthropic_json(u);
                 }
             }
             "content_block_start" => {
@@ -93,12 +88,7 @@ impl AnthropicStreamAccumulator {
                     self.finish_reason = Some(sr.to_string());
                 }
                 if let Some(u) = v.get("usage") {
-                    let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                    let output =
-                        u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                    self.usage = Some(crate::usage::usage_from_breakdown(
-                        crate::usage::UsageBreakdown::from_counts(input, output),
-                    ));
+                    self.usage = super::anthropic::usage_from_anthropic_json(u);
                 }
             }
             _ => {}

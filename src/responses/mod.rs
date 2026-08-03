@@ -12,9 +12,10 @@ use tracing::instrument;
 
 use crate::chat::{
     ChatError, ChatOptions, StreamToolOutcome, condense_tool_round,
-    conversation_messages_for_client, credentials_for, dispatch_one, estimate_context_chars,
-    fail_partial, maybe_summarize_messages, new_tool_loop_guard, notify_llm_payload,
-    observation_hook_ctx, post_json_with_model_fallback, stream_tools,
+    conversation_messages_for_client, credentials_for, dispatch_one, effective_system_prompt,
+    estimate_context_chars, fail_partial, has_system_prompt, maybe_summarize_messages,
+    new_tool_loop_guard, notify_llm_payload, observation_hook_ctx, post_json_with_model_fallback,
+    prepend_system_messages, stream_tools,
 };
 use crate::costing::estimate_model_call_cost_usd;
 use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
@@ -188,6 +189,8 @@ struct ResponseCreateRequest {
     tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ResponseReasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 fn reasoning_from_options(options: &ChatOptions) -> Option<ResponseReasoning> {
@@ -198,6 +201,10 @@ fn reasoning_from_options(options: &ChatOptions) -> Option<ResponseReasoning> {
             effort: effort.clone(),
             summary: options.reasoning_summary.api_value().map(str::to_string),
         })
+}
+
+fn response_cache_key(options: &ChatOptions) -> Option<String> {
+    options.prompt_cache_key.clone()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,10 +233,18 @@ struct ResponseObject {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct ResponseUsageDetails {
+    #[serde(default)]
+    cached_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct ResponseUsage {
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
     total_tokens: Option<u32>,
+    #[serde(default)]
+    input_tokens_details: Option<ResponseUsageDetails>,
 }
 
 fn tools_from_registry(specs: Vec<ToolSpec>) -> Vec<ResponseTool> {
@@ -249,7 +264,27 @@ fn usage_from_response(u: &ResponseUsage) -> proto::Usage {
         prompt_tokens: u.input_tokens.unwrap_or(0),
         completion_tokens: u.output_tokens.unwrap_or(0),
         total_tokens: u.total_tokens.unwrap_or(0),
-        cached_tokens: None,
+        cached_tokens: u
+            .input_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+            .filter(|&n| n > 0),
+        reasoning_tokens: None,
+    }
+}
+
+fn usage_from_response_json(u: &Value) -> proto::Usage {
+    let cached = u
+        .get("input_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|x| x.as_u64())
+        .map(|n| n as u32)
+        .filter(|&n| n > 0);
+    proto::Usage {
+        prompt_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        completion_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        total_tokens: u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32,
+        cached_tokens: cached,
         reasoning_tokens: None,
     }
 }
@@ -487,12 +522,13 @@ pub async fn complete_with_tools(
         let req = ResponseCreateRequest {
             model: options.model.clone(),
             input,
-            instructions: options.system_prompt.clone(),
+            instructions: effective_system_prompt(options),
             tools: tools.clone(),
             stream: None,
             previous_response_id: previous_response_id.clone(),
             tool_choice: options.tool_choice.clone(),
             reasoning: reasoning_from_options(options),
+            prompt_cache_key: response_cache_key(options),
         };
 
         let mut body = serde_json::to_value(&req)?;
@@ -653,12 +689,13 @@ where
     let req = ResponseCreateRequest {
         model: options.model.clone(),
         input: ResponseInput::Text(user_message),
-        instructions: options.system_prompt.clone(),
+        instructions: effective_system_prompt(options),
         tools: None,
         stream: Some(true),
         previous_response_id: None,
         tool_choice: options.tool_choice.clone(),
         reasoning: reasoning_from_options(options),
+        prompt_cache_key: response_cache_key(options),
     };
 
     let body = serde_json::to_value(&req)?;
@@ -729,22 +766,7 @@ where
                 }
                 "response.completed" => {
                     if let Some(u) = v.pointer("/response/usage") {
-                        usage = Some(proto::Usage {
-                            prompt_tokens: u
-                                .get("input_tokens")
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0) as u32,
-                            completion_tokens: u
-                                .get("output_tokens")
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0) as u32,
-                            total_tokens: u
-                                .get("total_tokens")
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0) as u32,
-                            cached_tokens: None,
-                            reasoning_tokens: None,
-                        });
+                        usage = Some(usage_from_response_json(u));
                     }
                     if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
                         response_id = id.to_string();
@@ -1326,16 +1348,7 @@ async fn apply_responses_stream_event(
         }
         "response.completed" => {
             if let Some(u) = v.pointer("/response/usage") {
-                round_state.usage = Some(proto::Usage {
-                    prompt_tokens: u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
-                        as u32,
-                    completion_tokens: u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
-                        as u32,
-                    total_tokens: u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
-                        as u32,
-                    cached_tokens: None,
-                    reasoning_tokens: None,
-                });
+                round_state.usage = Some(usage_from_response_json(u));
             }
             if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
                 round_state.response_id = id.to_string();
@@ -1521,11 +1534,9 @@ where
     let headers = [("Authorization", auth.as_str())];
 
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(caller_messages.len() + 1);
-    if let Some(sp) = &options.system_prompt {
-        messages.push(ChatMessage::text("system", sp));
-    }
+    prepend_system_messages(options, &mut messages);
     messages.extend(caller_messages);
-    let had_system_prompt = options.system_prompt.is_some();
+    let had_system_prompt = has_system_prompt(options);
 
     if !guardrails.input_is_empty().await {
         let last_user = messages
@@ -1663,12 +1674,13 @@ where
         let req = ResponseCreateRequest {
             model: options.model.clone(),
             input,
-            instructions: options.system_prompt.clone(),
+            instructions: effective_system_prompt(options),
             tools: tools.clone(),
             stream: Some(true),
             previous_response_id: previous_response_id.clone(),
             tool_choice: options.tool_choice.clone(),
             reasoning: reasoning_from_options(options),
+            prompt_cache_key: response_cache_key(options),
         };
 
         let mut body = serde_json::to_value(&req).map_err(|e| {
@@ -2534,5 +2546,17 @@ mod tests {
             chained.as_slice(),
             [ResponseInputItem::FunctionCallOutput { call_id, .. }] if call_id == "call_1"
         ));
+    }
+
+    #[test]
+    fn usage_from_response_json_reads_cached_tokens() {
+        let usage = usage_from_response_json(&json!({
+            "input_tokens": 120,
+            "output_tokens": 10,
+            "total_tokens": 130,
+            "input_tokens_details": { "cached_tokens": 90 }
+        }));
+        assert_eq!(usage.prompt_tokens, 120);
+        assert_eq!(usage.cached_tokens, Some(90));
     }
 }

@@ -4,10 +4,12 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::chat::SystemPromptBlock;
 use crate::http::join_base_url;
 use crate::openai::{
     ChatMessage, ContentPart, FileContent, FunctionCall, MessageContent, ToolCall,
 };
+use crate::tools::ToolSpec;
 
 use super::adapter::{
     LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest, ProviderRequestContext,
@@ -16,6 +18,7 @@ use super::adapter::{
 use super::provider_id::ProviderId;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const CACHE_CONTROL_EPHEMERAL: &str = "ephemeral";
 
 #[derive(Debug, Clone, Copy)]
 pub struct AnthropicProvider;
@@ -48,8 +51,9 @@ impl LlmProvider for AnthropicProvider {
             ("Content-Type".to_string(), "application/json".to_string()),
         ];
 
-        let (system, messages) = map_messages(ctx.messages);
+        let (legacy_system, messages) = map_messages(ctx.messages);
         let max_tokens = ctx.options.max_completion_tokens.unwrap_or(4096);
+        let cache_tools = should_cache_tools(ctx);
 
         let mut body = json!({
             "model": ctx.model_ref.model,
@@ -57,25 +61,12 @@ impl LlmProvider for AnthropicProvider {
             "messages": messages,
         });
 
-        if let Some(sys) = system {
-            body["system"] = Value::String(sys);
-        } else if let Some(sp) = &ctx.options.system_prompt {
-            body["system"] = Value::String(sp.clone());
+        if let Some(system) = build_system_payload(ctx, legacy_system.as_deref()) {
+            body["system"] = system;
         }
 
         if let Some(specs) = ctx.tools {
-            let tools: Vec<Value> = specs
-                .iter()
-                .map(|s| {
-                    let schema = s.parameters_schema.clone();
-                    json!({
-                        "name": s.name,
-                        "description": s.description,
-                        "input_schema": schema,
-                    })
-                })
-                .collect();
-            body["tools"] = json!(tools);
+            body["tools"] = json!(build_tools(specs, cache_tools));
         }
 
         if ctx.stream {
@@ -128,12 +119,7 @@ impl LlmProvider for AnthropicProvider {
         } else {
             Some(text_parts.join(""))
         };
-        let usage = resp.usage.map(|u| {
-            crate::usage::usage_from_breakdown(crate::usage::UsageBreakdown::from_counts(
-                u.input_tokens,
-                u.output_tokens,
-            ))
-        });
+        let usage = resp.usage.map(usage_from_anthropic);
         let finish_reason = if resp.stop_reason == "tool_use" {
             Some("tool_calls".to_string())
         } else {
@@ -178,6 +164,109 @@ enum AnthropicContentBlock {
 struct AnthropicUsage {
     input_tokens: u32,
     output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u32>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u32>,
+}
+
+fn usage_from_anthropic(u: AnthropicUsage) -> crate::proto::Usage {
+    let _cache_creation = u.cache_creation_input_tokens;
+    crate::usage::usage_from_breakdown(crate::usage::UsageBreakdown {
+        prompt_tokens: u.input_tokens,
+        completion_tokens: u.output_tokens,
+        total_tokens: None,
+        cached_tokens: u.cache_read_input_tokens.filter(|&n| n > 0),
+        reasoning_tokens: None,
+    })
+}
+
+pub(crate) fn usage_from_anthropic_json(u: &Value) -> Option<crate::proto::Usage> {
+    let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let output = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let cached = u
+        .get("cache_read_input_tokens")
+        .and_then(|x| x.as_u64())
+        .map(|n| n as u32)
+        .filter(|&n| n > 0);
+    Some(crate::usage::usage_from_breakdown(
+        crate::usage::UsageBreakdown {
+            prompt_tokens: input,
+            completion_tokens: output,
+            total_tokens: None,
+            cached_tokens: cached,
+            reasoning_tokens: None,
+        },
+    ))
+}
+
+fn should_cache_tools(ctx: &ProviderRequestContext<'_>) -> bool {
+    ctx.tools.is_some_and(|specs| !specs.is_empty())
+        && (ctx
+            .options
+            .system_prompt_blocks
+            .as_ref()
+            .is_some_and(|blocks| blocks.iter().any(|b| b.cache))
+            || ctx.options.system_prompt.is_some())
+}
+
+fn build_system_payload(
+    ctx: &ProviderRequestContext<'_>,
+    legacy_system: Option<&str>,
+) -> Option<Value> {
+    if let Some(blocks) = &ctx.options.system_prompt_blocks {
+        let payload = system_blocks_to_json(blocks);
+        if payload.is_empty() {
+            None
+        } else {
+            Some(Value::Array(payload))
+        }
+    } else if let Some(sys) = legacy_system.filter(|s| !s.is_empty()) {
+        Some(Value::String(sys.to_string()))
+    } else if let Some(sp) = ctx.options.system_prompt.as_deref().filter(|s| !s.is_empty()) {
+        Some(Value::String(sp.to_string()))
+    } else {
+        None
+    }
+}
+
+fn system_blocks_to_json(blocks: &[SystemPromptBlock]) -> Vec<Value> {
+    blocks
+        .iter()
+        .filter(|b| !b.text.is_empty())
+        .map(|block| {
+            let mut value = json!({
+                "type": "text",
+                "text": block.text,
+            });
+            if block.cache {
+                value["cache_control"] = json!({"type": CACHE_CONTROL_EPHEMERAL});
+            }
+            value
+        })
+        .collect()
+}
+
+fn build_tools(specs: &[ToolSpec], cache_last: bool) -> Vec<Value> {
+    let mut sorted: Vec<&ToolSpec> = specs.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    let last = sorted.len().saturating_sub(1);
+    sorted
+        .into_iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            let schema = s.parameters_schema.clone();
+            let mut tool = json!({
+                "name": s.name,
+                "description": s.description,
+                "input_schema": schema,
+            });
+            if cache_last && idx == last {
+                tool["cache_control"] = json!({"type": CACHE_CONTROL_EPHEMERAL});
+            }
+            tool
+        })
+        .collect()
 }
 
 fn map_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
@@ -340,6 +429,10 @@ fn anthropic_supports_sampling_params(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::ChatOptions;
+    use crate::providers::credentials::ProviderCredentials;
+    use crate::providers::model_ref::ModelRef;
+    use crate::openai::ChatMessage;
 
     #[test]
     fn sonnet_5_rejects_sampling_params() {
@@ -355,5 +448,85 @@ mod tests {
         assert!(anthropic_supports_sampling_params(
             "claude-3-5-sonnet-20241022"
         ));
+    }
+
+    #[test]
+    fn system_blocks_emit_cache_control() {
+        let blocks = vec![
+            SystemPromptBlock::cached("stable base"),
+            SystemPromptBlock::uncached("dynamic tail"),
+        ];
+        let payload = system_blocks_to_json(&blocks);
+        assert_eq!(payload.len(), 2);
+        assert_eq!(
+            payload[0]["cache_control"]["type"].as_str(),
+            Some(CACHE_CONTROL_EPHEMERAL)
+        );
+        assert!(payload[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn build_request_marks_last_tool_cacheable() {
+        let mut creds = ProviderCredentials::new();
+        creds.insert_key(ProviderId::Anthropic, "sk-ant-test");
+        let model_ref = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-sonnet-4-20250514".into(),
+            raw: "anthropic:claude-sonnet-4-20250514".into(),
+        };
+        let options = ChatOptions {
+            system_prompt_blocks: Some(vec![SystemPromptBlock::cached("base")]),
+            ..Default::default()
+        };
+        let specs = vec![
+            ToolSpec {
+                name: "zebra".into(),
+                description: None,
+                parameters_schema: json!({"type": "object"}),
+                static_tool: false,
+            },
+            ToolSpec {
+                name: "alpha".into(),
+                description: None,
+                parameters_schema: json!({"type": "object"}),
+                static_tool: false,
+            },
+        ];
+        let ctx = ProviderRequestContext {
+            model_ref: &model_ref,
+            credentials: &creds,
+            messages: &[ChatMessage::text("user", "hi")],
+            tools: Some(&specs),
+            chat_tools: None,
+            stream: false,
+            options: &options,
+        };
+        let req = AnthropicProvider::new().build_chat_request(&ctx);
+        let tools = req.body["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"].as_str(), Some("alpha"));
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(
+            tools[1]["cache_control"]["type"].as_str(),
+            Some(CACHE_CONTROL_EPHEMERAL)
+        );
+        let system = req.body["system"].as_array().expect("system blocks");
+        assert_eq!(system.len(), 1);
+        assert_eq!(
+            system[0]["cache_control"]["type"].as_str(),
+            Some(CACHE_CONTROL_EPHEMERAL)
+        );
+    }
+
+    #[test]
+    fn anthropic_usage_maps_cache_reads() {
+        let usage = usage_from_anthropic(AnthropicUsage {
+            input_tokens: 100,
+            output_tokens: 10,
+            cache_creation_input_tokens: Some(80),
+            cache_read_input_tokens: Some(60),
+        });
+        assert_eq!(usage.cached_tokens, Some(60));
+        assert_eq!(usage.prompt_tokens, 100);
     }
 }

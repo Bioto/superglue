@@ -72,6 +72,9 @@ fn anthropic_opts(server_uri: &str) -> ChatOptions {
         model: "anthropic:claude-sonnet-4-20250514".into(),
         max_tool_rounds: 4,
         provider_credentials: Some(std::sync::Arc::new(creds)),
+        system_prompt_blocks: Some(vec![superglue::chat::SystemPromptBlock::cached(
+            "stable system",
+        )]),
         ..Default::default()
     }
 }
@@ -99,6 +102,54 @@ async fn anthropic_text_completion() {
 
     assert_eq!(out.content.as_deref(), Some("hello anthropic"));
     assert_eq!(out.rounds, 1);
+}
+
+#[tokio::test]
+async fn anthropic_request_includes_prompt_cache_markers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(|req: &wiremock::Request| {
+            let body: serde_json::Value =
+                serde_json::from_slice(&req.body).unwrap_or(json!({}));
+            let system = body
+                .get("system")
+                .and_then(|s| s.as_array())
+                .expect("system blocks");
+            assert_eq!(
+                system[0]["cache_control"]["type"].as_str(),
+                Some("ephemeral")
+            );
+            ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_cache",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "cached ok"}],
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 5,
+                    "cache_read_input_tokens": 80
+                }
+            }))
+        })
+        .mount(&server)
+        .await;
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    let out = complete_with_tools(
+        &http,
+        &ToolRegistry::new(),
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        vec![ChatMessage::text("user", "hi")],
+        &anthropic_opts(&server.uri()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.content.as_deref(), Some("cached ok"));
+    assert_eq!(out.usage.as_ref().and_then(|u| u.cached_tokens), Some(80));
 }
 
 #[tokio::test]
