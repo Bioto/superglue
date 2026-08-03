@@ -128,10 +128,11 @@ impl LlmProvider for AnthropicProvider {
         } else {
             Some(text_parts.join(""))
         };
-        let usage = resp.usage.map(|u| crate::proto::Usage {
-            prompt_tokens: u.input_tokens,
-            completion_tokens: u.output_tokens,
-            total_tokens: u.input_tokens + u.output_tokens,
+        let usage = resp.usage.map(|u| {
+            crate::usage::usage_from_breakdown(crate::usage::UsageBreakdown::from_counts(
+                u.input_tokens,
+                u.output_tokens,
+            ))
         });
         let finish_reason = if resp.stop_reason == "tool_use" {
             Some("tool_calls".to_string())

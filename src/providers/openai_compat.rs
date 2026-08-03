@@ -115,11 +115,11 @@ impl LlmProvider for OpenAiCompatProvider {
             .as_ref()
             .and_then(|c| c.as_text().map(str::to_string));
         let tool_calls = msg.tool_calls.clone().unwrap_or_default();
-        let usage = response.usage.as_ref().map(|u| crate::proto::Usage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        });
+        let usage = response
+            .usage
+            .as_ref()
+            .map(crate::usage::breakdown_from_compat_usage)
+            .map(crate::usage::usage_from_breakdown);
         Ok(NormalizedCompletion {
             content,
             tool_calls,

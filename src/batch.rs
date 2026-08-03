@@ -498,6 +498,8 @@ fn aggregate_usage<'a>(iter: impl Iterator<Item = &'a proto::Usage>) -> Option<p
             prompt_tokens: prompt,
             completion_tokens: completion,
             total_tokens: total,
+            cached_tokens: None,
+            reasoning_tokens: None,
         })
     } else {
         None

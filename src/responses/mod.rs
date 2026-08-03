@@ -13,8 +13,8 @@ use tracing::instrument;
 use crate::chat::{
     ChatError, ChatOptions, StreamToolOutcome, condense_tool_round,
     conversation_messages_for_client, credentials_for, dispatch_one, estimate_context_chars,
-    maybe_summarize_messages, new_tool_loop_guard, observation_hook_ctx,
-    post_json_with_model_fallback, stream_tools,
+    fail_partial, maybe_summarize_messages, new_tool_loop_guard, notify_llm_payload,
+    observation_hook_ctx, post_json_with_model_fallback, stream_tools,
 };
 use crate::costing::estimate_model_call_cost_usd;
 use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
@@ -74,6 +74,23 @@ impl From<crate::hooks::HookError> for ResponseError {
     fn from(e: crate::hooks::HookError) -> Self {
         ResponseError::Chat(ChatError::Hook(e))
     }
+}
+
+fn fail_response_partial(
+    cause: ResponseError,
+    messages: &[ChatMessage],
+    had_system_prompt: bool,
+) -> ResponseError {
+    let chat = match cause {
+        ResponseError::Chat(c) => c,
+        ResponseError::Http(h) => ChatError::Http(h),
+        ResponseError::Serde(s) => ChatError::Serde(s),
+        ResponseError::NoOutput => ChatError::NoChoice,
+        ResponseError::MaxToolRounds(n) => ChatError::MaxToolRounds(n),
+        ResponseError::Cancelled => ChatError::Cancelled,
+        ResponseError::StreamFailed(msg) => ChatError::Api(msg),
+    };
+    ResponseError::Chat(fail_partial(chat, messages, had_system_prompt))
 }
 
 /// Completed Responses API turn.
@@ -232,6 +249,8 @@ fn usage_from_response(u: &ResponseUsage) -> proto::Usage {
         prompt_tokens: u.input_tokens.unwrap_or(0),
         completion_tokens: u.output_tokens.unwrap_or(0),
         total_tokens: u.total_tokens.unwrap_or(0),
+        cached_tokens: None,
+        reasoning_tokens: None,
     }
 }
 
@@ -451,6 +470,13 @@ pub async fn complete_with_tools(
             ev
         })
         .await;
+
+        notify_llm_payload(
+            options,
+            api_calls,
+            &request_id,
+            &[ChatMessage::text("user", user_message.clone())],
+        );
 
         let input = if let Some(items) = &tool_input {
             ResponseInput::Items(items.clone())
@@ -716,6 +742,8 @@ where
                                 .get("total_tokens")
                                 .and_then(|x| x.as_u64())
                                 .unwrap_or(0) as u32,
+                            cached_tokens: None,
+                            reasoning_tokens: None,
                         });
                     }
                     if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
@@ -1305,6 +1333,8 @@ async fn apply_responses_stream_event(
                         as u32,
                     total_tokens: u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
                         as u32,
+                    cached_tokens: None,
+                    reasoning_tokens: None,
                 });
             }
             if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
@@ -1517,9 +1547,15 @@ where
                 }
             }
             GuardrailOutcome::Block(reason) => {
-                return Err(ResponseError::Chat(ChatError::Guardrail(
-                    GuardrailError::new(GuardrailStage::Input, guard_name, reason),
-                )));
+                return Err(fail_response_partial(
+                    ResponseError::Chat(ChatError::Guardrail(GuardrailError::new(
+                        GuardrailStage::Input,
+                        guard_name,
+                        reason,
+                    ))),
+                    &messages,
+                    had_system_prompt,
+                ));
             }
         }
     }
@@ -1539,7 +1575,11 @@ where
 
     let outcome = loop {
         if api_calls >= options.max_tool_rounds {
-            return Err(ResponseError::MaxToolRounds(options.max_tool_rounds));
+            return Err(fail_response_partial(
+                ResponseError::MaxToolRounds(options.max_tool_rounds),
+                &messages,
+                had_system_prompt,
+            ));
         }
         api_calls += 1;
         if let Some(logger) = &options.context_event_logger {
@@ -1570,7 +1610,14 @@ where
                     &options.model,
                 ),
             )
-            .await?;
+            .await
+            .map_err(|e| {
+                fail_response_partial(
+                    ResponseError::Chat(ChatError::Hook(e)),
+                    &messages,
+                    had_system_prompt,
+                )
+            })?;
 
         let messages_json_before = serde_json::to_vec(&messages).ok();
         maybe_summarize_messages(
@@ -1585,7 +1632,7 @@ where
             &request_id,
         )
         .await
-        .map_err(ResponseError::from)?;
+        .map_err(|e| fail_response_partial(ResponseError::from(e), &messages, had_system_prompt))?;
         if serde_json::to_vec(&messages).ok() != messages_json_before {
             reset_chain_after_context_mutation(&mut previous_response_id, &mut tool_input);
         }
@@ -1597,6 +1644,8 @@ where
             ev
         })
         .await;
+
+        notify_llm_payload(options, api_calls, &request_id, &messages);
 
         if tool_input.is_some()
             && !previous_response_id
@@ -1622,7 +1671,9 @@ where
             reasoning: reasoning_from_options(options),
         };
 
-        let mut body = serde_json::to_value(&req)?;
+        let mut body = serde_json::to_value(&req).map_err(|e| {
+            fail_response_partial(ResponseError::Serde(e), &messages, had_system_prompt)
+        })?;
         if let Some(extra) = &options.extra_json {
             if let (Value::Object(b), Value::Object(e)) = (&mut body, extra) {
                 for (k, v) in e {
@@ -1642,7 +1693,8 @@ where
             &mut on_delta,
             &mut on_reasoning_delta,
         )
-        .await?;
+        .await
+        .map_err(|e| fail_response_partial(e, &messages, had_system_prompt))?;
         let model_used = round_model;
         previous_response_id = if round_state.response_id.is_empty() {
             None
@@ -1713,7 +1765,9 @@ where
 
             let mut outputs = Vec::new();
             for (r, tc) in results.into_iter().zip(tool_calls.iter()) {
-                let msg = r?;
+                let msg = r.map_err(|e| {
+                    fail_response_partial(ResponseError::from(e), &messages, had_system_prompt)
+                })?;
                 messages.push(msg.clone());
                 let out_text = msg
                     .content
@@ -1779,9 +1833,15 @@ where
                     }
                 }
                 GuardrailOutcome::Block(reason) => {
-                    return Err(ResponseError::Chat(ChatError::Guardrail(
-                        GuardrailError::new(GuardrailStage::Output, guard_name, reason),
-                    )));
+                    return Err(fail_response_partial(
+                        ResponseError::Chat(ChatError::Guardrail(GuardrailError::new(
+                            GuardrailStage::Output,
+                            guard_name,
+                            reason,
+                        ))),
+                        &messages,
+                        had_system_prompt,
+                    ));
                 }
             }
         }

@@ -40,11 +40,9 @@ impl AnthropicStreamAccumulator {
                     let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                     let output =
                         u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                    self.usage = Some(proto::Usage {
-                        prompt_tokens: input,
-                        completion_tokens: output,
-                        total_tokens: input + output,
-                    });
+                    self.usage = Some(crate::usage::usage_from_breakdown(
+                        crate::usage::UsageBreakdown::from_counts(input, output),
+                    ));
                 }
             }
             "content_block_start" => {
@@ -98,11 +96,9 @@ impl AnthropicStreamAccumulator {
                     let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
                     let output =
                         u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-                    self.usage = Some(proto::Usage {
-                        prompt_tokens: input,
-                        completion_tokens: output,
-                        total_tokens: input + output,
-                    });
+                    self.usage = Some(crate::usage::usage_from_breakdown(
+                        crate::usage::UsageBreakdown::from_counts(input, output),
+                    ));
                 }
             }
             _ => {}

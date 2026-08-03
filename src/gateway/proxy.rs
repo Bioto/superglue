@@ -79,12 +79,8 @@ fn tool_specs_from_request(req: &ChatCompletionRequest) -> Option<Vec<ToolSpec>>
     })
 }
 
-fn usage_from_openai(usage: &crate::openai::Usage) -> proto::Usage {
-    proto::Usage {
-        prompt_tokens: usage.prompt_tokens,
-        completion_tokens: usage.completion_tokens,
-        total_tokens: usage.total_tokens,
-    }
+fn usage_from_compat(usage: &crate::openai::Usage) -> proto::Usage {
+    crate::usage::usage_from_breakdown(crate::usage::breakdown_from_compat_usage(usage))
 }
 
 fn chat_error_to_gateway(err: ChatError) -> GatewayError {
@@ -151,7 +147,7 @@ pub async fn proxy_completion(
         serde_json::from_value(val.clone()).map_err(|e| GatewayError::upstream(e.to_string()))?;
 
     if let Some(usage) = &response.usage {
-        let proto_usage = usage_from_openai(usage);
+        let proto_usage = usage_from_compat(usage);
         let cost = estimate_model_call_cost_usd(&body.completion.model, &proto_usage);
         db.record_usage(
             auth.key_id.as_deref(),
@@ -227,11 +223,9 @@ pub async fn proxy_completion_stream(
                                 serde_json::from_str::<ChatCompletionChunk>(data)
                                 && let Some(u) = chunk.usage
                             {
-                                round_usage = Some(proto::Usage {
-                                    prompt_tokens: u.prompt_tokens,
-                                    completion_tokens: u.completion_tokens,
-                                    total_tokens: u.total_tokens,
-                                });
+                                round_usage = Some(crate::usage::usage_from_breakdown(
+                                    crate::usage::breakdown_from_compat_usage(&u),
+                                ));
                             }
                         }
                     }

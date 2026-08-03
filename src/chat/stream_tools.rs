@@ -178,11 +178,9 @@ pub fn apply_openai_chunk(
     usage: &mut Option<crate::proto::Usage>,
 ) -> Vec<ToolCall> {
     if let Some(u) = &chunk.usage {
-        *usage = Some(crate::proto::Usage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-            total_tokens: u.total_tokens,
-        });
+        *usage = Some(crate::usage::usage_from_breakdown(
+            crate::usage::breakdown_from_compat_usage(u),
+        ));
     }
     let mut ready = Vec::new();
     for choice in &chunk.choices {

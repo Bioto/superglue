@@ -117,6 +117,8 @@ message Usage {
   uint32 prompt_tokens = 1;
   uint32 completion_tokens = 2;
   uint32 total_tokens = 3;
+  optional uint32 cached_tokens = 4;
+  optional uint32 reasoning_tokens = 5;
 }
 
 message CompletionOutcome {

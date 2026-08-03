@@ -77,6 +77,8 @@ mod tests {
             prompt_tokens: 1_000_000,
             completion_tokens: 0,
             total_tokens: 1_000_000,
+            cached_tokens: None,
+            reasoning_tokens: None,
         };
         let cost = estimate_model_call_cost_usd("gpt-5.4-nano-2026-03-17-mini", &usage);
         assert!((cost - 0.15).abs() < 1e-9);
@@ -88,6 +90,8 @@ mod tests {
             prompt_tokens: 100,
             completion_tokens: 100,
             total_tokens: 200,
+            cached_tokens: None,
+            reasoning_tokens: None,
         };
         assert_eq!(estimate_model_call_cost_usd("unknown-model", &usage), 0.0);
     }

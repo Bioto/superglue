@@ -4,13 +4,6 @@
 //! a recorder. The Prometheus exporter is available when the `prometheus` feature
 //! is enabled; otherwise a no-op recorder is installed so the metric macros compile
 //! and run without panicking.
-//!
-//! Emit metrics at the call sites with the standard `metrics` macros:
-//!
-//! ```rust,no_run
-//! metrics::counter!("superglue.completions.total").increment(1);
-//! metrics::histogram!("superglue.completion.duration_ms").record(42.0);
-//! ```
 
 // ---------------------------------------------------------------------------
 // Metric name constants (stable API surface for operators)
@@ -39,10 +32,22 @@ pub const HTTP_RETRIES_TOTAL: &str = "superglue.http.retries.total";
 // Recorder initialisation
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "prometheus")]
+pub use metrics_exporter_prometheus::PrometheusHandle;
+
+/// Install a Prometheus recorder and return a handle for on-demand rendering.
+///
+/// Embedders (e.g. harn) can expose `GET /metrics` on their own HTTP server using
+/// [`PrometheusHandle::render`] instead of the standalone listener from [`init_metrics`].
+#[cfg(feature = "prometheus")]
+pub fn install_recorder() -> Result<PrometheusHandle, metrics_exporter_prometheus::BuildError> {
+    metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()
+}
+
 /// Install a metrics recorder.
 ///
-/// - With the `prometheus` feature: installs a `PrometheusBuilder` recorder that
-///   serves metrics on `0.0.0.0:9090/metrics` by default.
+/// - With the `prometheus` feature: installs a standalone scrape endpoint on
+///   `0.0.0.0:9090/metrics` (see [`install_recorder`] for embedder-owned routes).
 /// - Without: installs a no-op recorder so metric macros are harmless.
 ///
 /// Call once at startup, before any metric macros run.
@@ -63,6 +68,21 @@ pub fn init_metrics() {
         // Install a no-op recorder so `metrics::counter!` etc. don't panic.
         let _ = metrics::set_global_recorder(NoopRecorder);
     }
+}
+
+/// Install a no-op or Prometheus recorder without starting a standalone HTTP listener.
+///
+/// Returns a [`PrometheusHandle`] when the `prometheus` feature is enabled so the
+/// embedder can serve metrics from its own HTTP server.
+#[cfg(feature = "prometheus")]
+pub fn init_embedded_metrics() -> Option<PrometheusHandle> {
+    install_recorder().ok()
+}
+
+#[cfg(not(feature = "prometheus"))]
+pub fn init_embedded_metrics() -> Option<()> {
+    let _ = metrics::set_global_recorder(NoopRecorder);
+    None
 }
 
 // ---------------------------------------------------------------------------
