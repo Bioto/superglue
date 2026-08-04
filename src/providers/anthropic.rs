@@ -16,6 +16,7 @@ use super::adapter::{
     ProviderRequestContext, ProviderResponsesContext, rate_limit_key_for,
 };
 use super::provider_id::ProviderId;
+use super::model_ref::wire_model_id;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const CACHE_CONTROL_EPHEMERAL: &str = "ephemeral";
@@ -54,9 +55,10 @@ impl LlmProvider for AnthropicProvider {
         let (legacy_system, messages) = map_messages(ctx.messages);
         let max_tokens = ctx.options.max_completion_tokens.unwrap_or(4096);
         let cache_tools = should_cache_tools(ctx);
+        let wire_model = wire_model_id(ctx.model_ref, &base_url, ProviderId::Anthropic);
 
         let mut body = json!({
-            "model": ctx.model_ref.model,
+            "model": wire_model,
             "max_tokens": max_tokens,
             "messages": messages,
         });

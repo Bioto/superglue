@@ -74,6 +74,11 @@ mod tests {
     }
 
     #[test]
+    fn bare_model_not_allowed() {
+        assert!(!is_allowed("gpt-4o-mini", &["openai:*".into()]));
+    }
+
+    #[test]
     fn star_matches_all() {
         assert!(is_allowed("anything", &["*".into()]));
     }

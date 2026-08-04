@@ -431,6 +431,11 @@ pub fn preflight(
     model: &str,
 ) -> GatewayResult<()> {
     if !auth.is_master {
+        if !model.contains(':') {
+            return Err(GatewayError::forbidden(format!(
+                "model must use provider:model format (e.g. openai:gpt-4o-mini); got {model}"
+            )));
+        }
         let patterns = auth.allowed_models.as_deref().unwrap_or(&[]);
         if !model_access::is_allowed(model, patterns) {
             return Err(GatewayError::forbidden(format!(

@@ -1,3 +1,5 @@
 gateway.myharn.sh {
+	# Origin TLS for Cloudflare Full. Public certs are at the Cloudflare edge.
+	tls internal
 	reverse_proxy 127.0.0.1:8080
 }

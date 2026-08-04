@@ -19,6 +19,7 @@ use super::adapter::{
     ProviderRequestContext, ProviderResponsesContext, rate_limit_key_for,
 };
 use super::provider_id::ProviderId;
+use super::model_ref::wire_model_id;
 
 #[derive(Debug, Clone, Copy)]
 pub struct OpenAiCompatProvider {
@@ -85,8 +86,10 @@ impl LlmProvider for OpenAiCompatProvider {
             extra.insert("prompt_cache_key".to_string(), json!(key));
         }
 
+        let wire_model = wire_model_id(ctx.model_ref, &base_url, ctx.model_ref.provider);
+
         let req_ref = ChatCompletionRequestRef {
-            model: &ctx.model_ref.model,
+            model: &wire_model,
             messages: ctx.messages,
             tools: tools_ref,
             tool_choice: options.tool_choice.as_ref(),
@@ -178,7 +181,8 @@ impl LlmProvider for OpenAiCompatProvider {
 
         let mut body = ctx.body.clone();
         if let Some(obj) = body.as_object_mut() {
-            obj.insert("model".to_string(), json!(ctx.model_ref.model));
+            let wire_model = wire_model_id(ctx.model_ref, &base_url, ctx.model_ref.provider);
+            obj.insert("model".to_string(), json!(wire_model));
             if ctx.stream {
                 obj.insert("stream".to_string(), json!(true));
             }

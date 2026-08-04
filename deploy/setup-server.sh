@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Configure Superglue gateway + Caddy on a remote Ubuntu host.
+# Public TLS is terminated at Cloudflare (proxied). Caddy uses an internal
+# cert for origin HTTPS — set Cloudflare SSL/TLS mode to Full (not Flexible).
 # Usage: ./setup-server.sh [user@host] [--local-binary /path/to/superglue]
 set -euo pipefail
 
@@ -7,14 +9,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUPERGLUE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MONOREPO_ROOT="$(cd "${SUPERGLUE_DIR}/../.." && pwd)"
 
-REMOTE="${1:-}"
+REMOTE=""
 LOCAL_BINARY=""
-shift || true
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --local-binary)
       LOCAL_BINARY="$2"
       shift 2
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      echo "usage: $0 [user@host] [--local-binary /path/to/superglue]" >&2
+      exit 1
       ;;
     *)
       REMOTE="$1"
@@ -32,7 +38,7 @@ if [[ -z "${REMOTE}" ]]; then
     REMOTE="${SUPERGLUE_EC2_USER:-ubuntu}@${SUPERGLUE_EC2_PUBLIC_IP}"
     DOMAIN="${SUPERGLUE_GATEWAY_DOMAIN:-${DOMAIN}}"
   else
-    echo "usage: $0 user@host [--local-binary /path/to/superglue]" >&2
+    echo "usage: $0 [user@host] [--local-binary /path/to/superglue]" >&2
     exit 1
   fi
 fi
@@ -40,12 +46,14 @@ fi
 REMOTE_USER="${REMOTE%%@*}"
 REMOTE_HOST="${REMOTE#*@}"
 
-echo "Setting up Superglue gateway on ${REMOTE} (domain ${DOMAIN})..."
+echo "Setting up Superglue gateway on ${REMOTE} (domain ${DOMAIN}, Cloudflare origin)..."
 
 MASTER_KEY="${GATEWAY_MASTER_KEY:-}"
 if [[ -z "${MASTER_KEY}" ]]; then
   MASTER_KEY="$(openssl rand -base64 32 | tr -d '/+=' | head -c 40)"
   echo "Generated GATEWAY_MASTER_KEY (saved to remote env + local state)"
+else
+  echo "Using existing GATEWAY_MASTER_KEY from environment"
 fi
 
 # Collect provider keys from local env / monorepo .env files (never print)
@@ -92,20 +100,13 @@ resolve_a() {
   fi
 }
 
-echo "Waiting for DNS ${DOMAIN} -> ${REMOTE_HOST} (needed for Let's Encrypt)..."
-for i in $(seq 1 60); do
-  RESOLVED="$(resolve_a "${DOMAIN}")"
-  if [[ "${RESOLVED}" == "${REMOTE_HOST}" ]]; then
-    echo "DNS OK: ${DOMAIN} -> ${RESOLVED}"
-    break
-  fi
-  if [[ "${i}" -eq 60 ]]; then
-    echo "warning: ${DOMAIN} resolves to '${RESOLVED:-none}', expected ${REMOTE_HOST}" >&2
-    echo "Caddy may fail to obtain a certificate until DNS propagates." >&2
-  else
-    sleep 5
-  fi
-done
+# Cloudflare proxy: public A records are Cloudflare IPs, not the EIP.
+RESOLVED="$(resolve_a "${DOMAIN}")"
+if [[ -z "${RESOLVED}" ]]; then
+  echo "warning: ${DOMAIN} does not resolve yet; ensure Cloudflare has a proxied A record -> ${REMOTE_HOST}" >&2
+else
+  echo "DNS OK: ${DOMAIN} -> ${RESOLVED} (Cloudflare edge; origin ${REMOTE_HOST})"
+fi
 
 echo "Installing system packages on remote..."
 ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${REMOTE}" bash -s <<REMOTE_DEPS
@@ -150,11 +151,12 @@ scp -q "${LOCAL_ENV_TMP}" "${REMOTE}:${ENV_DIR}/server.env"
 rm -f "${LOCAL_ENV_TMP}"
 ssh "${REMOTE}" "chmod 600 ${ENV_DIR}/server.env"
 
-# Caddyfile with domain substitution
+# Caddyfile: internal TLS for Cloudflare Full (edge terminates public HTTPS)
 ssh "${REMOTE}" bash -s <<REMOTE_CADDY
 set -euo pipefail
 sudo tee /etc/caddy/Caddyfile >/dev/null <<'EOF'
 ${DOMAIN} {
+	tls internal
 	reverse_proxy 127.0.0.1:8080
 }
 EOF
@@ -214,7 +216,8 @@ echo "  Local health: OK (http://127.0.0.1:8080/health)"
 if [[ "${HTTPS_OK}" -eq 1 ]]; then
   echo "  Public URL:   https://${DOMAIN}/health OK"
 else
-  echo "  Public URL:   https://${DOMAIN}/health not ready yet (check DNS + caddy logs)"
+  echo "  Public URL:   https://${DOMAIN}/health not ready yet"
+  echo "  Check:        Cloudflare proxied A -> ${REMOTE_HOST}, SSL/TLS mode Full"
   echo "  Debug:        ssh ${REMOTE} 'sudo journalctl -u caddy -n 40 --no-pager'"
 fi
 echo "  Operator env: ${LOCAL_ENV}"

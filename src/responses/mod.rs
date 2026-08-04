@@ -513,7 +513,9 @@ async fn provider_responses_post(
         };
         let req = provider.build_responses_request(&ctx);
         let mut shaped_body = req.body;
-        crate::fallback::set_body_model(&mut shaped_body, &model_ref.model);
+        let base_url = credentials.base_url_for(model_ref.provider);
+        let wire_model = crate::providers::wire_model_id(&model_ref, &base_url, model_ref.provider);
+        crate::fallback::set_body_model(&mut shaped_body, &wire_model);
         shape_responses_body(&mut shaped_body, provider.as_ref());
 
         let header_refs: Vec<(&str, &str)> = req
@@ -1627,7 +1629,9 @@ where
         };
         let req = provider.build_responses_request(&ctx);
         let mut shaped_body = req.body;
-        crate::fallback::set_body_model(&mut shaped_body, &model_ref.model);
+        let base_url = credentials.base_url_for(model_ref.provider);
+        let wire_model = crate::providers::wire_model_id(&model_ref, &base_url, model_ref.provider);
+        crate::fallback::set_body_model(&mut shaped_body, &wire_model);
         shape_responses_body(&mut shaped_body, provider.as_ref());
         let header_refs: Vec<(&str, &str)> = req
             .headers

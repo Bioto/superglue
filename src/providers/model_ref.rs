@@ -51,6 +51,19 @@ pub fn parse_model_ref(s: &str) -> ModelRef {
     }
 }
 
+/// Model string for the HTTP request body.
+///
+/// Gateway/proxy base URLs receive `provider:model` (`raw`) when present; direct
+/// provider APIs receive the bare model id.
+#[must_use]
+pub fn wire_model_id(model_ref: &ModelRef, base_url: &str, provider: ProviderId) -> String {
+    if base_url != provider.default_base_url() && model_ref.raw.contains(':') {
+        model_ref.raw.clone()
+    } else {
+        model_ref.model.clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -67,5 +80,27 @@ mod tests {
         let r = parse_model_ref("gpt-4o-mini");
         assert_eq!(r.provider, ProviderId::OpenAi);
         assert_eq!(r.model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn wire_model_uses_prefix_for_gateway_base_url() {
+        let model_ref = parse_model_ref("openai:gpt-4o-mini");
+        let wired = wire_model_id(
+            &model_ref,
+            "https://gateway.example.com",
+            ProviderId::OpenAi,
+        );
+        assert_eq!(wired, "openai:gpt-4o-mini");
+    }
+
+    #[test]
+    fn wire_model_uses_bare_for_direct_openai() {
+        let model_ref = parse_model_ref("openai:gpt-4o-mini");
+        let wired = wire_model_id(
+            &model_ref,
+            ProviderId::OpenAi.default_base_url(),
+            ProviderId::OpenAi,
+        );
+        assert_eq!(wired, "gpt-4o-mini");
     }
 }

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Upsert Route53 A record for the Superglue gateway, or print manual DNS instructions.
+# Upsert Route53 A record for the Superglue gateway, or print Cloudflare/DNS instructions.
+# Public traffic is expected to go through Cloudflare proxy; the A record's
+# content/origin is the Elastic IP.
 set -euo pipefail
 
 DOMAIN="${SUPERGLUE_GATEWAY_DOMAIN:-gateway.myharn.sh}"
@@ -23,7 +25,7 @@ if [[ -z "${EIP}" ]]; then
   exit 1
 fi
 
-echo "Target: ${DOMAIN} -> ${EIP}"
+echo "Target origin: ${DOMAIN} -> ${EIP} (via Cloudflare proxy)"
 
 ZONE_ID="${SUPERGLUE_ROUTE53_ZONE_ID:-}"
 if [[ -z "${ZONE_ID}" ]]; then
@@ -35,17 +37,18 @@ fi
 
 if [[ -z "${ZONE_ID}" || "${ZONE_ID}" == "None" ]]; then
   echo ""
-  echo "No Route53 hosted zone found for ${ZONE_NAME}."
-  echo "Create this A record at your DNS provider:"
+  echo "No Route53 hosted zone found for ${ZONE_NAME} (expected: manage DNS in Cloudflare)."
+  echo "In Cloudflare DNS for ${ZONE_NAME}:"
   echo ""
-  echo "  Name:  ${DOMAIN}"
-  echo "  Type:  A"
-  echo "  Value: ${EIP}"
-  echo "  TTL:   60 (or default)"
+  echo "  Name:    gateway  (or ${DOMAIN})"
+  echo "  Type:    A"
+  echo "  Content: ${EIP}"
+  echo "  Proxy:   Proxied (orange cloud)"
   echo ""
-  echo "If using Cloudflare, set the record to DNS-only (grey cloud) so Let's Encrypt can reach the host."
+  echo "SSL/TLS: set encryption mode to Full (not Flexible, not Full strict)."
+  echo "Caddy on the origin uses an internal cert; Full strict needs an Origin CA cert."
   echo ""
-  echo "After the record propagates, continue with setup-server.sh."
+  echo "After the record is set, continue with setup-server.sh."
   exit 0
 fi
 

@@ -4,23 +4,26 @@ Public HTTPS LLM gateway at **https://gateway.myharn.sh**.
 
 ## Architecture
 
-- EC2 (Ubuntu 24.04, `us-west-2`) + Elastic IP
+- Cloudflare proxies `gateway.myharn.sh` and terminates public HTTPS
+- EC2 (Ubuntu 24.04, `us-west-2`) + Elastic IP as the origin
 - `superglue gateway serve` on `127.0.0.1:8080` (systemd)
-- Caddy terminates TLS and reverse-proxies to the gateway
+- Caddy reverse-proxies with `tls internal` (Cloudflare SSL mode **Full**)
 - SQLite at `~/superglue/superglue-gateway.db`
 
 ## DNS
 
-After provision you need one record (scripts print the Elastic IP):
+After provision, point Cloudflare at the Elastic IP (scripts print it):
 
-| Name | Type | Value |
-|------|------|-------|
-| `gateway.myharn.sh` | A | `<Elastic IP>` |
+| Name | Type | Content | Proxy |
+|------|------|---------|-------|
+| `gateway` | A | `<Elastic IP>` | Proxied (orange cloud) |
 
-- **Route53** (`myharn.sh` hosted zone): `./deploy/setup-dns.sh` upserts it.
-- **Other DNS**: create the A record yourself. Cloudflare: DNS-only (grey cloud).
+- **Cloudflare** (default for `myharn.sh`): `./deploy/setup-dns.sh` prints the record to create.
+- **Route53** (if you have a hosted zone): `./deploy/setup-dns.sh` upserts an A record (still put Cloudflare in front if you use it for TLS).
 
-Ports **80** and **443** must reach the instance for Let's Encrypt.
+Cloudflare SSL/TLS encryption mode must be **Full** (not Flexible). Full (strict) needs a Cloudflare Origin CA cert instead of Caddy `tls internal`.
+
+Ports **80** and **443** must reach the instance from Cloudflare.
 
 ## Prerequisites
 
@@ -51,6 +54,12 @@ SUPERGLUE_DEPLOY_REMOTE=ubuntu@<ip> ./deploy/deploy.sh
 # or
 ./deploy/setup-server.sh ubuntu@<ip>
 ```
+
+## Redeploy hygiene
+
+- **Preserve `GATEWAY_MASTER_KEY`** — export it before redeploy and pass the same value into `setup-server.sh` (otherwise a new key is generated and harn admin provisioning breaks until `~/.harn/server.env` is updated).
+- **Backup** `~/superglue/superglue-gateway.db` on the gateway host before wiping the instance or deleting the DB. Virtual keys in harn `auth.db` become invalid when the gateway DB is recreated.
+- **Cloudflare allowlist** — the harn server EC2 calls this gateway over the public URL. Allow its Elastic IP in Cloudflare WAF (see [`projects/harn/deploy/README.md`](../../harn/deploy/README.md)) or server-side model listing / LLM calls may fail with error 1010.
 
 ## Verify
 
