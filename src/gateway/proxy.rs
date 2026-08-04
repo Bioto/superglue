@@ -15,7 +15,7 @@ use crate::gateway::auth::AuthContext;
 use crate::gateway::budget::check_budget;
 use crate::gateway::db::Database;
 use crate::gateway::error::{GatewayError, GatewayResult};
-use crate::gateway::model_access::{self, is_unrestricted};
+use crate::gateway::model_access;
 use crate::http::{HttpClient, sse::SseParser};
 use crate::openai::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
@@ -576,33 +576,6 @@ pub async fn proxy_completion_stream(
     });
 
     Ok(ReceiverStream::new(rx))
-}
-
-/// List models visible to the authenticated caller.
-#[must_use]
-pub fn models_for_auth(auth: &AuthContext) -> Vec<serde_json::Value> {
-    if is_unrestricted(&auth.allowed_models) {
-        return vec![serde_json::json!({
-            "id": "*",
-            "object": "model",
-            "owned_by": "superglue-gateway"
-        })];
-    }
-    auth.allowed_models
-        .as_ref()
-        .map(|patterns| {
-            patterns
-                .iter()
-                .map(|id| {
-                    serde_json::json!({
-                        "id": id,
-                        "object": "model",
-                        "owned_by": "superglue-gateway"
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

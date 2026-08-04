@@ -24,7 +24,21 @@ superglue gateway serve \
 
 ## CLI management
 
-Manage the gateway database directly without running HTTP requests. All manage commands accept `--db` (default: `./superglue-gateway.db`) and `--output pretty|json`.
+Manage the gateway via a local SQLite file or a remote HTTPS admin API.
+
+**Local** (default): reads/writes `--db` (default `./superglue-gateway.db`).
+
+**Remote**: pass `--url` and `--master-key` (or env `SUPERGLUE_GATEWAY_URL` / `GATEWAY_MASTER_KEY`):
+
+```bash
+export SUPERGLUE_GATEWAY_URL=https://gateway.myharn.sh
+export GATEWAY_MASTER_KEY=...
+
+superglue gateway --url "$SUPERGLUE_GATEWAY_URL" user list
+superglue gateway --url "$SUPERGLUE_GATEWAY_URL" key create --user-id alice --model 'openai:*'
+```
+
+All manage commands accept `--output pretty|json`. Remote mode uses the same subcommands as local mode.
 
 ```bash
 # Users
@@ -46,6 +60,11 @@ superglue gateway budget list
 # Usage
 superglue gateway usage list --user-id alice --limit 50
 superglue gateway usage list --output json
+
+# Models (allowed patterns for a key; master key shows unrestricted *)
+superglue gateway model list
+superglue gateway model list --key sgw-...
+superglue gateway --url "$SUPERGLUE_GATEWAY_URL" model list
 ```
 
 Key creation prints the plaintext secret **once** — store it immediately.
@@ -104,7 +123,7 @@ Each virtual key requires at least one pattern in `allowed_models`:
 
 Keys with no allowlist rows are denied (explicit opt-in). The master key is unrestricted.
 
-`GET /v1/models` returns the patterns visible to the authenticated key.
+`GET /v1/models` returns allowed model patterns for scoped keys. For the master key (or `*` allowlist), it fetches and merges model ids from each configured upstream provider (`openai:…`, `anthropic:…`, etc.) via each provider's `/v1/models` API.
 
 ## Completions
 

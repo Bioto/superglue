@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::gateway::auth::hash_key;
@@ -75,7 +75,7 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRecord {
     pub id: String,
     pub alias: Option<String>,
@@ -85,7 +85,7 @@ pub struct UserRecord {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetRecord {
     pub id: String,
     pub max_budget: f64,
@@ -106,7 +106,7 @@ pub struct ApiKeyRecord {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiKeyListItem {
     pub id: String,
     pub key_prefix: String,
@@ -119,7 +119,7 @@ pub struct ApiKeyListItem {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
     pub id: String,
     pub key_id: Option<String>,
@@ -279,8 +279,30 @@ impl Database {
                 params![b, next_reset, user_id],
             )?;
         }
-        self.get_user(user_id)?
-            .ok_or_else(|| GatewayError::not_found(format!("user {user_id} not found")))
+        conn.query_row(
+            "SELECT id, alias, budget_id, spend, next_budget_reset_at, created_at FROM users WHERE id = ?1",
+            params![user_id],
+            map_user,
+        )
+        .optional()?
+        .ok_or_else(|| GatewayError::not_found(format!("user {user_id} not found")))
+    }
+
+    /// Delete a user and all of their API keys.
+    pub fn delete_user(&self, user_id: &str) -> GatewayResult<u32> {
+        let conn = self.lock()?;
+        let tx = conn.unchecked_transaction()?;
+        let keys_deleted = tx.execute(
+            "DELETE FROM api_keys WHERE user_id = ?1",
+            params![user_id],
+        )? as u32;
+        let users_deleted =
+            tx.execute("DELETE FROM users WHERE id = ?1", params![user_id])?;
+        if users_deleted == 0 {
+            return Err(GatewayError::not_found(format!("user {user_id} not found")));
+        }
+        tx.commit()?;
+        Ok(keys_deleted)
     }
 
     pub fn user_exists(&self, user_id: &str) -> GatewayResult<bool> {
@@ -701,5 +723,20 @@ mod tests {
         let auth = hash_key(&key.plaintext_key);
         let found = db.lookup_api_key_by_hash(&auth).unwrap().unwrap();
         assert_eq!(found.user_id, "user-1");
+    }
+
+    #[test]
+    fn delete_user_removes_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.db");
+        let db = Database::open(&path).unwrap();
+        db.create_user("user-1", None, None).unwrap();
+        db.create_api_key(Some("k1"), "user-1", &["openai:*".into()], None, None)
+            .unwrap();
+        db.create_api_key(Some("k2"), "user-1", &["anthropic:*".into()], None, None)
+            .unwrap();
+        assert_eq!(db.delete_user("user-1").unwrap(), 2);
+        assert!(!db.user_exists("user-1").unwrap());
+        assert!(db.list_api_keys().unwrap().is_empty());
     }
 }

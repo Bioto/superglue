@@ -7,7 +7,9 @@ mod config;
 mod db;
 mod error;
 mod model_access;
+mod model_catalog;
 mod proxy;
+pub mod remote;
 mod routes;
 
 pub use routes::router;

@@ -173,15 +173,33 @@ pub async fn update_user(
     Path(id): Path<String>,
     Json(body): Json<UpdateUserBody>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let alias = body.alias.clone();
-    let budget_id = body.budget_id.clone();
+    let alias_owned = body.alias.clone();
+    let budget_owned = body.budget_id.clone();
     let user = state
         .db
         .run_blocking(move |db| {
-            db.update_user(&id, Some(alias.as_deref()), Some(budget_id.as_deref()))
+            let alias_update = alias_owned.as_ref().map(|a| Some(a.as_str()));
+            let budget_update = budget_owned.as_ref().map(|b| Some(b.as_str()));
+            db.update_user(&id, alias_update, budget_update)
         })
         .await?;
     Ok(json_ok(user))
+}
+
+pub async fn delete_user(
+    State(state): State<Arc<GatewayState>>,
+    Auth(_auth): Auth,
+    Path(id): Path<String>,
+) -> GatewayResult<impl axum::response::IntoResponse> {
+    let deleted_id = id.clone();
+    let keys_deleted = state
+        .db
+        .run_blocking(move |db| db.delete_user(&id))
+        .await?;
+    Ok(json_ok(serde_json::json!({
+        "deleted": deleted_id,
+        "keys_deleted": keys_deleted,
+    })))
 }
 
 pub async fn create_budget(

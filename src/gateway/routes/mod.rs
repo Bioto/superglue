@@ -41,7 +41,10 @@ pub fn router(state: Arc<GatewayState>) -> Router {
             patch(admin::update_key).delete(admin::delete_key),
         )
         .route("/v1/users", post(admin::create_user).get(admin::list_users))
-        .route("/v1/users/{id}", patch(admin::update_user))
+        .route(
+            "/v1/users/{id}",
+            patch(admin::update_user).delete(admin::delete_user),
+        )
         .route(
             "/v1/budgets",
             post(admin::create_budget).get(admin::list_budgets),

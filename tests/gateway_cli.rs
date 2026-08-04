@@ -6,7 +6,10 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn superglue_cmd() -> Command {
-    Command::cargo_bin("superglue").unwrap()
+    let mut cmd = Command::cargo_bin("superglue").unwrap();
+    cmd.env_remove("SUPERGLUE_GATEWAY_URL")
+        .env_remove("GATEWAY_MASTER_KEY");
+    cmd
 }
 
 #[test]
@@ -19,7 +22,8 @@ fn gateway_help_lists_manage_commands() {
         .stdout(predicate::str::contains("user"))
         .stdout(predicate::str::contains("key"))
         .stdout(predicate::str::contains("budget"))
-        .stdout(predicate::str::contains("usage"));
+        .stdout(predicate::str::contains("usage"))
+        .stdout(predicate::str::contains("model"));
 }
 
 #[test]
@@ -116,6 +120,61 @@ fn key_create_and_list_via_cli() {
         .success()
         .stdout(predicate::str::contains("bob"))
         .stdout(predicate::str::contains("openai:gpt-4o-mini"));
+}
+
+#[test]
+fn user_delete_via_cli() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("cli.db");
+
+    superglue_cmd()
+        .args([
+            "gateway",
+            "--db",
+            db.to_str().unwrap(),
+            "user",
+            "create",
+            "--user-id",
+            "carol",
+        ])
+        .assert()
+        .success();
+
+    superglue_cmd()
+        .args([
+            "gateway",
+            "--db",
+            db.to_str().unwrap(),
+            "key",
+            "create",
+            "--user-id",
+            "carol",
+            "--model",
+            "openai:*",
+        ])
+        .assert()
+        .success();
+
+    superglue_cmd()
+        .args([
+            "gateway",
+            "--db",
+            db.to_str().unwrap(),
+            "user",
+            "delete",
+            "--user-id",
+            "carol",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Deleted user carol"))
+        .stdout(predicate::str::contains("1 key(s) revoked"));
+
+    superglue_cmd()
+        .args(["gateway", "--db", db.to_str().unwrap(), "user", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("carol").not());
 }
 
 #[test]

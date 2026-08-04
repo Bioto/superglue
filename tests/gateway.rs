@@ -472,6 +472,46 @@ async fn list_models_returns_allowlist() {
 }
 
 #[tokio::test]
+async fn list_models_fetches_upstream_for_master_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "gpt-4o-mini", "object": "model" },
+                { "id": "gpt-4o", "object": "model" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_openai(
+        MASTER_KEY,
+        &dir.path().join("gw.db"),
+        &server.uri(),
+        "sk-test",
+    );
+    let app = router(state);
+
+    let resp = app
+        .oneshot(auth_request("GET", "/v1/models", MASTER_KEY, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_to_json(resp.into_body()).await;
+    let ids: Vec<_> = body["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"openai:gpt-4o-mini"));
+    assert!(ids.contains(&"openai:gpt-4o"));
+    assert!(!ids.contains(&"*"));
+}
+
+#[tokio::test]
 async fn health_endpoints_work() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(MASTER_KEY, &dir.path().join("gw.db"));
@@ -499,6 +539,146 @@ async fn health_endpoints_work() {
         .await
         .unwrap();
     assert_eq!(ready.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn update_user_budget_does_not_deadlock() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(MASTER_KEY, &dir.path().join("gw.db"));
+    let app = router(state);
+
+    app.clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/users",
+            MASTER_KEY,
+            Some(json!({ "user_id": "budget-user", "alias": "Budget User" })),
+        ))
+        .await
+        .unwrap();
+
+    let budget = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/budgets",
+            MASTER_KEY,
+            Some(json!({ "max_budget": 50.0, "duration_sec": 2592000, "enforce": true })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(budget.status(), StatusCode::OK);
+    let budget_id = body_to_json(budget.into_body()).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let update = app
+        .clone()
+        .oneshot(auth_request(
+            "PATCH",
+            "/v1/users/budget-user",
+            MASTER_KEY,
+            Some(json!({ "budget_id": budget_id })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(update.status(), StatusCode::OK);
+    let user = body_to_json(update.into_body()).await;
+    assert_eq!(user["budget_id"].as_str(), Some(budget_id.as_str()));
+    assert_eq!(user["alias"].as_str(), Some("Budget User"));
+
+    let list = app
+        .clone()
+        .oneshot(auth_request("GET", "/v1/users", MASTER_KEY, None))
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn delete_user_removes_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(MASTER_KEY, &dir.path().join("gw.db"));
+    let app = router(state.clone());
+
+    app.clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/users",
+            MASTER_KEY,
+            Some(json!({ "user_id": "delete-me", "alias": "Gone" })),
+        ))
+        .await
+        .unwrap();
+
+    let key_resp = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/keys",
+            MASTER_KEY,
+            Some(json!({
+                "user_id": "delete-me",
+                "allowed_models": ["openai:*"]
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(key_resp.status(), StatusCode::OK);
+    let key_id = body_to_json(key_resp.into_body()).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let delete = app
+        .clone()
+        .oneshot(auth_request(
+            "DELETE",
+            "/v1/users/delete-me",
+            MASTER_KEY,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(delete.status(), StatusCode::OK);
+    let body = body_to_json(delete.into_body()).await;
+    assert_eq!(body["deleted"].as_str(), Some("delete-me"));
+    assert_eq!(body["keys_deleted"].as_u64(), Some(1));
+
+    let list_users = app
+        .clone()
+        .oneshot(auth_request("GET", "/v1/users", MASTER_KEY, None))
+        .await
+        .unwrap();
+    let users = body_to_json(list_users.into_body()).await["users"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(!users.iter().any(|u| u["id"].as_str() == Some("delete-me")));
+
+    let list_keys = app
+        .clone()
+        .oneshot(auth_request("GET", "/v1/keys", MASTER_KEY, None))
+        .await
+        .unwrap();
+    let keys = body_to_json(list_keys.into_body()).await["keys"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(!keys.iter().any(|k| k["id"].as_str() == Some(key_id.as_str())));
+
+    let missing = app
+        .clone()
+        .oneshot(auth_request(
+            "DELETE",
+            "/v1/users/delete-me",
+            MASTER_KEY,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -576,4 +756,38 @@ async fn virtual_key_streaming_completion_logs_usage() {
     assert_eq!(usage.len(), 1);
     assert_eq!(usage[0].prompt_tokens, 7);
     assert_eq!(usage[0].completion_tokens, 3);
+}
+
+#[tokio::test]
+async fn remote_client_admin_commands() {
+    use superglue::gateway::remote::RemoteClient;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(MASTER_KEY, &dir.path().join("remote-cli.db"));
+    let app = router(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = RemoteClient::new(&format!("http://{addr}"), MASTER_KEY).unwrap();
+    let user = client
+        .create_user("remote-user", Some("Remote"), None)
+        .await
+        .unwrap();
+    assert_eq!(user.id, "remote-user");
+
+    let users = client.list_users().await.unwrap();
+    assert!(users.iter().any(|u| u.id == "remote-user"));
+
+    let budget = client.create_budget(25.0, 86_400, true).await.unwrap();
+    assert!(budget.max_budget > 0.0);
+
+    let keys = client.list_keys().await.unwrap();
+    assert!(keys.is_empty());
+
+    let models = client.list_models(MASTER_KEY).await.unwrap();
+    assert!(models.is_empty());
 }

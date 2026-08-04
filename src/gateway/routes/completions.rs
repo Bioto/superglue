@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use crate::gateway::GatewayState;
 use crate::gateway::auth::Auth;
 use crate::gateway::error::GatewayError;
+use crate::gateway::model_catalog;
 use crate::gateway::proxy::{self, GatewayCompletionBody};
 
 pub async fn chat_completions(
@@ -43,8 +44,12 @@ pub async fn chat_completions(
     }
 }
 
-pub async fn list_models(Auth(auth): Auth) -> Result<impl IntoResponse, GatewayError> {
-    let data = proxy::models_for_auth(&auth);
+pub async fn list_models(
+    State(state): State<Arc<GatewayState>>,
+    Auth(auth): Auth,
+) -> Result<impl IntoResponse, GatewayError> {
+    let data =
+        model_catalog::list_models(&state.http, &state.credentials, &auth).await?;
     Ok(Json(serde_json::json!({
         "object": "list",
         "data": data,
