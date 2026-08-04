@@ -62,6 +62,12 @@ impl ProviderId {
             ProviderId::OpenAi | ProviderId::Xai | ProviderId::Groq
         )
     }
+
+    /// Whether the provider exposes OpenAI-compatible `/v1/responses`.
+    #[must_use]
+    pub fn uses_responses_api(self) -> bool {
+        self.uses_openai_compat()
+    }
 }
 
 impl fmt::Display for ProviderId {

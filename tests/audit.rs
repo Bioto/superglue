@@ -21,6 +21,9 @@ async fn runstore_insert_and_get() {
         started_at_ms: 1000,
         finished_at_ms: 2000,
         process_events: vec![],
+        options_json: None,
+        model_used: None,
+        previous_response_id: None,
     };
     store.insert(record).await;
 
@@ -48,6 +51,9 @@ async fn runstore_list_all() {
                 started_at_ms: i as i64,
                 finished_at_ms: i as i64 + 1,
                 process_events: vec![],
+                options_json: None,
+                model_used: None,
+                previous_response_id: None,
             })
             .await;
     }
@@ -69,6 +75,9 @@ async fn runstore_clear() {
             started_at_ms: 0,
             finished_at_ms: 1,
             process_events: vec![],
+            options_json: None,
+            model_used: None,
+            previous_response_id: None,
         })
         .await;
     assert_eq!(store.len().await, 1);
@@ -90,6 +99,9 @@ async fn runstore_capacity_cap_evicts_oldest() {
                 started_at_ms: i as i64,
                 finished_at_ms: i as i64 + 1,
                 process_events: vec![],
+                options_json: None,
+                model_used: None,
+                previous_response_id: None,
             })
             .await;
     }
@@ -100,6 +112,21 @@ async fn runstore_capacity_cap_evicts_oldest() {
     assert!(!ids.contains(&"req-0"), "req-0 should have been evicted");
     assert!(!ids.contains(&"req-1"), "req-1 should have been evicted");
     assert!(ids.contains(&"req-4"), "req-4 should be present");
+}
+
+#[tokio::test]
+async fn runrecorder_caps_hook_events() {
+    let store = Arc::new(RunStore::new(None));
+    let recorder = RunRecorder::with_caps(Arc::clone(&store), Some(2), Some(2));
+
+    for i in 0..5 {
+        recorder
+            .execute(HookContext::new(HookStage::OnRetry, format!("retry-{i}")))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(recorder.peek_events().await.len(), 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +195,42 @@ async fn runrecorder_finish_stores_record_and_clears_events() {
 async fn runrecorder_all_stages_returns_seven_variants() {
     let stages = RunRecorder::all_stages();
     assert_eq!(stages.len(), 7);
+}
+
+#[tokio::test]
+async fn resume_context_restores_messages_and_options() {
+    let options_json = superglue::audit::options_snapshot(&superglue::chat::ChatOptions {
+        model: "openai:gpt-4o-mini".into(),
+        ..Default::default()
+    });
+    let record = proto::RunRecord {
+        request_id: "req-resume".into(),
+        messages: vec![proto::ChatMessage {
+            role: "user".into(),
+            content: Some("continue".into()),
+            tool_calls: vec![],
+            tool_call_id: None,
+            name: None,
+            refusal: None,
+            provider_blocks_json: None,
+        }],
+        hook_events: vec![],
+        outcome: None,
+        started_at_ms: 0,
+        finished_at_ms: 1,
+        process_events: vec![],
+        options_json: Some(options_json),
+        model_used: Some("openai:gpt-4o-mini".into()),
+        previous_response_id: Some("resp_123".into()),
+    };
+    let ctx = superglue::audit::resume_context_from_record(
+        &record,
+        superglue::chat::ChatOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(ctx.options.model, "openai:gpt-4o-mini");
+    assert_eq!(ctx.messages.len(), 1);
+    assert_eq!(ctx.previous_response_id.as_deref(), Some("resp_123"));
 }
 
 #[tokio::test]

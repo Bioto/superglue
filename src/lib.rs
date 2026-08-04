@@ -34,7 +34,7 @@ pub mod telemetry;
 pub mod tools;
 pub mod usage;
 
-pub use usage::{accumulate_usage, usage_from_breakdown, UsageBreakdown};
+pub use usage::{UsageBreakdown, accumulate_usage, usage_from_breakdown};
 
 #[cfg(feature = "mcp")]
 pub mod mcp;

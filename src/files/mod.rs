@@ -80,7 +80,10 @@ pub async fn upload_file(
         return Err(FileError::UnsupportedProvider(provider));
     }
 
-    let bytes = std::fs::read(path)?;
+    let path_buf = path.to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || std::fs::read(path_buf))
+        .await
+        .map_err(|e| FileError::Other(format!("file read task failed: {e}")))??;
     if bytes.len() > max_bytes {
         return Err(FileError::FileTooLarge {
             bytes: bytes.len(),
@@ -178,6 +181,7 @@ pub fn message_with_file_bytes(text: Option<&str>, filename: &str, bytes: &[u8])
         tool_call_id: None,
         name: None,
         refusal: None,
+        provider_blocks: None,
     }
 }
 

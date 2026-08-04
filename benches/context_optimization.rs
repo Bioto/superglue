@@ -40,6 +40,7 @@ fn multi_tool_round_messages() -> Vec<ChatMessage> {
         tool_call_id: None,
         name: None,
         refusal: None,
+        provider_blocks: None,
     };
     vec![
         assistant,

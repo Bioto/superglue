@@ -66,8 +66,11 @@ impl AaakCompressor {
             *name_counts.entry(name.as_str()).or_insert(0) += 1;
         }
 
-        let mut segments = Vec::new();
-        for tool_msg in tool_messages {
+        let mut out = String::from("[AT]\n");
+        for (idx, tool_msg) in tool_messages.iter().enumerate() {
+            if idx > 0 {
+                out.push_str(" | ");
+            }
             let tc_id = tool_msg.tool_call_id.as_deref().unwrap_or("");
             let name = id_to_name.get(tc_id).map(String::as_str).unwrap_or(tc_id);
             let args = args_by_id.get(tc_id).map(String::as_str).unwrap_or("{}");
@@ -81,13 +84,14 @@ impl AaakCompressor {
             } else {
                 String::new()
             };
-            segments.push(format!(
-                "T:{name}({formatted_args})→{}",
-                format_tool_result(raw, 2000)
-            ));
+            out.push_str("T:");
+            out.push_str(name);
+            out.push('(');
+            out.push_str(&formatted_args);
+            out.push_str(")→");
+            out.push_str(&format_tool_result(raw, 2000));
         }
-
-        format!("[AT]\n{}", segments.join(" | "))
+        out
     }
 }
 
@@ -480,6 +484,7 @@ mod tests {
             tool_call_id: Some("1".into()),
             name: Some("get_config".into()),
             refusal: None,
+            provider_blocks: None,
         };
         let mut id_to_name = std::collections::HashMap::new();
         id_to_name.insert("1".into(), "get_config".into());

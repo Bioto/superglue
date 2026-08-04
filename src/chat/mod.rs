@@ -411,7 +411,11 @@ impl From<proto::ChatOptions> for ChatOptions {
             store: p.store,
             service_tier: p.service_tier,
             reasoning_effort: p.reasoning_effort,
-            reasoning_summary: reasoning::ReasoningSummaryLevel::default(),
+            reasoning_summary: p
+                .reasoning_summary
+                .as_deref()
+                .and_then(reasoning::ReasoningSummaryLevel::parse_str)
+                .unwrap_or_default(),
             extra_json: p
                 .extra_json
                 .as_ref()
@@ -430,7 +434,7 @@ impl From<proto::ChatOptions> for ChatOptions {
                 enabled: p.summarize_context_enabled.unwrap_or(false),
                 threshold: usize::try_from(p.summarize_context_threshold.unwrap_or(20))
                     .unwrap_or(20),
-                keep_recent: usize::try_from(p.summarize_context_keep_recent.unwrap_or(12))
+                keep_recent: usize::try_from(p.summarize_context_keep_recent.unwrap_or(6))
                     .unwrap_or(12),
                 max_chars: 800_000,
             },
@@ -565,6 +569,9 @@ pub fn fail_partial(
     messages: &[ChatMessage],
     had_system_prompt: bool,
 ) -> ChatError {
+    if matches!(cause, ChatError::Cancelled) {
+        return cause;
+    }
     ChatError::PartialTurn {
         cause: Box::new(cause),
         messages: conversation_messages_for_client(messages, had_system_prompt),
@@ -582,7 +589,7 @@ pub fn credentials_for(options: &ChatOptions) -> crate::providers::ProviderCrede
 }
 
 /// Perform one HTTP JSON POST, honouring an optional cancellation token.
-async fn post_json_cancellable(
+pub(crate) async fn post_json_cancellable(
     http: &HttpClient,
     url: &str,
     body: &Value,
@@ -827,67 +834,6 @@ pub async fn proxy_chat_stream(
         1,
     )
     .await
-}
-
-/// POST JSON with per-model HTTP retries and optional model fallback chain.
-pub(crate) async fn post_json_with_model_fallback(
-    http: &HttpClient,
-    url: &str,
-    body: &Value,
-    headers: &[(&str, &str)],
-    options: &ChatOptions,
-    request_id: &str,
-    round: u32,
-    rate_limit_key: Option<crate::providers::RateLimitKey>,
-) -> Result<(Value, String), ChatError> {
-    let models = crate::fallback::effective_models(&options.model, options.model_fallback.as_ref());
-    let default_policy = crate::fallback::FallbackPolicy::default();
-    let policy = options
-        .model_fallback
-        .as_ref()
-        .map(|c| &c.policy)
-        .unwrap_or(&default_policy);
-
-    let mut last_err = None;
-    for (i, model) in models.iter().enumerate() {
-        if i > 0 {
-            crate::fallback::emit_model_fallback(
-                options.status_emitter.as_ref(),
-                request_id,
-                &models[i - 1],
-                model,
-                round,
-            )
-            .await;
-        }
-        let mut body = body.clone();
-        crate::fallback::set_body_model(&mut body, model);
-
-        match post_json_cancellable(
-            http,
-            url,
-            &body,
-            headers,
-            rate_limit_key,
-            options.cancel.as_ref(),
-        )
-        .await
-        {
-            Ok(v) => return Ok((v, model.clone())),
-            Err(e) => {
-                if i + 1 < models.len()
-                    && crate::fallback::chat_error_eligible_for_fallback(&e, policy)
-                {
-                    last_err = Some(e);
-                    continue;
-                }
-                return Err(e);
-            }
-        }
-    }
-    Err(last_err.unwrap_or(ChatError::Http(HttpError::InvalidJson(
-        "model fallback exhausted".into(),
-    ))))
 }
 
 pub(crate) fn observation_hook_ctx(
@@ -1207,6 +1153,7 @@ pub(crate) async fn dispatch_one(
         tool_call_id: Some(tc.id.clone()),
         name: Some(tool_name),
         refusal: None,
+        provider_blocks: None,
     })
 }
 
@@ -1298,6 +1245,12 @@ pub async fn complete_with_tools(
         .tool_route_model
         .as_deref()
         .unwrap_or(DEFAULT_TOOL_ROUTE_MODEL);
+
+    if let Some(token) = &options.cancel
+        && token.is_cancelled()
+    {
+        return Err(ChatError::Cancelled);
+    }
 
     let outcome = loop {
         if api_calls >= options.max_tool_rounds {
@@ -1398,11 +1351,15 @@ pub async fn complete_with_tools(
         model_used = model_ref.raw.clone();
         let provider = crate::providers::resolve_provider(&model_ref);
         let normalized = provider.parse_chat_response(&val).map_err(|e| {
-            fail_partial(if e.to_string().contains("no choices") {
-                ChatError::NoChoice
-            } else {
-                ChatError::Http(HttpError::InvalidJson(e.to_string()))
-            }, &messages, had_system_prompt)
+            fail_partial(
+                if e.to_string().contains("no choices") {
+                    ChatError::NoChoice
+                } else {
+                    ChatError::Http(HttpError::InvalidJson(e.to_string()))
+                },
+                &messages,
+                had_system_prompt,
+            )
         })?;
 
         let msg = ChatMessage {
@@ -1416,6 +1373,7 @@ pub async fn complete_with_tools(
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: normalized.provider_blocks.clone(),
         };
 
         let tool_call_count = normalized
@@ -1658,15 +1616,13 @@ pub async fn complete_with_tools(
                         .map_err(|e| fail_partial(e, &messages, had_system_prompt))?;
                         model_used = model_ref.raw.clone();
                         let provider = crate::providers::resolve_provider(&model_ref);
-                        let normalized = provider
-                            .parse_chat_response(&val)
-                            .map_err(|e| {
-                                fail_partial(
-                                    ChatError::Http(HttpError::InvalidJson(e.to_string())),
-                                    &messages,
-                                    had_system_prompt,
-                                )
-                            })?;
+                        let normalized = provider.parse_chat_response(&val).map_err(|e| {
+                            fail_partial(
+                                ChatError::Http(HttpError::InvalidJson(e.to_string())),
+                                &messages,
+                                had_system_prompt,
+                            )
+                        })?;
                         let retry_text = normalized.content.clone().unwrap_or_default();
                         let (out2, gn2) = guardrails.run_output(&retry_text).await;
                         match out2 {
@@ -1678,6 +1634,7 @@ pub async fn complete_with_tools(
                                     tool_call_id: None,
                                     name: None,
                                     refusal: None,
+                                    provider_blocks: None,
                                 };
                                 messages.push(terminal_assistant_for_history(
                                     &retry_msg,
@@ -2314,10 +2271,21 @@ where
                                 .map_err(|e| {
                                     fail_partial(ChatError::Serde(e), &messages, had_system_prompt)
                                 })?
-                                && !delta.is_empty()
                             {
-                                round_content.push_str(&delta);
-                                on_delta(delta);
+                                match delta {
+                                    crate::providers::anthropic_stream::AnthropicStreamDelta::Text(
+                                        t,
+                                    ) => {
+                                        round_content.push_str(&t);
+                                        on_delta(t);
+                                    }
+                                    crate::providers::anthropic_stream::AnthropicStreamDelta::Thinking(
+                                        t,
+                                    ) => {
+                                        round_content.push_str(&t);
+                                        on_delta(t);
+                                    }
+                                }
                             }
                         } else {
                             let chunk: ChatCompletionChunk = serde_json::from_str(data)
@@ -2373,7 +2341,8 @@ where
                 );
             }
             while let Some(result) = in_flight.next().await {
-                let (id, msg) = result.map_err(|e| fail_partial(e, &messages, had_system_prompt))?;
+                let (id, msg) =
+                    result.map_err(|e| fail_partial(e, &messages, had_system_prompt))?;
                 completed_tools.insert(id, msg);
             }
         }
@@ -2387,6 +2356,7 @@ where
                 tool_calls,
                 finish_reason: round_finish,
                 usage: round_usage,
+                provider_blocks: None,
             }
         };
 
@@ -2472,6 +2442,7 @@ where
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: round.provider_blocks.clone(),
         };
 
         if !round.tool_calls.is_empty() {
@@ -2541,6 +2512,7 @@ where
                         tool_call_id: Some(tc.id.clone()),
                         name: Some(tc.function.name.clone()),
                         refusal: None,
+                        provider_blocks: None,
                     });
                 }
                 continue;
@@ -2663,14 +2635,13 @@ mod truncate_tests {
             ChatMessage::text("user", "hello"),
             ChatMessage::text("assistant", "partial"),
         ];
-        let err = super::fail_partial(
-            super::ChatError::MaxToolRounds(3),
-            &messages,
-            false,
-        );
+        let err = super::fail_partial(super::ChatError::MaxToolRounds(3), &messages, false);
         let partial = err.partial_messages().expect("partial messages");
         assert_eq!(partial.len(), 2);
-        assert!(matches!(err.root_cause(), super::ChatError::MaxToolRounds(3)));
+        assert!(matches!(
+            err.root_cause(),
+            super::ChatError::MaxToolRounds(3)
+        ));
         assert_eq!(err.to_string(), "exceeded max tool rounds (3)");
     }
 }

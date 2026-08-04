@@ -78,6 +78,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: None,
         }];
         assert_eq!(count_tool_calls(&messages), 1);
     }

@@ -42,6 +42,8 @@ message ChatMessage {
   optional string tool_call_id = 4;
   optional string name = 5;
   optional string refusal = 6;
+  /// JSON array of provider-native content blocks (e.g. Anthropic thinking/tool_use).
+  optional string provider_blocks_json = 7;
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +90,9 @@ message ChatOptions {
   // Reasoning models: "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
   optional string reasoning_effort = 18;
 
+  /// Responses API reasoning summary verbosity: "detailed" | "auto" | "off"
+  optional string reasoning_summary = 29;
+
   /// JSON-encoded overrides for any field not covered above (merged into the request body).
   optional string extra_json = 19;
 
@@ -131,6 +136,27 @@ message CompletionOutcome {
   optional string finish_reason = 4;
 }
 
+message ResponsesRequest {
+  repeated ChatMessage messages = 1;
+  ChatOptions options = 2;
+  optional string previous_response_id = 3;
+  optional string instructions = 4;
+  /// Raw Responses `input` JSON when callers need full item fidelity.
+  optional string input_json = 5;
+}
+
+message ResponsesOutcome {
+  string response_id = 1;
+  optional string content = 2;
+  uint32 rounds = 3;
+  optional Usage usage = 4;
+  string request_id = 5;
+  string model_used = 6;
+  string raw_output_json = 7;
+  /// Caller-visible transcript after this Responses turn (for audit/resume).
+  repeated ChatMessage messages = 8;
+}
+
 // ---------------------------------------------------------------------------
 // Audit / run recording
 // ---------------------------------------------------------------------------
@@ -164,6 +190,12 @@ message RunRecord {
   int64 finished_at_ms = 6;
   /// Typed process events (llm_call_*, tool_call_*) emitted during the run.
   repeated ProcessEvent process_events = 7;
+  /// Serialized [`ChatOptions`] snapshot (no secrets).
+  optional string options_json = 8;
+  /// Model actually used after fallback.
+  optional string model_used = 9;
+  /// Last Responses API id when applicable.
+  optional string previous_response_id = 10;
 }
 
 enum ProcessEventKind {
@@ -172,6 +204,8 @@ enum ProcessEventKind {
   LLM_CALL_ERROR = 2;
   TOOL_CALL_START = 3;
   TOOL_CALL_END = 4;
+  TOOL_ROUTE = 5;
+  REASONING_DELTA = 6;
 }
 
 message ProcessEvent {
@@ -199,6 +233,8 @@ message StreamChunk {
   optional Usage usage = 2;
   /// Reason the stream ended — present only in the final chunk.
   optional string finish_reason = 3;
+  /// Reasoning/thinking delta (Anthropic extended thinking); empty `delta` when set.
+  optional string reasoning_delta = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,4 +246,8 @@ service SuperglueService {
   rpc Complete (CompletionRequest) returns (CompletionOutcome);
   /// Server-streaming completion; yields StreamChunk deltas then a final chunk.
   rpc Stream (CompletionRequest) returns (stream StreamChunk);
+  /// Non-streaming Responses API with optional tool loop.
+  rpc CompleteResponses (ResponsesRequest) returns (ResponsesOutcome);
+  /// Server-streaming Responses API.
+  rpc StreamResponses (ResponsesRequest) returns (stream StreamChunk);
 }

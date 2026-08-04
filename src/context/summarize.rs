@@ -21,7 +21,7 @@ impl Default for SummarizeContextConfig {
         Self {
             enabled: false,
             threshold: 20,
-            keep_recent: 12,
+            keep_recent: 6,
             max_chars: 800_000,
         }
     }

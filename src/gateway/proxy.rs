@@ -6,7 +6,7 @@ use futures_util::StreamExt;
 use secrecy::SecretString;
 use serde_json::Value;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::chat::{ChatError, ChatOptions, proxy_chat_post, proxy_chat_stream};
@@ -17,10 +17,76 @@ use crate::gateway::db::Database;
 use crate::gateway::error::{GatewayError, GatewayResult};
 use crate::gateway::model_access::{self, is_unrestricted};
 use crate::http::{HttpClient, sse::SseParser};
-use crate::openai::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
+use crate::openai::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessage,
+};
 use crate::proto;
 use crate::providers::ProviderId;
+use crate::responses::{self, ResponseError};
 use crate::tools::ToolSpec;
+use serde_json::json;
+
+/// Bounded buffer for gateway SSE proxy streams (matches gRPC stream channel size).
+const GATEWAY_STREAM_BUFFER: usize = 64;
+
+fn extract_openai_chat_usage(data: &str) -> Option<proto::Usage> {
+    if !data.contains("\"usage\"") {
+        return None;
+    }
+    let chunk: ChatCompletionChunk = serde_json::from_str(data).ok()?;
+    chunk.usage.as_ref().map(usage_from_compat)
+}
+
+fn extract_openai_responses_usage(data: &str) -> Option<proto::Usage> {
+    if !data.contains("\"usage\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(data).ok()?;
+    v.pointer("/response/usage").map(usage_from_responses_json)
+}
+
+async fn record_usage_async(
+    db: &Database,
+    key_id: Option<&str>,
+    user_id: &str,
+    model: &str,
+    usage: &proto::Usage,
+    request_id: &str,
+) -> GatewayResult<()> {
+    let key_id = key_id.map(str::to_string);
+    let user_id = user_id.to_string();
+    let model = model.to_string();
+    let request_id = request_id.to_string();
+    let cost = estimate_model_call_cost_usd(model.as_str(), usage);
+    let prompt_tokens = usage.prompt_tokens;
+    let completion_tokens = usage.completion_tokens;
+    db.run_blocking(move |db| {
+        db.record_usage(
+            key_id.as_deref(),
+            &user_id,
+            &model,
+            prompt_tokens,
+            completion_tokens,
+            cost,
+            &request_id,
+        )
+    })
+    .await
+}
+
+/// Validate model access and budget before proxying (async-safe).
+pub async fn preflight_async(
+    db: &Database,
+    auth: &AuthContext,
+    user_id: &str,
+    model: &str,
+) -> GatewayResult<()> {
+    let auth = auth.clone();
+    let user_id = user_id.to_string();
+    let model = model.to_string();
+    db.run_blocking(move |db| preflight(db, &auth, &user_id, &model))
+        .await
+}
 
 /// Parsed gateway completion request with optional master-key user field.
 #[derive(Debug, serde::Deserialize)]
@@ -30,6 +96,265 @@ pub struct GatewayCompletionBody {
     /// Required when using the master key; ignored for virtual keys.
     #[serde(default)]
     pub user: Option<String>,
+}
+
+/// Parsed gateway Responses request with optional master-key user field.
+#[derive(Debug, serde::Deserialize)]
+pub struct GatewayResponsesBody {
+    pub model: String,
+    pub input: Value,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, Value>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+fn response_error_to_gateway(err: ResponseError) -> GatewayError {
+    chat_error_to_gateway(err.into())
+}
+
+fn chat_options_from_responses(body: &GatewayResponsesBody, request_id: &str) -> ChatOptions {
+    let mut options = ChatOptions {
+        base_url: "https://api.openai.com".into(),
+        api_key: SecretString::from(String::new()),
+        model: body.model.clone(),
+        max_tool_rounds: 0,
+        system_prompt: body.instructions.clone(),
+        ..ChatOptions::default()
+    };
+    options.request_id = Some(request_id.to_string());
+    let mut extra = body.extra.clone();
+    if let Some(reasoning) = extra.remove("reasoning") {
+        if let Some(effort) = reasoning.get("effort").and_then(|e| e.as_str()) {
+            options.reasoning_effort = Some(effort.to_string());
+        }
+        if let Some(summary) = reasoning.get("summary").and_then(|s| s.as_str())
+            && let Some(level) = crate::chat::reasoning::ReasoningSummaryLevel::parse_str(summary)
+        {
+            options.reasoning_summary = level;
+        }
+    }
+    if !extra.is_empty() {
+        options.extra_json = Some(Value::Object(
+            extra
+                .into_iter()
+                .collect::<serde_json::Map<String, Value>>(),
+        ));
+    }
+    options
+}
+
+fn messages_from_responses_input(input: &Value) -> Vec<ChatMessage> {
+    if let Some(text) = input.as_str() {
+        return vec![ChatMessage::text("user", text)];
+    }
+    if let Some(items) = input.as_array() {
+        let mut messages = Vec::new();
+        for item in items {
+            let Some(typ) = item.get("type").and_then(|t| t.as_str()) else {
+                continue;
+            };
+            match typ {
+                "message" => {
+                    let role = item.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+                    let content = item.get("content").map(|c| {
+                        if let Some(s) = c.as_str() {
+                            s.to_string()
+                        } else {
+                            c.to_string()
+                        }
+                    });
+                    if let Some(text) = content {
+                        messages.push(ChatMessage::text(role, text));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !messages.is_empty() {
+            return messages;
+        }
+    }
+    vec![ChatMessage::text("user", input.to_string())]
+}
+
+fn responses_body_value(body: GatewayResponsesBody) -> Value {
+    let GatewayResponsesBody {
+        model,
+        input,
+        instructions,
+        stream,
+        extra,
+        user: _,
+    } = body;
+    let mut map = serde_json::Map::new();
+    map.insert("model".into(), json!(model));
+    map.insert("input".into(), input);
+    if let Some(instructions) = instructions {
+        map.insert("instructions".into(), json!(instructions));
+    }
+    if stream.unwrap_or(false) {
+        map.insert("stream".into(), json!(true));
+    }
+    for (k, v) in extra {
+        map.insert(k, v);
+    }
+    Value::Object(map)
+}
+
+fn usage_from_responses_json(u: &Value) -> proto::Usage {
+    let input = u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let output = u.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let total = u
+        .get("total_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(u64::from(input) + u64::from(output)) as u32;
+    let cached = u
+        .pointer("/input_tokens_details/cached_tokens")
+        .and_then(|x| x.as_u64())
+        .map(|n| n as u32)
+        .filter(|&n| n > 0);
+    crate::usage::usage_from_breakdown(crate::usage::UsageBreakdown {
+        prompt_tokens: input,
+        completion_tokens: output,
+        total_tokens: Some(total),
+        cached_tokens: cached,
+        reasoning_tokens: None,
+    })
+}
+
+/// Non-streaming Responses proxy.
+pub async fn proxy_response(
+    http: &HttpClient,
+    credentials: &Arc<crate::providers::ProviderCredentials>,
+    db: &Database,
+    auth: &AuthContext,
+    body: GatewayResponsesBody,
+) -> GatewayResult<(Value, String)> {
+    let request_id = Uuid::new_v4().to_string();
+    let user_id = crate::gateway::auth::resolve_user_id(auth, body.user.as_deref())?;
+    let model = body.model.clone();
+    preflight_async(db, auth, &user_id, &model).await?;
+
+    let options = chat_options_from_responses(&body, &request_id);
+    let messages = messages_from_responses_input(&body.input);
+    let req_body = responses_body_value(body);
+
+    let (val, model_ref) = responses::proxy_responses_post(
+        http,
+        credentials.as_ref(),
+        &messages,
+        &req_body,
+        &options,
+        &request_id,
+    )
+    .await
+    .map_err(response_error_to_gateway)?;
+
+    if let Some(usage) = val.get("usage") {
+        let proto_usage = usage_from_responses_json(usage);
+        record_usage_async(
+            db,
+            auth.key_id.as_deref(),
+            &user_id,
+            &model_ref.raw,
+            &proto_usage,
+            &request_id,
+        )
+        .await?;
+    }
+
+    Ok((val, request_id))
+}
+
+/// Streaming Responses proxy.
+pub async fn proxy_response_stream(
+    http: &HttpClient,
+    credentials: &Arc<crate::providers::ProviderCredentials>,
+    db: Database,
+    auth: AuthContext,
+    body: GatewayResponsesBody,
+) -> GatewayResult<
+    impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+> {
+    let request_id = Uuid::new_v4().to_string();
+    let user_id = crate::gateway::auth::resolve_user_id(&auth, body.user.as_deref())?;
+    let model = body.model.clone();
+    preflight_async(&db, &auth, &user_id, &model).await?;
+
+    let options = chat_options_from_responses(&body, &request_id);
+    let messages = messages_from_responses_input(&body.input);
+    let req_body = responses_body_value(body);
+
+    let (byte_stream, model_ref) = responses::proxy_responses_stream(
+        http,
+        credentials.as_ref(),
+        &messages,
+        &req_body,
+        &options,
+        &request_id,
+    )
+    .await
+    .map_err(response_error_to_gateway)?;
+
+    let key_id = auth.key_id.clone();
+    let (tx, rx) = mpsc::channel(GATEWAY_STREAM_BUFFER);
+    let is_anthropic = model_ref.provider == ProviderId::Anthropic;
+
+    tokio::spawn(async move {
+        let mut stream = byte_stream;
+        let mut parser = SseParser::new();
+        let mut round_usage: Option<proto::Usage> = None;
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    if let Ok(events) = parser.push_str(&text) {
+                        for event in events {
+                            let data = event.data.trim();
+                            if data.is_empty() || data == "[DONE]" {
+                                continue;
+                            }
+                            if is_anthropic {
+                                let _ = crate::providers::anthropic_stream::AnthropicStreamAccumulator::apply_usage_from_sse_data(
+                                    &mut round_usage,
+                                    data,
+                                );
+                            } else if let Some(u) = extract_openai_responses_usage(data) {
+                                round_usage = Some(u);
+                            }
+                        }
+                    }
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
+                    return;
+                }
+            }
+        }
+
+        if let Some(usage) = round_usage {
+            let _ = record_usage_async(
+                &db,
+                key_id.as_deref(),
+                &user_id,
+                &model_ref.raw,
+                &usage,
+                &request_id,
+            )
+            .await;
+        }
+    });
+
+    Ok(ReceiverStream::new(rx))
 }
 
 /// Map an OpenAI-shaped request to [`ChatOptions`] for upstream provider calls.
@@ -60,7 +385,12 @@ pub fn chat_options_from_request(req: &ChatCompletionRequest, request_id: &str) 
     };
     options.request_id = Some(request_id.to_string());
     if !req.extra.is_empty() {
-        options.extra_json = Some(serde_json::to_value(&req.extra).unwrap_or(Value::Null));
+        options.extra_json = Some(Value::Object(
+            req.extra
+                .clone()
+                .into_iter()
+                .collect::<serde_json::Map<String, Value>>(),
+        ));
     }
     options
 }
@@ -126,7 +456,7 @@ pub async fn proxy_completion(
 ) -> GatewayResult<(Value, String)> {
     let request_id = Uuid::new_v4().to_string();
     let user_id = crate::gateway::auth::resolve_user_id(auth, body.user.as_deref())?;
-    preflight(db, auth, &user_id, &body.completion.model)?;
+    preflight_async(db, auth, &user_id, &body.completion.model).await?;
 
     let options = chat_options_from_request(&body.completion, &request_id);
     let tool_specs = tool_specs_from_request(&body.completion);
@@ -148,16 +478,15 @@ pub async fn proxy_completion(
 
     if let Some(usage) = &response.usage {
         let proto_usage = usage_from_compat(usage);
-        let cost = estimate_model_call_cost_usd(&body.completion.model, &proto_usage);
-        db.record_usage(
+        record_usage_async(
+            db,
             auth.key_id.as_deref(),
             &user_id,
             &model_ref.raw,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            cost,
+            &proto_usage,
             &request_id,
-        )?;
+        )
+        .await?;
     }
 
     Ok((val, request_id))
@@ -176,7 +505,7 @@ pub async fn proxy_completion_stream(
     let request_id = Uuid::new_v4().to_string();
     let user_id = crate::gateway::auth::resolve_user_id(&auth, body.user.as_deref())?;
     let model = body.completion.model.clone();
-    preflight(&db, &auth, &user_id, &model)?;
+    preflight_async(&db, &auth, &user_id, &model).await?;
 
     let options = chat_options_from_request(&body.completion, &request_id);
     let tool_specs = tool_specs_from_request(&body.completion);
@@ -195,21 +524,16 @@ pub async fn proxy_completion_stream(
 
     let is_anthropic = model_ref.provider == ProviderId::Anthropic;
     let key_id = auth.key_id.clone();
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(GATEWAY_STREAM_BUFFER);
 
     tokio::spawn(async move {
         let mut stream = byte_stream;
         let mut parser = SseParser::new();
         let mut round_usage: Option<proto::Usage> = None;
-        let mut anthropic_acc =
-            crate::providers::anthropic_stream::AnthropicStreamAccumulator::new();
 
         while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
-                    if tx.send(Ok(bytes.clone())).is_err() {
-                        return;
-                    }
                     let text = String::from_utf8_lossy(&bytes);
                     if let Ok(events) = parser.push_str(&text) {
                         for event in events {
@@ -218,46 +542,40 @@ pub async fn proxy_completion_stream(
                                 continue;
                             }
                             if is_anthropic {
-                                let _ = anthropic_acc.apply_sse_data(data);
-                            } else if let Ok(chunk) =
-                                serde_json::from_str::<ChatCompletionChunk>(data)
-                                && let Some(u) = chunk.usage
-                            {
-                                round_usage = Some(crate::usage::usage_from_breakdown(
-                                    crate::usage::breakdown_from_compat_usage(&u),
-                                ));
+                                let _ = crate::providers::anthropic_stream::AnthropicStreamAccumulator::apply_usage_from_sse_data(
+                                    &mut round_usage,
+                                    data,
+                                );
+                            } else if let Some(u) = extract_openai_chat_usage(data) {
+                                round_usage = Some(u);
                             }
                         }
                     }
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        return;
+                    }
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(std::io::Error::other(e.to_string())));
+                    let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                     return;
                 }
             }
         }
 
-        let usage = if is_anthropic {
-            anthropic_acc.into_round_outcome().usage
-        } else {
-            round_usage
-        };
-
-        if let Some(usage) = usage {
-            let cost = estimate_model_call_cost_usd(&model, &usage);
-            let _ = db.record_usage(
+        if let Some(usage) = round_usage {
+            let _ = record_usage_async(
+                &db,
                 key_id.as_deref(),
                 &user_id,
                 &model_ref.raw,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                cost,
+                &usage,
                 &request_id,
-            );
+            )
+            .await;
         }
     });
 
-    Ok(UnboundedReceiverStream::new(rx))
+    Ok(ReceiverStream::new(rx))
 }
 
 /// List models visible to the authenticated caller.

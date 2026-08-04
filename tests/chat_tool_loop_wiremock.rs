@@ -186,7 +186,7 @@ async fn max_tool_rounds_returns_error() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, ChatError::MaxToolRounds(2)));
+    assert!(matches!(err.root_cause(), ChatError::MaxToolRounds(2)));
 }
 
 #[tokio::test]
@@ -297,6 +297,7 @@ async fn multipart_content_message() {
         tool_call_id: None,
         name: None,
         refusal: None,
+        provider_blocks: None,
     };
     let v = serde_json::to_value(&msg).unwrap();
     let parts = v["content"].as_array().unwrap();

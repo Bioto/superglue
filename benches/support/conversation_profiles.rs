@@ -119,7 +119,8 @@ pub fn summarize_config_multiturn() -> SummarizeContextConfig {
         enabled: true,
         threshold: 12,
         keep_recent: 4,
-        max_chars: 800_000,
+        // Trigger summarization during the ~12-turn fixture (~2.5k serialized chars).
+        max_chars: 2_000,
     }
 }
 

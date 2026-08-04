@@ -13,19 +13,20 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::agents::{AgentEngine, AgentSpec};
+use crate::audit::{RunRecorder, RunStore, now_ms};
 use crate::batch::{BatchConfig, BatchError, BatchRequest, BatchResponse, batch_complete};
 use crate::chat::{
     ChatError, ChatOptions, CompletionOutcome, Conversation, StreamOutcome, complete_with_tools,
     stream_complete, stream_complete_with_tools,
 };
 use crate::context::SummarizeContextConfig;
-use crate::events::StatusEmitter;
+use crate::events::{StatusEmitter, StatusSubscriber};
 use crate::fallback::{FallbackPolicy, ModelFallbackChain};
 use crate::guardrails::{
     BlocklistAction, BlocklistGuardrail, GuardrailConfig, GuardrailHandler, GuardrailRegistry,
     GuardrailStage, LengthStrategy, MaxLengthGuardrail, PiiRedactGuardrail,
 };
-use crate::hooks::{HookConfig, HookRegistry, HookStage};
+use crate::hooks::{HookConfig, HookErrorStrategy, HookRegistry, HookStage};
 use crate::http::{Error as HttpError, HttpClient};
 use crate::openai::ChatMessage;
 use crate::responses::{
@@ -61,6 +62,11 @@ pub struct CallOptions {
     pub connect_timeout: Option<Duration>,
 }
 
+struct ClientAudit {
+    recorder: Arc<RunRecorder>,
+    ready: tokio::sync::OnceCell<()>,
+}
+
 struct ClientInner {
     options: ChatOptions,
     registry: Arc<ToolRegistry>,
@@ -68,6 +74,7 @@ struct ClientInner {
     guardrails: Arc<GuardrailRegistry>,
     http: Arc<HttpClient>,
     max_upload_bytes: usize,
+    audit: Option<ClientAudit>,
     #[cfg(feature = "mcp")]
     mcp_sessions: Mutex<Vec<Arc<crate::mcp::McpSession>>>,
 }
@@ -109,6 +116,7 @@ pub struct ClientBuilder {
     summarize_context: SummarizeContextConfig,
     aaak_compression_enabled: bool,
     aaak_compression_model: Option<String>,
+    audit_store: Option<Arc<RunStore>>,
 }
 
 impl Default for ClientBuilder {
@@ -142,6 +150,7 @@ impl Default for ClientBuilder {
             summarize_context: SummarizeContextConfig::default(),
             aaak_compression_enabled: false,
             aaak_compression_model: None,
+            audit_store: None,
         }
     }
 }
@@ -318,6 +327,12 @@ impl ClientBuilder {
         self
     }
 
+    /// Attach an in-memory audit store; completed chat and Responses turns are recorded automatically.
+    pub fn audit(mut self, store: Arc<RunStore>) -> Self {
+        self.audit_store = Some(store);
+        self
+    }
+
     /// Build a [`Client`].
     ///
     /// # Errors
@@ -360,6 +375,11 @@ impl ClientBuilder {
         options.aaak_compression_enabled = self.aaak_compression_enabled;
         options.aaak_compression_model = self.aaak_compression_model;
 
+        let audit = self.audit_store.map(|store| ClientAudit {
+            recorder: Arc::new(RunRecorder::new(store)),
+            ready: tokio::sync::OnceCell::new(),
+        });
+
         Ok(Client {
             inner: Arc::new(ClientInner {
                 options,
@@ -370,6 +390,7 @@ impl ClientBuilder {
                 ),
                 http: Arc::new(bootstrap.http),
                 max_upload_bytes: bootstrap.max_upload_bytes,
+                audit,
                 #[cfg(feature = "mcp")]
                 mcp_sessions: Mutex::new(Vec::new()),
             }),
@@ -542,7 +563,9 @@ impl Client {
     ) -> Result<CompletionOutcome, ChatError> {
         let http = effective_http(&self.inner.http, call.timeout, call.connect_timeout)?;
         let options = finalize_call_options(&self.inner.options, &call);
-        complete_with_tools(
+        self.ensure_audit_ready().await;
+        let started_at_ms = now_ms();
+        let result = complete_with_tools(
             &http,
             &self.inner.registry,
             &self.inner.hooks,
@@ -550,7 +573,14 @@ impl Client {
             messages,
             &options,
         )
-        .await
+        .await;
+        if let (Ok(outcome), Some(audit)) = (&result, self.inner.audit.as_ref()) {
+            audit
+                .recorder
+                .record_chat_completion(outcome, &options, started_at_ms)
+                .await;
+        }
+        result
     }
 
     /// Stream a completion; `on_delta` receives each content token.
@@ -637,7 +667,9 @@ impl Client {
     ) -> Result<ResponseOutcome, ResponseError> {
         let http = effective_http(&self.inner.http, call.timeout, call.connect_timeout)?;
         let options = finalize_call_options(&self.inner.options, &call);
-        complete_response_with_tools(
+        self.ensure_audit_ready().await;
+        let started_at_ms = now_ms();
+        let result = complete_response_with_tools(
             &http,
             &self.inner.registry,
             &self.inner.hooks,
@@ -645,7 +677,14 @@ impl Client {
             user_message,
             &options,
         )
-        .await
+        .await;
+        if let (Ok(outcome), Some(audit)) = (&result, self.inner.audit.as_ref()) {
+            audit
+                .recorder
+                .record_response_completion(outcome, &options, started_at_ms)
+                .await;
+        }
+        result
     }
 
     /// Stream a Responses API completion; `on_delta` receives text token deltas.
@@ -784,11 +823,21 @@ impl Client {
         }
         opts.request_id = call.request_id;
 
+        self.ensure_audit_ready().await;
+        let started_at_ms = now_ms();
+
         let engine = AgentEngine::new(spec)
             .with_hooks(hooks)
             .with_guardrails(guardrails);
 
-        engine.run(&http, &registry, user_message, &opts).await
+        let result = engine.run(&http, &registry, user_message, &opts).await;
+        if let (Ok(outcome), Some(audit)) = (&result, self.inner.audit.as_ref()) {
+            audit
+                .recorder
+                .record_chat_completion(outcome, &opts, started_at_ms)
+                .await;
+        }
+        result
     }
 
     /// Start a multi-turn conversation backed by this client.
@@ -798,6 +847,10 @@ impl Client {
             inner: Arc::clone(&self.inner),
             conversation: Conversation::new(),
         }
+    }
+
+    async fn ensure_audit_ready(&self) {
+        ensure_client_audit_ready(&self.inner).await;
     }
 }
 
@@ -815,7 +868,10 @@ impl ClientConversation {
     pub async fn complete(&mut self, call: CallOptions) -> Result<CompletionOutcome, ChatError> {
         let http = effective_http(&self.inner.http, call.timeout, call.connect_timeout)?;
         let options = finalize_call_options(&self.inner.options, &call);
-        self.conversation
+        ensure_client_audit_ready(&self.inner).await;
+        let started_at_ms = now_ms();
+        let result = self
+            .conversation
             .complete(
                 &http,
                 &self.inner.registry,
@@ -823,7 +879,14 @@ impl ClientConversation {
                 &self.inner.guardrails,
                 &options,
             )
-            .await
+            .await;
+        if let (Ok(outcome), Some(audit)) = (&result, self.inner.audit.as_ref()) {
+            audit
+                .recorder
+                .record_chat_completion(outcome, &options, started_at_ms)
+                .await;
+        }
+        result
     }
 }
 
@@ -836,6 +899,36 @@ fn finalize_call_options(base: &ChatOptions, call: &CallOptions) -> ChatOptions 
         options.reasoning_effort = Some(re.clone());
     }
     options
+}
+
+async fn ensure_client_audit_ready(inner: &ClientInner) {
+    let Some(audit) = inner.audit.as_ref() else {
+        return;
+    };
+    audit
+        .ready
+        .get_or_init(|| async {
+            for stage in RunRecorder::all_stages() {
+                inner
+                    .hooks
+                    .add(
+                        stage,
+                        HookConfig {
+                            name: "audit".into(),
+                            error_strategy: HookErrorStrategy::Skip,
+                            handler: Arc::clone(&audit.recorder)
+                                as Arc<dyn crate::hooks::HookHandler>,
+                        },
+                    )
+                    .await;
+            }
+            if let Some(emitter) = &inner.options.status_emitter {
+                emitter
+                    .subscribe(Arc::clone(&audit.recorder) as Arc<dyn StatusSubscriber>)
+                    .await;
+            }
+        })
+        .await;
 }
 
 fn effective_http(

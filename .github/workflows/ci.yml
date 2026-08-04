@@ -11,7 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --features mcp
+      - run: cargo test --features mcp,gateway
+      - run: cargo test --features grpc --lib
+      - name: Generate proto stubs
+        run: |
+          python3 -m venv .venv-proto
+          .venv-proto/bin/pip install grpcio-tools --quiet
+          bash scripts/generate-proto-clients.sh
+      - name: Verify generated Python proto stubs are committed
+        run: git diff --exit-code superglue-py/superglue/grpc/
 
   superglue-js:
     runs-on: ubuntu-latest

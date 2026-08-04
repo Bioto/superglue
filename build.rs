@@ -8,7 +8,7 @@ fn main() {
         // types AND the service trait + server/client stubs in one pass.
         tonic_prost_build::configure()
             .build_server(true)
-            .build_client(false)
+            .build_client(true)
             .compile_protos(&["proto/superglue.proto"], &["proto/"])
             .expect("tonic+prost codegen failed");
     } else {

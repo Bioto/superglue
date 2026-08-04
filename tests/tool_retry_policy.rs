@@ -151,7 +151,7 @@ async fn fail_fast_policy_propagates_tool_error() {
     .unwrap_err();
 
     assert!(
-        matches!(err, ChatError::Tool(_)),
+        matches!(err.root_cause(), ChatError::Tool(_)),
         "expected ChatError::Tool, got: {err:?}"
     );
 }
@@ -295,7 +295,7 @@ async fn retry_policy_exhausted_propagates_error() {
     .unwrap_err();
 
     assert!(
-        matches!(err, ChatError::Tool(_)),
+        matches!(err.root_cause(), ChatError::Tool(_)),
         "expected ChatError::Tool after retries exhausted, got: {err:?}"
     );
 }

@@ -20,6 +20,8 @@ pub struct NormalizedCompletion {
     pub finish_reason: Option<String>,
     /// Provider-native stop reason when different from OpenAI finish_reason.
     pub stop_reason: Option<String>,
+    /// Provider-native assistant blocks for round-trip (e.g. Anthropic thinking).
+    pub provider_blocks: Option<Vec<Value>>,
 }
 
 /// Result of one streamed LLM round (before tool dispatch).
@@ -29,6 +31,8 @@ pub struct StreamRoundOutcome {
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
     pub usage: Option<proto::Usage>,
+    /// Provider-native assistant blocks for round-trip (e.g. Anthropic thinking).
+    pub provider_blocks: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +56,27 @@ pub struct ProviderRequestContext<'a> {
     pub options: &'a crate::chat::ChatOptions,
 }
 
+/// Context for building a Responses API (`POST /v1/responses`) request.
+pub struct ProviderResponsesContext<'a> {
+    pub model_ref: &'a ModelRef,
+    pub credentials: &'a ProviderCredentials,
+    pub body: &'a Value,
+    pub messages: &'a [ChatMessage],
+    pub tools: Option<&'a [ToolSpec]>,
+    pub stream: bool,
+    pub options: &'a crate::chat::ChatOptions,
+}
+
+/// Normalized Responses API round result (OpenAI-shaped output).
+#[derive(Debug, Clone)]
+pub struct NormalizedResponse {
+    pub id: String,
+    pub output: Value,
+    pub usage: Option<proto::Usage>,
+    /// Provider-native assistant blocks for round-trip (e.g. Anthropic thinking).
+    pub provider_blocks: Option<Vec<Value>>,
+}
+
 pub trait LlmProvider: Send + Sync {
     fn provider_id(&self) -> ProviderId;
 
@@ -63,6 +88,25 @@ pub trait LlmProvider: Send + Sync {
     fn supports_file_upload(&self) -> bool {
         false
     }
+
+    /// Whether `previous_response_id` chaining is supported on the Responses path.
+    fn supports_previous_response_id(&self) -> bool {
+        self.provider_id().uses_openai_compat() && self.provider_id() != ProviderId::Groq
+    }
+
+    /// Whether `prompt_cache_key` is supported on the Responses path.
+    fn supports_prompt_cache_key(&self) -> bool {
+        matches!(self.provider_id(), ProviderId::OpenAi | ProviderId::Xai)
+    }
+
+    /// Build a provider HTTP request for one Responses API round.
+    fn build_responses_request(&self, ctx: &ProviderResponsesContext<'_>) -> ProviderRequest;
+
+    /// Parse a provider HTTP JSON body into OpenAI Responses-shaped output.
+    fn parse_responses_response(
+        &self,
+        json: &Value,
+    ) -> Result<NormalizedResponse, ProviderParseError>;
 }
 
 #[derive(Debug, thiserror::Error)]

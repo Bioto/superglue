@@ -78,13 +78,23 @@ pub async fn create_key(
         .map(serde_json::to_string)
         .transpose()
         .map_err(|e| GatewayError::bad_request(e.to_string()))?;
-    let result = state.db.create_api_key(
-        body.name.as_deref(),
-        &body.user_id,
-        &body.allowed_models,
-        body.expires_at.as_deref(),
-        metadata_json.as_deref(),
-    )?;
+    let name = body.name.clone();
+    let user_id = body.user_id.clone();
+    let allowed_models = body.allowed_models.clone();
+    let expires_at = body.expires_at.clone();
+    let metadata_json = metadata_json.clone();
+    let result = state
+        .db
+        .run_blocking(move |db| {
+            db.create_api_key(
+                name.as_deref(),
+                &user_id,
+                &allowed_models,
+                expires_at.as_deref(),
+                metadata_json.as_deref(),
+            )
+        })
+        .await?;
     Ok(json_ok(serde_json::json!({
         "id": result.id,
         "key": result.plaintext_key,
@@ -98,7 +108,7 @@ pub async fn list_keys(
     State(state): State<Arc<GatewayState>>,
     Auth(_auth): Auth,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let keys = state.db.list_api_keys()?;
+    let keys = state.db.run_blocking(|db| db.list_api_keys()).await?;
     Ok(json_ok(serde_json::json!({ "keys": keys })))
 }
 
@@ -108,10 +118,16 @@ pub async fn update_key(
     Path(id): Path<String>,
     Json(body): Json<UpdateKeyBody>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let expires = body.expires_at.as_ref().map(|v| Some(v.as_str()));
+    let expires = body.expires_at.clone();
+    let allowed_models = body.allowed_models.clone();
+    let active = body.active;
     let key = state
         .db
-        .update_api_key(&id, body.active, body.allowed_models.as_deref(), expires)?;
+        .run_blocking(move |db| {
+            let expires = expires.as_ref().map(|v| Some(v.as_str()));
+            db.update_api_key(&id, active, allowed_models.as_deref(), expires)
+        })
+        .await?;
     Ok(json_ok(key))
 }
 
@@ -120,8 +136,12 @@ pub async fn delete_key(
     Auth(_auth): Auth,
     Path(id): Path<String>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    state.db.delete_api_key(&id)?;
-    Ok(json_ok(serde_json::json!({ "deleted": id })))
+    let deleted_id = id.clone();
+    state
+        .db
+        .run_blocking(move |db| db.delete_api_key(&id))
+        .await?;
+    Ok(json_ok(serde_json::json!({ "deleted": deleted_id })))
 }
 
 pub async fn create_user(
@@ -129,11 +149,13 @@ pub async fn create_user(
     Auth(_auth): Auth,
     Json(body): Json<CreateUserBody>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let user = state.db.create_user(
-        &body.user_id,
-        body.alias.as_deref(),
-        body.budget_id.as_deref(),
-    )?;
+    let user_id = body.user_id.clone();
+    let alias = body.alias.clone();
+    let budget_id = body.budget_id.clone();
+    let user = state
+        .db
+        .run_blocking(move |db| db.create_user(&user_id, alias.as_deref(), budget_id.as_deref()))
+        .await?;
     Ok(json_ok(user))
 }
 
@@ -141,7 +163,7 @@ pub async fn list_users(
     State(state): State<Arc<GatewayState>>,
     Auth(_auth): Auth,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let users = state.db.list_users()?;
+    let users = state.db.run_blocking(|db| db.list_users()).await?;
     Ok(json_ok(serde_json::json!({ "users": users })))
 }
 
@@ -151,11 +173,14 @@ pub async fn update_user(
     Path(id): Path<String>,
     Json(body): Json<UpdateUserBody>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let user = state.db.update_user(
-        &id,
-        Some(body.alias.as_deref()),
-        Some(body.budget_id.as_deref()),
-    )?;
+    let alias = body.alias.clone();
+    let budget_id = body.budget_id.clone();
+    let user = state
+        .db
+        .run_blocking(move |db| {
+            db.update_user(&id, Some(alias.as_deref()), Some(budget_id.as_deref()))
+        })
+        .await?;
     Ok(json_ok(user))
 }
 
@@ -166,7 +191,8 @@ pub async fn create_budget(
 ) -> GatewayResult<impl axum::response::IntoResponse> {
     let budget = state
         .db
-        .create_budget(body.max_budget, body.duration_sec, body.enforce)?;
+        .run_blocking(move |db| db.create_budget(body.max_budget, body.duration_sec, body.enforce))
+        .await?;
     Ok(json_ok(budget))
 }
 
@@ -174,7 +200,7 @@ pub async fn list_budgets(
     State(state): State<Arc<GatewayState>>,
     Auth(_auth): Auth,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let budgets = state.db.list_budgets()?;
+    let budgets = state.db.run_blocking(|db| db.list_budgets()).await?;
     Ok(json_ok(serde_json::json!({ "budgets": budgets })))
 }
 
@@ -183,10 +209,12 @@ pub async fn list_usage(
     Auth(_auth): Auth,
     Query(query): Query<UsageQuery>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
-    let logs = state.db.list_usage(
-        query.user_id.as_deref(),
-        query.key_id.as_deref(),
-        query.limit,
-    )?;
+    let user_id = query.user_id.clone();
+    let key_id = query.key_id.clone();
+    let limit = query.limit;
+    let logs = state
+        .db
+        .run_blocking(move |db| db.list_usage(user_id.as_deref(), key_id.as_deref(), limit))
+        .await?;
     Ok(json_ok(serde_json::json!({ "usage": logs })))
 }

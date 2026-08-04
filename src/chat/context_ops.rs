@@ -212,9 +212,9 @@ pub async fn maybe_summarize_messages(
     summarize_model: &str,
     options: &ChatOptions,
     request_id: &str,
-) -> Result<(), ChatError> {
+) -> Result<bool, ChatError> {
     if !should_summarize(messages, config) {
-        return Ok(());
+        return Ok(false);
     }
     let chars_before = estimate_context_chars(messages);
 
@@ -222,7 +222,7 @@ pub async fn maybe_summarize_messages(
     let has_system = system_msg.as_ref().is_some_and(|m| m.role == "system");
     let start = if has_system { 1 } else { 0 };
     if messages.len().saturating_sub(start) <= config.keep_recent {
-        return Ok(());
+        return Ok(false);
     }
 
     let end = messages.len().saturating_sub(config.keep_recent);
@@ -244,10 +244,10 @@ pub async fn maybe_summarize_messages(
             Ok(encoded) if !encoded.trim().is_empty() => {
                 format!("[AAAK CTX]\n{encoded}\n[/AAAK CTX]")
             }
-            Ok(_) => return Ok(()),
+            Ok(_) => return Ok(false),
             Err(e) => {
                 warn!(error = %e, "AAAK context compression failed; continuing with original messages");
-                return Ok(());
+                return Ok(false);
             }
         }
     } else {
@@ -288,7 +288,7 @@ pub async fn maybe_summarize_messages(
             .map_err(|e| ChatError::Http(crate::http::Error::InvalidJson(e.to_string())))?;
         let text = normalized.content.unwrap_or_default();
         if text.trim().is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         format!("[Conversation Summary]\n{text}")
     };
@@ -308,6 +308,7 @@ pub async fn maybe_summarize_messages(
         tool_call_id: None,
         name: None,
         refusal: None,
+        provider_blocks: None,
     });
     new_messages.extend(tail);
     let chars_after = estimate_context_chars(&new_messages);
@@ -324,7 +325,7 @@ pub async fn maybe_summarize_messages(
         ));
     }
     *messages = new_messages;
-    Ok(())
+    Ok(true)
 }
 
 async fn compress_messages_aaak(
@@ -438,6 +439,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 refusal: None,
+                provider_blocks: None,
             },
             ChatMessage {
                 role: "tool".into(),
@@ -446,6 +448,7 @@ mod tests {
                 tool_call_id: Some("call_1".into()),
                 name: Some("grep".into()),
                 refusal: None,
+                provider_blocks: None,
             },
         ]
     }

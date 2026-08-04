@@ -120,6 +120,132 @@ async fn virtual_key_allowed_model_proxies_and_logs_usage() {
 }
 
 #[tokio::test]
+async fn virtual_key_allowed_model_proxies_responses_and_logs_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "resp-gw",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{ "type": "output_text", "text": "hi" }]
+            }],
+            "usage": { "input_tokens": 12, "output_tokens": 4, "total_tokens": 16 }
+        })))
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_openai(
+        MASTER_KEY,
+        &dir.path().join("gw.db"),
+        &server.uri(),
+        "sk-test",
+    );
+    let app = router(state.clone());
+
+    app.clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/users",
+            MASTER_KEY,
+            Some(json!({ "user_id": "user-1", "alias": "Alice" })),
+        ))
+        .await
+        .unwrap();
+
+    let key_resp = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/keys",
+            MASTER_KEY,
+            Some(json!({
+                "name": "test-key",
+                "user_id": "user-1",
+                "allowed_models": ["openai:gpt-4o-mini"]
+            })),
+        ))
+        .await
+        .unwrap();
+    let virtual_key = body_to_json(key_resp.into_body()).await["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/responses",
+            &virtual_key,
+            Some(json!({
+                "model": "openai:gpt-4o-mini",
+                "input": "hello"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let usage = state.db.list_usage(None, None, 10).unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].user_id, "user-1");
+    assert_eq!(usage[0].prompt_tokens, 12);
+    assert_eq!(usage[0].completion_tokens, 4);
+}
+
+#[tokio::test]
+async fn virtual_key_disallowed_model_returns_403_for_responses() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(MASTER_KEY, &dir.path().join("gw.db"));
+    let app = router(state.clone());
+
+    app.clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/users",
+            MASTER_KEY,
+            Some(json!({ "user_id": "user-1" })),
+        ))
+        .await
+        .unwrap();
+
+    let key_resp = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/keys",
+            MASTER_KEY,
+            Some(json!({
+                "user_id": "user-1",
+                "allowed_models": ["openai:gpt-4o-mini"]
+            })),
+        ))
+        .await
+        .unwrap();
+    let virtual_key = body_to_json(key_resp.into_body()).await["key"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = app
+        .oneshot(auth_request(
+            "POST",
+            "/v1/responses",
+            &virtual_key,
+            Some(json!({
+                "model": "openai:gpt-4o",
+                "input": "hello"
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn virtual_key_disallowed_model_returns_403() {
     let dir = tempfile::tempdir().unwrap();
     let state = test_state(MASTER_KEY, &dir.path().join("gw.db"));
@@ -373,4 +499,81 @@ async fn health_endpoints_work() {
         .await
         .unwrap();
     assert_eq!(ready.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn virtual_key_streaming_completion_logs_usage() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body),
+        )
+        .mount(&server)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_openai(
+        MASTER_KEY,
+        &dir.path().join("gw.db"),
+        &server.uri(),
+        "sk-test",
+    );
+    let app = router(state.clone());
+
+    app.clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/users",
+            MASTER_KEY,
+            Some(json!({ "user_id": "stream-user", "alias": "Stream" })),
+        ))
+        .await
+        .unwrap();
+
+    let key_resp = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/keys",
+            MASTER_KEY,
+            Some(json!({
+                "name": "stream-key",
+                "user_id": "stream-user",
+                "allowed_models": ["openai:gpt-4o-mini"]
+            })),
+        ))
+        .await
+        .unwrap();
+    let key_json = body_to_json(key_resp.into_body()).await;
+    let virtual_key = key_json["key"].as_str().unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/chat/completions",
+            virtual_key,
+            Some(json!({
+                "model": "openai:gpt-4o-mini",
+                "messages": [{ "role": "user", "content": "hello" }],
+                "stream": true
+            })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let _ = body_to_json(resp.into_body()).await;
+
+    let usage = state.db.list_usage(None, None, 10).unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].prompt_tokens, 7);
+    assert_eq!(usage[0].completion_tokens, 3);
 }

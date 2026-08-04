@@ -16,6 +16,6 @@ pub async fn liveness() -> impl IntoResponse {
 pub async fn readiness(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    state.db.ping()?;
+    state.db.run_blocking(|db| db.ping()).await?;
     Ok((StatusCode::OK, "ready"))
 }

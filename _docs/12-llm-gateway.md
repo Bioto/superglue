@@ -122,6 +122,21 @@ Models use the `provider:model` format (`openai:gpt-4o-mini`, `anthropic:claude-
 
 Streaming is supported via `"stream": true`.
 
+## Responses API
+
+```bash
+curl -X POST http://localhost:8080/v1/responses \
+  -H "X-Superglue-Key: Bearer sgw-..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "openai:gpt-4o-mini",
+    "input": "Hello!",
+    "stream": false
+  }'
+```
+
+Supports `openai`, `xai`, and `groq` via OpenAI-compatible `/v1/responses`, and `anthropic` via Messages translation. Streaming uses `"stream": true` (SSE).
+
 ## Budget enforcement
 
 - **enforce=true** — reject requests when `spend >= max_budget` (HTTP 429)
@@ -145,6 +160,7 @@ Upstream provider API keys are loaded from environment variables on the server (
 | GET | `/health` | none | Liveness |
 | GET | `/health/ready` | none | Readiness (DB ping) |
 | POST | `/v1/chat/completions` | any key | Proxy completion |
+| POST | `/v1/responses` | any key | Proxy Responses API (OpenAI-shaped; multi-provider) |
 | GET | `/v1/models` | any key | List allowed models |
 | POST/GET | `/v1/keys` | master | Create/list virtual keys |
 | PATCH/DELETE | `/v1/keys/{id}` | master | Update/revoke keys |

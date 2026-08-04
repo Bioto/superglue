@@ -48,6 +48,7 @@ fn chat_message_with_refusal_serialises() {
         tool_call_id: None,
         name: None,
         refusal: Some("I cannot do that.".into()),
+        provider_blocks: None,
     };
     let v = serde_json::to_value(&msg).unwrap();
     assert_eq!(v["refusal"], "I cannot do that.");

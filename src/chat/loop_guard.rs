@@ -47,7 +47,7 @@ impl ToolLoopGuard {
                         )
                     })
                 }) && let Some(result) = &prior.last_result
-                && !is_notepad_stub_result(result)
+                    && !is_notepad_stub_result(result)
                 {
                     let note = format!(
                         "Read of `{}` lines {}-{} substantially overlaps an earlier read; \

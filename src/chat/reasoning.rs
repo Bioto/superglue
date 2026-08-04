@@ -145,6 +145,26 @@ pub fn normalize_reasoning_effort_str(model: &str, effort: &str) -> Option<Strin
     ReasoningEffort::parse(effort).and_then(|e| normalize_reasoning_effort(model, e))
 }
 
+/// Map OpenAI-style `reasoning_effort` to Anthropic extended-thinking `budget_tokens`.
+///
+/// Returns `None` when thinking should be omitted (`none`, empty, or unrecognized).
+#[must_use]
+pub fn anthropic_thinking_budget_tokens(effort: &str, max_tokens: u32) -> Option<u32> {
+    let parsed = ReasoningEffort::parse(effort)?;
+    if parsed == ReasoningEffort::None {
+        return None;
+    }
+    let budget = match parsed {
+        ReasoningEffort::None => return None,
+        ReasoningEffort::Minimal => 1024,
+        ReasoningEffort::Low => 2048,
+        ReasoningEffort::Medium => 8192,
+        ReasoningEffort::High => 16_384,
+        ReasoningEffort::XHigh => 32_000,
+    };
+    Some(budget.min(max_tokens.saturating_sub(1).max(1024)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +198,13 @@ mod tests {
     #[test]
     fn non_reasoning_model_returns_none() {
         assert!(normalize_reasoning_effort("gpt-4o", ReasoningEffort::High).is_none());
+    }
+
+    #[test]
+    fn anthropic_thinking_budget_scales_with_effort() {
+        assert_eq!(anthropic_thinking_budget_tokens("low", 4096), Some(2048));
+        assert_eq!(anthropic_thinking_budget_tokens("none", 4096), None);
+        assert_eq!(anthropic_thinking_budget_tokens("high", 4096), Some(4095));
     }
 
     #[test]

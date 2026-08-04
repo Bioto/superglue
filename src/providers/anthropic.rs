@@ -12,8 +12,8 @@ use crate::openai::{
 use crate::tools::ToolSpec;
 
 use super::adapter::{
-    LlmProvider, NormalizedCompletion, ProviderParseError, ProviderRequest, ProviderRequestContext,
-    rate_limit_key_for,
+    LlmProvider, NormalizedCompletion, NormalizedResponse, ProviderParseError, ProviderRequest,
+    ProviderRequestContext, ProviderResponsesContext, rate_limit_key_for,
 };
 use super::provider_id::ProviderId;
 
@@ -79,6 +79,8 @@ impl LlmProvider for AnthropicProvider {
             body["temperature"] = json!(temp);
         }
 
+        apply_thinking_and_extra(&mut body, ctx.options, max_tokens);
+
         let rate_limit_key =
             rate_limit_key_for(ctx.model_ref, ctx.credentials).expect("credentials checked");
 
@@ -96,12 +98,29 @@ impl LlmProvider for AnthropicProvider {
         &self,
         json: &Value,
     ) -> Result<NormalizedCompletion, ProviderParseError> {
-        let resp: AnthropicMessageResponse = serde_json::from_value(json.clone())?;
+        let resp = AnthropicMessageResponse::deserialize(json)?;
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut provider_blocks = Vec::new();
         for block in &resp.content {
             match block {
-                AnthropicContentBlock::Text { text } => text_parts.push(text.clone()),
+                AnthropicContentBlock::Text { text } => {
+                    text_parts.push(text.clone());
+                    provider_blocks.push(json!({"type": "text", "text": text}));
+                }
+                AnthropicContentBlock::Thinking {
+                    thinking,
+                    signature,
+                } => {
+                    let mut value = json!({"type": "thinking", "thinking": thinking});
+                    if let Some(sig) = signature {
+                        value["signature"] = json!(sig);
+                    }
+                    provider_blocks.push(value);
+                }
+                AnthropicContentBlock::RedactedThinking { data } => {
+                    provider_blocks.push(json!({"type": "redacted_thinking", "data": data}));
+                }
                 AnthropicContentBlock::ToolUse { id, name, input } => {
                     tool_calls.push(ToolCall {
                         id: id.clone(),
@@ -111,6 +130,12 @@ impl LlmProvider for AnthropicProvider {
                             arguments: input.to_string(),
                         },
                     });
+                    provider_blocks.push(json!({
+                        "type": "tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": input,
+                    }));
                 }
             }
         }
@@ -131,7 +156,70 @@ impl LlmProvider for AnthropicProvider {
             usage,
             finish_reason,
             stop_reason: Some(resp.stop_reason),
+            provider_blocks: if provider_blocks.is_empty() {
+                None
+            } else {
+                Some(provider_blocks)
+            },
         })
+    }
+
+    fn build_responses_request(&self, ctx: &ProviderResponsesContext<'_>) -> ProviderRequest {
+        let instructions = ctx
+            .body
+            .get("instructions")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty());
+        let chat_ctx = ProviderRequestContext {
+            model_ref: ctx.model_ref,
+            credentials: ctx.credentials,
+            messages: ctx.messages,
+            tools: ctx.tools,
+            chat_tools: None,
+            stream: ctx.stream,
+            options: ctx.options,
+        };
+        let mut req = self.build_chat_request(&chat_ctx);
+        if let Some(sys) = instructions {
+            req.body["system"] = json!(sys);
+        }
+        req
+    }
+
+    fn parse_responses_response(
+        &self,
+        json: &Value,
+    ) -> Result<NormalizedResponse, ProviderParseError> {
+        let normalized = self.parse_chat_response(json)?;
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut output = Vec::new();
+        if let Some(text) = normalized.content.filter(|t| !t.is_empty()) {
+            output.push(json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text}],
+            }));
+        }
+        for tc in &normalized.tool_calls {
+            if tc.kind == "function" {
+                output.push(json!({
+                    "type": "function_call",
+                    "call_id": tc.id,
+                    "name": tc.function.name,
+                    "arguments": tc.function.arguments,
+                }));
+            }
+        }
+        Ok(NormalizedResponse {
+            id,
+            output: Value::Array(output),
+            usage: normalized.usage,
+            provider_blocks: normalized.provider_blocks.clone(),
+        })
+    }
+
+    fn supports_previous_response_id(&self) -> bool {
+        false
     }
 
     fn supports_file_upload(&self) -> bool {
@@ -152,6 +240,14 @@ struct AnthropicMessageResponse {
 enum AnthropicContentBlock {
     Text {
         text: String,
+    },
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+    RedactedThinking {
+        data: String,
     },
     ToolUse {
         id: String,
@@ -223,7 +319,12 @@ fn build_system_payload(
         }
     } else if let Some(sys) = legacy_system.filter(|s| !s.is_empty()) {
         Some(Value::String(sys.to_string()))
-    } else if let Some(sp) = ctx.options.system_prompt.as_deref().filter(|s| !s.is_empty()) {
+    } else if let Some(sp) = ctx
+        .options
+        .system_prompt
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
         Some(Value::String(sp.to_string()))
     } else {
         None
@@ -269,6 +370,50 @@ fn build_tools(specs: &[ToolSpec], cache_last: bool) -> Vec<Value> {
         .collect()
 }
 
+fn merge_assistant_tool_calls_into_blocks(
+    blocks: &mut Vec<Value>,
+    tool_calls: Option<&Vec<ToolCall>>,
+) {
+    let Some(tcs) = tool_calls else {
+        return;
+    };
+    for tc in tcs {
+        if tc.kind != "function" {
+            continue;
+        }
+        let already_present = blocks.iter().any(|b| {
+            b.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                && b.get("id").and_then(|id| id.as_str()) == Some(tc.id.as_str())
+        });
+        if already_present {
+            continue;
+        }
+        let input: Value =
+            serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| json!({}));
+        blocks.push(json!({
+            "type": "tool_use",
+            "id": tc.id,
+            "name": tc.function.name,
+            "input": input,
+        }));
+    }
+}
+
+fn merge_assistant_text_into_blocks(blocks: &mut Vec<Value>, content: Option<&MessageContent>) {
+    let Some(text) = content.and_then(|c| c.as_text()) else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    let has_text = blocks
+        .iter()
+        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"));
+    if !has_text {
+        blocks.push(json!({"type": "text", "text": text}));
+    }
+}
+
 fn map_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
     let mut system_parts = Vec::new();
     let mut out = Vec::new();
@@ -289,6 +434,13 @@ fn map_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Value>) {
                 }));
             }
             "assistant" => {
+                if let Some(blocks) = &msg.provider_blocks {
+                    let mut content = blocks.clone();
+                    merge_assistant_tool_calls_into_blocks(&mut content, msg.tool_calls.as_ref());
+                    merge_assistant_text_into_blocks(&mut content, msg.content.as_ref());
+                    out.push(json!({"role": "assistant", "content": content}));
+                    continue;
+                }
                 let mut blocks = Vec::new();
                 if let Some(c) = &msg.content {
                     if let Some(t) = c.as_text() {
@@ -411,6 +563,29 @@ fn infer_media_type(filename: Option<&str>) -> &'static str {
     }
 }
 
+fn apply_thinking_and_extra(body: &mut Value, options: &crate::chat::ChatOptions, max_tokens: u32) {
+    if let Some(effort) = options.reasoning_effort.as_deref()
+        && let Some(budget) =
+            crate::chat::reasoning::anthropic_thinking_budget_tokens(effort, max_tokens)
+    {
+        body["thinking"] = json!({
+            "type": "enabled",
+            "budget_tokens": budget,
+        });
+    }
+    if let Some(extra) = &options.extra_json {
+        merge_extra_json(body, extra);
+    }
+}
+
+fn merge_extra_json(body: &mut Value, extra: &Value) {
+    if let (Value::Object(body_map), Value::Object(extra_map)) = (body, extra) {
+        for (k, v) in extra_map {
+            body_map.insert(k.clone(), v.clone());
+        }
+    }
+}
+
 /// Newer Anthropic models reject `temperature` / `top_p` / `top_k` entirely.
 fn anthropic_supports_sampling_params(model: &str) -> bool {
     let model = model.to_ascii_lowercase();
@@ -430,9 +605,10 @@ fn anthropic_supports_sampling_params(model: &str) -> bool {
 mod tests {
     use super::*;
     use crate::chat::ChatOptions;
+    use crate::openai::ChatMessage;
+    use crate::providers::adapter::ProviderResponsesContext;
     use crate::providers::credentials::ProviderCredentials;
     use crate::providers::model_ref::ModelRef;
-    use crate::openai::ChatMessage;
 
     #[test]
     fn sonnet_5_rejects_sampling_params() {
@@ -528,5 +704,89 @@ mod tests {
         });
         assert_eq!(usage.cached_tokens, Some(60));
         assert_eq!(usage.prompt_tokens, 100);
+    }
+
+    #[test]
+    fn responses_build_hits_messages_path_and_headers() {
+        let mut creds = ProviderCredentials::new();
+        creds.insert_key(ProviderId::Anthropic, "sk-ant-test");
+        let model_ref = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-sonnet-4-20250514".into(),
+            raw: "anthropic:claude-sonnet-4-20250514".into(),
+        };
+        let options = ChatOptions::default();
+        let body = json!({"model": "anthropic:claude-sonnet-4-20250514", "input": "hi"});
+        let ctx = ProviderResponsesContext {
+            model_ref: &model_ref,
+            credentials: &creds,
+            body: &body,
+            messages: &[ChatMessage::text("user", "hi")],
+            tools: None,
+            stream: false,
+            options: &options,
+        };
+        let req = AnthropicProvider::new().build_responses_request(&ctx);
+        assert!(req.url.ends_with("/v1/messages"));
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("x-api-key"))
+        );
+        assert!(
+            req.headers
+                .iter()
+                .any(|(k, v)| k == "anthropic-version" && v == "2023-06-01")
+        );
+    }
+
+    #[test]
+    fn responses_thinking_enabled_from_reasoning_effort() {
+        let mut creds = ProviderCredentials::new();
+        creds.insert_key(ProviderId::Anthropic, "sk-ant-test");
+        let model_ref = ModelRef {
+            provider: ProviderId::Anthropic,
+            model: "claude-sonnet-4-20250514".into(),
+            raw: "anthropic:claude-sonnet-4-20250514".into(),
+        };
+        let options = ChatOptions {
+            reasoning_effort: Some("medium".into()),
+            max_completion_tokens: Some(8192),
+            ..Default::default()
+        };
+        let body = json!({"model": "anthropic:claude-sonnet-4-20250514", "input": "hi"});
+        let ctx = ProviderResponsesContext {
+            model_ref: &model_ref,
+            credentials: &creds,
+            body: &body,
+            messages: &[ChatMessage::text("user", "hi")],
+            tools: None,
+            stream: false,
+            options: &options,
+        };
+        let req = AnthropicProvider::new().build_responses_request(&ctx);
+        assert_eq!(req.body["thinking"]["type"].as_str(), Some("enabled"));
+        assert!(req.body["thinking"]["budget_tokens"].as_u64().unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn parse_responses_maps_tool_use_to_function_call() {
+        let provider = AnthropicProvider::new();
+        let json = json!({
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "echo",
+                "input": {"x": 1}
+            }],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        let normalized = provider.parse_responses_response(&json).unwrap();
+        let output = normalized.output.as_array().expect("output array");
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0]["type"].as_str(), Some("function_call"));
+        assert_eq!(output[0]["name"].as_str(), Some("echo"));
+        assert_eq!(output[0]["call_id"].as_str(), Some("toolu_1"));
     }
 }

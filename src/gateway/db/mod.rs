@@ -157,6 +157,18 @@ impl Database {
             .map_err(|_| GatewayError::Internal("database lock poisoned".into()))
     }
 
+    /// Run a synchronous database operation on the blocking thread pool.
+    pub async fn run_blocking<F, T>(&self, f: F) -> GatewayResult<T>
+    where
+        F: FnOnce(&Self) -> GatewayResult<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || f(&db))
+            .await
+            .map_err(|_| GatewayError::Internal("database task join failed".into()))?
+    }
+
     /// Lightweight health check.
     pub fn ping(&self) -> GatewayResult<()> {
         self.lock()?.query_row("SELECT 1", [], |_| Ok(()))?;

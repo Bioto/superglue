@@ -110,8 +110,7 @@ async fn anthropic_request_includes_prompt_cache_markers() {
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
         .respond_with(|req: &wiremock::Request| {
-            let body: serde_json::Value =
-                serde_json::from_slice(&req.body).unwrap_or(json!({}));
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
             let system = body
                 .get("system")
                 .and_then(|s| s.as_array())
@@ -166,6 +165,112 @@ async fn anthropic_tool_round_then_text() {
                 anthropic_text_response()
             };
             ResponseTemplate::new(200).set_body_json(body)
+        })
+        .mount(&server)
+        .await;
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    let reg = ToolRegistry::new();
+    reg.register(Arc::new(EchoTool)).await.unwrap();
+    let out = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        vec![ChatMessage::text("user", "echo")],
+        &anthropic_opts(&server.uri()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.content.as_deref(), Some("hello anthropic"));
+    assert_eq!(out.rounds, 2);
+}
+
+#[tokio::test]
+async fn anthropic_thinking_in_request_when_reasoning_effort_set() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(|req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+            assert_eq!(body["thinking"]["type"].as_str(), Some("enabled"));
+            assert!(body["thinking"]["budget_tokens"].as_u64().unwrap_or(0) > 0);
+            ResponseTemplate::new(200).set_body_json(anthropic_text_response())
+        })
+        .mount(&server)
+        .await;
+
+    let mut opts = anthropic_opts(&server.uri());
+    opts.reasoning_effort = Some("low".into());
+    opts.max_completion_tokens = Some(4096);
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    complete_with_tools(
+        &http,
+        &ToolRegistry::new(),
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        vec![ChatMessage::text("user", "think")],
+        &opts,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn anthropic_tool_round_preserves_thinking_blocks_in_history() {
+    let server = MockServer::start().await;
+    let n = std::sync::atomic::AtomicU32::new(0);
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(move |req: &wiremock::Request| {
+            let i = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if i == 0 {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "id": "msg_think_tool",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "planning echo", "signature": "sig1"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "echo", "input": {"x": 1}}
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 12, "output_tokens": 8}
+                }))
+            } else {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&req.body).unwrap_or(json!({}));
+                let messages = body
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .expect("messages");
+                let has_thinking = messages.iter().any(|msg| {
+                    msg.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                        && msg
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .is_some_and(|blocks| {
+                                blocks.iter().any(|b| {
+                                    b.get("type").and_then(|t| t.as_str()) == Some("thinking")
+                                })
+                            })
+                });
+                let has_tool_use = messages.iter().any(|msg| {
+                    msg.get("role").and_then(|r| r.as_str()) == Some("assistant")
+                        && msg
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .is_some_and(|blocks| {
+                                blocks.iter().any(|b| {
+                                    b.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                                })
+                            })
+                });
+                assert!(has_thinking, "second request must preserve thinking blocks");
+                assert!(has_tool_use, "second request must preserve tool_use blocks");
+                ResponseTemplate::new(200).set_body_json(anthropic_text_response())
+            }
         })
         .mount(&server)
         .await;

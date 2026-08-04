@@ -2,7 +2,7 @@
 
 ## Current status
 
-**Protobuf schema is implemented**. **gRPC server is implemented** (feature-gated by `--features grpc`). Workflow engine and replay are planned.
+**Protobuf schema is implemented**. **gRPC server is implemented** (feature-gated by `--features grpc`). **Audit resume/replay helpers are shipped** (`RunStore`, `RunRecorder`, `resume_chat`, `resume_response`). Workflow engine remains planned.
 
 ## Why protobuf internally
 
@@ -102,25 +102,29 @@ Two RPCs are exposed:
 |-----|------|-------------|
 | `Complete` | Unary | `chat::complete_with_tools` |
 | `Stream` | Server-streaming | `chat::stream_complete` |
+| `CompleteResponses` | Unary | `responses::complete_with_tools` |
+| `StreamResponses` | Server-streaming | `responses::stream_complete_with_tools` |
 
 Start the server with `superglue serve --addr 0.0.0.0:50051 --api-key $KEY`.
 
-`tonic` pairs with Tower middleware which shares conceptual models with the existing HTTP retry/rate-limit stack. Proto-generated client stubs for host languages are planned.
+Proto-generated Python/JS client stubs: run [`scripts/generate-proto-clients.sh`](../scripts/generate-proto-clients.sh) (Python via `grpcio-tools`; JS via `superglue-js/generated/client.ts` + `@grpc/proto-loader`). Rust tonic client is built with `--features grpc`.
 
 ## Deployment modes
 
 | Mode | Status | Notes |
 |------|--------|-------|
 | **In-process FFI (PyO3)** | ✅ shipped | `superglue-py`; targets CPython 3.14t free-threaded |
-| **gRPC / tonic sidecar** | ✅ shipped | `--features grpc`; exposes `Complete` + `Stream` RPCs |
+| **gRPC / tonic sidecar** | ✅ shipped | `--features grpc`; `Complete`, `Stream`, `CompleteResponses`, `StreamResponses` |
 | **Embedded library** | ✅ shipped | `superglue` crate consumed directly by Rust callers |
 
-## Workflows and hooks — planned
+## Workflows and hooks
 
 Hook and workflow transitions will be representable in the protobuf model so that:
 
 - A run can be **serialized** for resume or audit.
 - **Replay** and debugging can operate on recorded protobuf streams.
+
+**Shipped today:** in-memory audit (`RunStore` / `RunRecorder`), `ClientBuilder::audit`, `resume_chat`, `resume_response`, and `export_record_json` / `import_record_json` for metadata-only replay files. Full workflow orchestration remains planned.
 
 Persistence policy (in-memory only vs. disk vs. external store) will be a configuration matter, consistent with the security tier decisions in [Security and threat model](06-security-and-threat-model.md).
 

@@ -82,7 +82,7 @@ async fn input_guardrail_blocks_before_llm_call() {
     let err = result.unwrap_err();
     assert!(
         matches!(
-            err,
+            err.root_cause(),
             ChatError::Guardrail(GuardrailError {
                 stage: GuardrailStage::Input,
                 ..
@@ -183,7 +183,7 @@ async fn output_guardrail_blocks_after_response() {
     let err = result.unwrap_err();
     assert!(
         matches!(
-            err,
+            err.root_cause(),
             ChatError::Guardrail(GuardrailError {
                 stage: GuardrailStage::Output,
                 ..
@@ -325,8 +325,9 @@ async fn max_length_guardrail_blocks_long_input() {
     .await;
 
     assert!(result.is_err());
+    let err = result.unwrap_err();
     assert!(matches!(
-        result.unwrap_err(),
+        err.root_cause(),
         ChatError::Guardrail(GuardrailError {
             stage: GuardrailStage::Input,
             ..
@@ -334,7 +335,6 @@ async fn max_length_guardrail_blocks_long_input() {
     ));
     assert_eq!(server.received_requests().await.unwrap().len(), 0);
 }
-
 // ---------------------------------------------------------------------------
 // 7. max_length_guardrail_truncates_output
 // ---------------------------------------------------------------------------
@@ -416,8 +416,9 @@ async fn stream_input_guardrail_blocks() {
     .await;
 
     assert!(result.is_err());
+    let err = result.unwrap_err();
     assert!(matches!(
-        result.unwrap_err(),
+        err.root_cause(),
         ChatError::Guardrail(GuardrailError {
             stage: GuardrailStage::Input,
             ..
@@ -535,8 +536,9 @@ async fn custom_handler_blocks() {
     .await;
 
     assert!(result.is_err());
+    let err = result.unwrap_err();
     assert!(matches!(
-        result.unwrap_err(),
+        err.root_cause(),
         ChatError::Guardrail(GuardrailError {
             stage: GuardrailStage::Input,
             ..

@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod completions;
 pub mod health;
+pub mod responses;
 
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ pub fn router(state: Arc<GatewayState>) -> Router {
 
     let proxy = Router::new()
         .route("/v1/chat/completions", post(completions::chat_completions))
+        .route("/v1/responses", post(responses::create_response))
         .route("/v1/models", get(completions::list_models))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -59,7 +61,7 @@ async fn auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, GatewayError> {
-    let ctx = extract_auth(&state, &req)?;
+    let ctx = authenticate_request(&state, req.headers()).await?;
     req.extensions_mut().insert(ctx);
     Ok(next.run(req).await)
 }
@@ -69,15 +71,22 @@ async fn admin_auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Result<Response, GatewayError> {
-    let ctx = extract_auth(&state, &req)?;
+    let ctx = authenticate_request(&state, req.headers()).await?;
     crate::gateway::auth::require_master(&ctx)?;
     req.extensions_mut().insert(ctx);
     Ok(next.run(req).await)
 }
 
-fn extract_auth(state: &GatewayState, req: &Request) -> Result<AuthContext, GatewayError> {
-    let raw = extract_raw_key(req.headers())?;
-    authenticate(&state.db, &raw, &state.master_key_hash)
+async fn authenticate_request(
+    state: &GatewayState,
+    headers: &axum::http::HeaderMap,
+) -> Result<AuthContext, GatewayError> {
+    let raw = extract_raw_key(headers)?;
+    let master_key_hash = state.master_key_hash;
+    state
+        .db
+        .run_blocking(move |db| authenticate(db, &raw, &master_key_hash))
+        .await
 }
 
 pub(crate) fn json_ok<T: serde::Serialize>(value: T) -> impl axum::response::IntoResponse {

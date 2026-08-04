@@ -4,7 +4,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use futures_util::StreamExt;
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -14,14 +13,14 @@ use crate::chat::{
     ChatError, ChatOptions, StreamToolOutcome, condense_tool_round,
     conversation_messages_for_client, credentials_for, dispatch_one, effective_system_prompt,
     estimate_context_chars, fail_partial, has_system_prompt, maybe_summarize_messages,
-    new_tool_loop_guard, notify_llm_payload, observation_hook_ctx, post_json_with_model_fallback,
-    prepend_system_messages, stream_tools,
+    new_tool_loop_guard, notify_llm_payload, observation_hook_ctx, prepend_system_messages,
+    stream_tools,
 };
 use crate::costing::estimate_model_call_cost_usd;
 use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
 use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookRegistry, HookStage};
-use crate::http::{HttpClient, join_base_url, sse::SseParser};
+use crate::http::{HttpClient, sse::SseParser};
 use crate::openai::ChatCompletionChunk;
 use crate::openai::{
     ChatMessage, ContentPart, FunctionCall, ImageDetail, MessageContent, ToolCall, ToolChoice,
@@ -104,6 +103,8 @@ pub struct ResponseOutcome {
     pub request_id: String,
     pub model_used: String,
     pub raw_output: Vec<ResponseOutputItem>,
+    /// Caller-visible chat history after this turn (for audit/resume).
+    pub messages: Vec<ChatMessage>,
 }
 
 /// Streaming Responses API outcome.
@@ -223,22 +224,24 @@ struct ResponseTool {
     parameters: Value,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResponseObject {
     #[serde(default)]
     id: String,
     #[serde(default)]
     output: Vec<ResponseOutputItem>,
     usage: Option<ResponseUsage>,
+    #[serde(skip)]
+    provider_blocks: Option<Vec<Value>>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResponseUsageDetails {
     #[serde(default)]
     cached_tokens: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResponseUsage {
     input_tokens: Option<u32>,
     output_tokens: Option<u32>,
@@ -247,16 +250,36 @@ struct ResponseUsage {
     input_tokens_details: Option<ResponseUsageDetails>,
 }
 
-fn tools_from_registry(specs: Vec<ToolSpec>) -> Vec<ResponseTool> {
+fn tools_from_registry(specs: &[ToolSpec]) -> Vec<ResponseTool> {
     specs
-        .into_iter()
+        .iter()
         .map(|s| ResponseTool {
             r#type: "function".to_string(),
-            name: s.name,
-            description: s.description,
-            parameters: s.parameters_schema,
+            name: s.name.clone(),
+            description: s.description.clone(),
+            parameters: s.parameters_schema.clone(),
         })
         .collect()
+}
+
+#[derive(Serialize)]
+struct ResponseCreateRequestRef<'a> {
+    model: String,
+    input: ResponseInput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<&'a [ResponseTool]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_response_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<ToolChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ResponseReasoning>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
 }
 
 fn usage_from_response(u: &ResponseUsage) -> proto::Usage {
@@ -388,37 +411,175 @@ fn function_calls(output: &[ResponseOutputItem]) -> Vec<(String, String, String)
         .collect()
 }
 
-fn responses_rate_limit_key(options: &ChatOptions) -> Option<crate::providers::RateLimitKey> {
-    let model_ref = crate::providers::parse_model_ref(&options.model);
-    if model_ref.provider != crate::providers::ProviderId::OpenAi {
-        return None;
-    }
-    let creds = credentials_for(options);
-    crate::providers::rate_limit_key_for(&model_ref, &creds).ok()
+fn initial_previous_response_id(options: &ChatOptions) -> Option<String> {
+    options
+        .extra_json
+        .as_ref()
+        .and_then(|extra| extra.get("previous_response_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
-async fn post_response(
+fn shape_responses_body(body: &mut Value, provider: &dyn crate::providers::LlmProvider) {
+    if let Some(obj) = body.as_object_mut() {
+        if !provider.supports_previous_response_id() {
+            obj.remove("previous_response_id");
+            obj.remove("store");
+        }
+        if !provider.supports_prompt_cache_key() {
+            obj.remove("prompt_cache_key");
+        }
+    }
+}
+
+fn response_object_from_normalized(
+    normalized: crate::providers::NormalizedResponse,
+) -> Result<ResponseObject, ResponseError> {
+    let output: Vec<ResponseOutputItem> = normalized
+        .output
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let usage = normalized.usage.map(|u| ResponseUsage {
+        input_tokens: Some(u.prompt_tokens),
+        output_tokens: Some(u.completion_tokens),
+        total_tokens: Some(u.total_tokens),
+        input_tokens_details: u.cached_tokens.map(|cached| ResponseUsageDetails {
+            cached_tokens: Some(cached),
+        }),
+    });
+    Ok(ResponseObject {
+        id: normalized.id,
+        output,
+        usage,
+        provider_blocks: normalized.provider_blocks,
+    })
+}
+
+async fn provider_responses_post(
     http: &HttpClient,
-    url: &str,
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    tool_specs: Option<&[ToolSpec]>,
     body: &Value,
-    headers: &[(&str, &str)],
     options: &ChatOptions,
     request_id: &str,
     round: u32,
 ) -> Result<(ResponseObject, String), ResponseError> {
-    let (val, model) = post_json_with_model_fallback(
+    use crate::chat::post_json_cancellable;
+    use crate::fallback::{FallbackPolicy, effective_models};
+
+    let models = effective_models(&options.model, options.model_fallback.as_ref());
+    let default_policy = FallbackPolicy::default();
+    let policy = options
+        .model_fallback
+        .as_ref()
+        .map(|c| &c.policy)
+        .unwrap_or(&default_policy);
+
+    let mut last_err = None;
+    for (i, model_str) in models.iter().enumerate() {
+        if i > 0 {
+            crate::fallback::emit_model_fallback(
+                options.status_emitter.as_ref(),
+                request_id,
+                &models[i - 1],
+                model_str,
+                round,
+            )
+            .await;
+        }
+
+        let model_ref = crate::providers::parse_model_ref(model_str);
+        credentials
+            .key_for(model_ref.provider)
+            .map_err(ChatError::Credentials)?;
+
+        let provider = crate::providers::resolve_provider(&model_ref);
+        let ctx = crate::providers::ProviderResponsesContext {
+            model_ref: &model_ref,
+            credentials,
+            body,
+            messages,
+            tools: tool_specs,
+            stream: false,
+            options,
+        };
+        let req = provider.build_responses_request(&ctx);
+        let mut shaped_body = req.body;
+        crate::fallback::set_body_model(&mut shaped_body, &model_ref.model);
+        shape_responses_body(&mut shaped_body, provider.as_ref());
+
+        let header_refs: Vec<(&str, &str)> = req
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        match post_json_cancellable(
+            http,
+            &req.url,
+            &shaped_body,
+            &header_refs,
+            Some(req.rate_limit_key),
+            options.cancel.as_ref(),
+        )
+        .await
+        {
+            Ok(val) => {
+                let normalized = provider.parse_responses_response(&val).map_err(|e| {
+                    ResponseError::Chat(ChatError::Http(crate::http::Error::InvalidJson(
+                        e.to_string(),
+                    )))
+                })?;
+                let resp = response_object_from_normalized(normalized)?;
+                return Ok((resp, model_ref.raw));
+            }
+            Err(e) => {
+                if i + 1 < models.len()
+                    && crate::fallback::chat_error_eligible_for_fallback(&e, policy)
+                {
+                    last_err = Some(e);
+                    continue;
+                }
+                return Err(ResponseError::from(e));
+            }
+        }
+    }
+    Err(last_err
+        .map(ResponseError::from)
+        .unwrap_or(ResponseError::Chat(ChatError::Http(
+            crate::http::Error::InvalidJson("model fallback exhausted".into()),
+        ))))
+}
+
+async fn post_response(
+    http: &HttpClient,
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    tool_specs: Option<&[ToolSpec]>,
+    body: &Value,
+    options: &ChatOptions,
+    request_id: &str,
+    round: u32,
+) -> Result<(ResponseObject, String), ResponseError> {
+    provider_responses_post(
         http,
-        url,
+        credentials,
+        messages,
+        tool_specs,
         body,
-        headers,
         options,
         request_id,
         round,
-        responses_rate_limit_key(options),
     )
-    .await?;
-    let resp: ResponseObject = serde_json::from_value(val)?;
-    Ok((resp, model))
+    .await
 }
 
 /// Non-streaming Responses API tool loop with `previous_response_id` threading.
@@ -435,15 +596,66 @@ pub async fn complete_with_tools(
     options: &ChatOptions,
 ) -> Result<ResponseOutcome, ResponseError> {
     let user_message = user_message.into();
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    prepend_system_messages(options, &mut messages);
+    messages.push(ChatMessage::text("user", user_message.clone()));
+    responses_tool_loop(
+        http,
+        registry,
+        hooks,
+        guardrails,
+        messages,
+        user_message,
+        options,
+    )
+    .await
+}
+
+/// Continue a Responses tool loop from an existing transcript (audit resume).
+pub async fn complete_from_messages(
+    http: &HttpClient,
+    registry: &ToolRegistry,
+    hooks: &HookRegistry,
+    guardrails: &GuardrailRegistry,
+    messages: Vec<ChatMessage>,
+    options: &ChatOptions,
+) -> Result<ResponseOutcome, ResponseError> {
+    let user_message = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .and_then(|m| m.content.as_ref())
+        .and_then(|c| c.as_text())
+        .unwrap_or("")
+        .to_string();
+    responses_tool_loop(
+        http,
+        registry,
+        hooks,
+        guardrails,
+        messages,
+        user_message,
+        options,
+    )
+    .await
+}
+
+async fn responses_tool_loop(
+    http: &HttpClient,
+    registry: &ToolRegistry,
+    hooks: &HookRegistry,
+    guardrails: &GuardrailRegistry,
+    mut messages: Vec<ChatMessage>,
+    user_message: String,
+    options: &ChatOptions,
+) -> Result<ResponseOutcome, ResponseError> {
     let start = Instant::now();
     let request_id = options
         .request_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let url = join_base_url(&options.base_url, "/v1/responses");
-    let auth = format!("Bearer {}", options.api_key.expose_secret());
-    let headers = [("Authorization", auth.as_str())];
+    let credentials = credentials_for(options);
 
     // Input guardrails on user message
     if !guardrails.input_is_empty().await {
@@ -459,17 +671,18 @@ pub async fn complete_with_tools(
     }
 
     let specs = registry.list_specs().await;
-    let tools = if specs.is_empty() {
+    let tools_owned = if specs.is_empty() {
         None
     } else {
-        Some(tools_from_registry(specs))
+        Some(tools_from_registry(&specs))
     };
 
     let mut api_calls = 0u32;
     let mut model_used;
-    let mut previous_response_id: Option<String> = None;
+    let mut previous_response_id = initial_previous_response_id(options);
     let mut tool_input: Option<Vec<ResponseInputItem>> = None;
     let loop_guard = new_tool_loop_guard();
+    let had_system_prompt = has_system_prompt(options);
 
     let outcome = loop {
         if api_calls >= options.max_tool_rounds {
@@ -506,24 +719,21 @@ pub async fn complete_with_tools(
         })
         .await;
 
-        notify_llm_payload(
-            options,
-            api_calls,
-            &request_id,
-            &[ChatMessage::text("user", user_message.clone())],
-        );
+        notify_llm_payload(options, api_calls, &request_id, &messages);
 
-        let input = if let Some(items) = &tool_input {
-            ResponseInput::Items(items.clone())
+        let provider =
+            crate::providers::resolve_provider(&crate::providers::parse_model_ref(&options.model));
+        let input = if provider.supports_previous_response_id() {
+            next_response_input(&messages, &previous_response_id, &tool_input)
         } else {
-            ResponseInput::Text(user_message.clone())
+            chat_messages_to_response_input(&messages)
         };
 
-        let req = ResponseCreateRequest {
+        let req = ResponseCreateRequestRef {
             model: options.model.clone(),
             input,
             instructions: effective_system_prompt(options),
-            tools: tools.clone(),
+            tools: tools_owned.as_deref(),
             stream: None,
             previous_response_id: previous_response_id.clone(),
             tool_choice: options.tool_choice.clone(),
@@ -540,8 +750,21 @@ pub async fn complete_with_tools(
             }
         }
 
-        let (resp, round_model) =
-            post_response(http, &url, &body, &headers, options, &request_id, api_calls).await?;
+        let (resp, round_model) = post_response(
+            http,
+            &credentials,
+            &messages,
+            if specs.is_empty() {
+                None
+            } else {
+                Some(specs.as_slice())
+            },
+            &body,
+            options,
+            &request_id,
+            api_calls,
+        )
+        .await?;
 
         model_used = round_model;
         previous_response_id = Some(resp.id.clone());
@@ -592,6 +815,15 @@ pub async fn complete_with_tools(
             .await;
 
             let mut outputs = Vec::new();
+            messages.push(ChatMessage {
+                role: "assistant".to_string(),
+                content: None,
+                tool_calls: Some(tool_calls.clone()),
+                tool_call_id: None,
+                name: None,
+                refusal: None,
+                provider_blocks: resp.provider_blocks.clone(),
+            });
             for (r, (call_id, _, _)) in results.into_iter().zip(calls.iter()) {
                 let msg = r?;
                 let out_text = msg
@@ -603,6 +835,7 @@ pub async fn complete_with_tools(
                     call_id: call_id.clone(),
                     output: out_text.to_string(),
                 });
+                messages.push(msg);
             }
             tool_input = Some(outputs);
             continue;
@@ -610,11 +843,24 @@ pub async fn complete_with_tools(
 
         let content = extract_output_text(&resp.output);
 
+        messages.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: content.clone().map(MessageContent::Text),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            refusal: None,
+            provider_blocks: resp.provider_blocks.clone(),
+        });
+
         if !guardrails.output_is_empty().await {
             let text = content.clone().unwrap_or_default();
             let (guard_out, guard_name) = guardrails.run_output(&text).await;
             match guard_out {
                 GuardrailOutcome::Allow(transformed) => {
+                    if let Some(last) = messages.iter_mut().rev().find(|m| m.role == "assistant") {
+                        last.content = Some(MessageContent::Text(transformed.clone()));
+                    }
                     break ResponseOutcome {
                         id: resp.id,
                         content: Some(transformed),
@@ -623,6 +869,7 @@ pub async fn complete_with_tools(
                         request_id: request_id.clone(),
                         model_used: model_used.clone(),
                         raw_output: resp.output,
+                        messages: conversation_messages_for_client(&messages, had_system_prompt),
                     };
                 }
                 GuardrailOutcome::Block(reason) => {
@@ -641,6 +888,7 @@ pub async fn complete_with_tools(
             request_id: request_id.clone(),
             model_used: model_used.clone(),
             raw_output: resp.output,
+            messages: conversation_messages_for_client(&messages, had_system_prompt),
         };
     };
 
@@ -682,9 +930,9 @@ where
         }
     }
 
-    let url = join_base_url(&options.base_url, "/v1/responses");
-    let auth = format!("Bearer {}", options.api_key.expose_secret());
-    let headers = [("Authorization", auth.as_str())];
+    let credentials = credentials_for(options);
+    let mut messages = vec![ChatMessage::text("user", user_message.clone())];
+    prepend_system_messages(options, &mut messages);
 
     let req = ResponseCreateRequest {
         model: options.model.clone(),
@@ -699,100 +947,21 @@ where
     };
 
     let body = serde_json::to_value(&req)?;
-    let stream = http
-        .post_json_stream_with_headers(&url, &body, &headers, responses_rate_limit_key(options))
-        .await?;
+    let (round_state, model_used) = stream_one_response_round(
+        http,
+        &credentials,
+        &messages,
+        None,
+        &body,
+        options,
+        &request_id,
+        1,
+        &mut on_delta,
+        &mut |_reasoning: String| {},
+    )
+    .await?;
 
-    let mut parser = SseParser::new();
-    let mut content = String::new();
-    let mut response_id = String::new();
-    let model_used = options.model.clone();
-    let mut usage: Option<proto::Usage> = None;
-    let mut stream_error: Option<String> = None;
-
-    futures_util::pin_mut!(stream);
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk?;
-        let text = String::from_utf8_lossy(&bytes);
-        let events = parser.push_str(&text).map_err(ResponseError::Http)?;
-        for event in events {
-            let data = event.data.trim();
-            if data.is_empty() {
-                continue;
-            }
-            let v: Value = serde_json::from_str(data).unwrap_or(Value::Null);
-            let event_type = resolve_sse_event_type(event.event.as_deref(), &v);
-            match event_type.as_str() {
-                "response.created" | "response.in_progress" => {
-                    if let Some(id) = v
-                        .pointer("/response/id")
-                        .or_else(|| v.get("id"))
-                        .and_then(|id| id.as_str())
-                    {
-                        response_id = id.to_string();
-                    }
-                }
-                "response.output_text.delta" => {
-                    if let Some(delta) = v
-                        .get("delta")
-                        .and_then(|d| d.as_str())
-                        .or_else(|| v.pointer("/delta/text").and_then(|t| t.as_str()))
-                    {
-                        content.push_str(delta);
-                        on_delta(delta.to_string());
-                    }
-                }
-                "response.output_text.done" => {
-                    if let Some(text) = v.get("text").and_then(|t| t.as_str()) {
-                        if content.is_empty() {
-                            on_delta(text.to_string());
-                        }
-                        content = text.to_string();
-                    }
-                }
-                "response.content_part.done" => {
-                    let part_type = v
-                        .pointer("/part/type")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or_default();
-                    if part_type == "output_text"
-                        && let Some(text) = v.pointer("/part/text").and_then(|t| t.as_str())
-                    {
-                        if content.is_empty() {
-                            on_delta(text.to_string());
-                        }
-                        content = text.to_string();
-                    }
-                }
-                "response.completed" => {
-                    if let Some(u) = v.pointer("/response/usage") {
-                        usage = Some(usage_from_response_json(u));
-                    }
-                    if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
-                        response_id = id.to_string();
-                    }
-                }
-                "error" | "response.error" | "response.failed" => {
-                    if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
-                        response_id = id.to_string();
-                    }
-                    if let Some(msg) = extract_sse_error_message(&v) {
-                        tracing::warn!(event_type = %event_type, error = %msg, "responses: stream error event");
-                        stream_error = Some(msg);
-                    } else {
-                        stream_error = Some(format!("{event_type} (no details)"));
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    if let Some(err) = stream_error {
-        emit_llm_call_error(options.status_emitter.as_ref(), &request_id, &model_used, 1);
-        return Err(ResponseError::StreamFailed(err));
-    }
-
+    let mut content = round_state.content;
     if !guardrails.output_is_empty().await {
         let (outcome, guard_name) = guardrails.run_output(&content).await;
         match outcome {
@@ -806,9 +975,9 @@ where
     }
 
     Ok(ResponseStreamOutcome {
-        id: response_id,
+        id: round_state.response_id,
         content,
-        usage,
+        usage: round_state.usage,
         request_id,
         model_used,
     })
@@ -998,6 +1167,7 @@ struct ResponsesStreamRound {
     stream_error: Option<String>,
     chat_tool_dispatch: stream_tools::StreamingToolDispatch,
     chat_finish_reason: Option<String>,
+    provider_blocks: Option<Vec<Value>>,
 }
 
 fn format_sse_error_object(err: &Value) -> Option<String> {
@@ -1207,22 +1377,19 @@ fn merge_chat_tool_dispatch(round_state: &mut ResponsesStreamRound) {
 }
 
 fn apply_chat_completion_chunk_event(
-    v: &Value,
+    chunk: &ChatCompletionChunk,
     round_state: &mut ResponsesStreamRound,
     on_delta: &mut impl FnMut(String),
 ) -> bool {
-    if !v.get("choices").is_some_and(|choices| choices.is_array()) {
+    if chunk.choices.is_empty() && chunk.usage.is_none() {
         return false;
     }
-    let Ok(chunk) = serde_json::from_value::<ChatCompletionChunk>(v.clone()) else {
-        return false;
-    };
     if !chunk.id.is_empty() {
         round_state.response_id = chunk.id.clone();
     }
     let prev_len = round_state.content.len();
     let _ready = stream_tools::apply_openai_chunk(
-        &chunk,
+        chunk,
         &mut round_state.content,
         &mut round_state.chat_tool_dispatch,
         &mut round_state.chat_finish_reason,
@@ -1406,8 +1573,9 @@ async fn apply_responses_stream_event(
 
 async fn stream_one_response_round<FO, FR>(
     http: &HttpClient,
-    url: &str,
-    headers: &[(&str, &str)],
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    tool_specs: Option<&[ToolSpec]>,
     body: &Value,
     options: &ChatOptions,
     request_id: &str,
@@ -1419,71 +1587,201 @@ where
     FO: FnMut(String) + Send,
     FR: FnMut(String) + Send,
 {
-    let stream = http
-        .post_json_stream_with_headers(url, body, headers, responses_rate_limit_key(options))
-        .await
-        .map_err(|e| {
-            emit_llm_call_error(
+    use crate::fallback::{FallbackPolicy, effective_models};
+
+    let models = effective_models(&options.model, options.model_fallback.as_ref());
+    let default_policy = FallbackPolicy::default();
+    let policy = options
+        .model_fallback
+        .as_ref()
+        .map(|c| &c.policy)
+        .unwrap_or(&default_policy);
+
+    let mut last_err = None;
+    for (i, model_str) in models.iter().enumerate() {
+        if i > 0 {
+            crate::fallback::emit_model_fallback(
                 options.status_emitter.as_ref(),
                 request_id,
-                &options.model,
+                &models[i - 1],
+                model_str,
                 round,
-            );
-            ResponseError::Http(e)
-        })?;
-
-    let mut parser = SseParser::new();
-    let mut round_state = ResponsesStreamRound::default();
-    let model_used = options.model.clone();
-
-    futures_util::pin_mut!(stream);
-    while let Some(chunk) = stream.next().await {
-        if let Some(token) = &options.cancel
-            && token.is_cancelled()
-        {
-            return Err(ResponseError::Cancelled);
-        }
-        let bytes = chunk.map_err(ResponseError::Http)?;
-        let text = String::from_utf8_lossy(&bytes);
-        let events = parser.push_str(&text).map_err(ResponseError::Http)?;
-        for event in events {
-            let data = event.data.trim();
-            if data.is_empty() {
-                continue;
-            }
-            let v: Value = serde_json::from_str(data).unwrap_or(Value::Null);
-            if apply_chat_completion_chunk_event(&v, &mut round_state, &mut on_delta) {
-                continue;
-            }
-            let event_type = resolve_sse_event_type(event.event.as_deref(), &v);
-            apply_responses_stream_event(
-                &v,
-                &event_type,
-                &mut round_state,
-                &mut on_delta,
-                &mut on_reasoning_delta,
-                options.status_emitter.as_ref(),
-                request_id,
-                round,
-                &model_used,
             )
             .await;
         }
+
+        let model_ref = crate::providers::parse_model_ref(model_str);
+        if let Err(e) = credentials.key_for(model_ref.provider) {
+            return Err(ResponseError::Chat(ChatError::Credentials(e)));
+        }
+
+        let provider = crate::providers::resolve_provider(&model_ref);
+        let ctx = crate::providers::ProviderResponsesContext {
+            model_ref: &model_ref,
+            credentials,
+            body,
+            messages,
+            tools: tool_specs,
+            stream: true,
+            options,
+        };
+        let req = provider.build_responses_request(&ctx);
+        let mut shaped_body = req.body;
+        crate::fallback::set_body_model(&mut shaped_body, &model_ref.model);
+        shape_responses_body(&mut shaped_body, provider.as_ref());
+        let header_refs: Vec<(&str, &str)> = req
+            .headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let stream = match http
+            .post_json_stream_with_headers(
+                &req.url,
+                &shaped_body,
+                &header_refs,
+                Some(req.rate_limit_key),
+            )
+            .await
+        {
+            Ok(stream) => stream,
+            Err(e) => {
+                let chat_err = ChatError::Http(e);
+                if i + 1 < models.len()
+                    && crate::fallback::chat_error_eligible_for_fallback(&chat_err, policy)
+                {
+                    emit_llm_call_error(
+                        options.status_emitter.as_ref(),
+                        request_id,
+                        model_str,
+                        round,
+                    );
+                    last_err = Some(ResponseError::Chat(chat_err));
+                    continue;
+                }
+                emit_llm_call_error(
+                    options.status_emitter.as_ref(),
+                    request_id,
+                    model_str,
+                    round,
+                );
+                return Err(ResponseError::Chat(chat_err));
+            }
+        };
+
+        let mut round_state = ResponsesStreamRound::default();
+        let model_used = model_ref.raw.clone();
+
+        if model_ref.provider == crate::providers::ProviderId::Anthropic {
+            let mut acc = crate::providers::anthropic_stream::AnthropicStreamAccumulator::new();
+            let mut parser = SseParser::new();
+            futures_util::pin_mut!(stream);
+            while let Some(chunk) = stream.next().await {
+                if let Some(token) = &options.cancel
+                    && token.is_cancelled()
+                {
+                    return Err(ResponseError::Cancelled);
+                }
+                let bytes = chunk.map_err(ResponseError::Http)?;
+                let text = String::from_utf8_lossy(&bytes);
+                let events = parser.push_str(&text).map_err(ResponseError::Http)?;
+                for event in events {
+                    let data = event.data.trim();
+                    if data.is_empty() {
+                        continue;
+                    }
+                    if let Ok(Some(delta)) = acc.apply_sse_data(data) {
+                        match delta {
+                            crate::providers::anthropic_stream::AnthropicStreamDelta::Text(t) => {
+                                on_delta(t);
+                            }
+                            crate::providers::anthropic_stream::AnthropicStreamDelta::Thinking(
+                                t,
+                            ) => {
+                                round_state.reasoning.push_str(&t);
+                                on_reasoning_delta(t);
+                            }
+                        }
+                    }
+                }
+            }
+            let thinking = acc.thinking_text().to_string();
+            let outcome = acc.into_round_outcome();
+            round_state.response_id = uuid::Uuid::new_v4().to_string();
+            round_state.content = outcome.content;
+            round_state.reasoning = thinking;
+            round_state.usage = outcome.usage;
+            round_state.provider_blocks = outcome.provider_blocks.clone();
+            for tc in outcome.tool_calls {
+                round_state.function_calls.push(StreamedFunctionCall {
+                    call_id: tc.id,
+                    name: tc.function.name,
+                    arguments: tc.function.arguments,
+                });
+            }
+            return Ok((round_state, model_used));
+        }
+
+        let mut parser = SseParser::new();
+
+        futures_util::pin_mut!(stream);
+        while let Some(chunk) = stream.next().await {
+            if let Some(token) = &options.cancel
+                && token.is_cancelled()
+            {
+                return Err(ResponseError::Cancelled);
+            }
+            let bytes = chunk.map_err(ResponseError::Http)?;
+            let text = String::from_utf8_lossy(&bytes);
+            let events = parser.push_str(&text).map_err(ResponseError::Http)?;
+            for event in events {
+                let data = event.data.trim();
+                if data.is_empty() {
+                    continue;
+                }
+                if data.is_empty() {
+                    continue;
+                }
+                if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
+                    if apply_chat_completion_chunk_event(&chunk, &mut round_state, &mut on_delta) {
+                        continue;
+                    }
+                }
+                let v: Value = serde_json::from_str(data).unwrap_or(Value::Null);
+                let event_type = resolve_sse_event_type(event.event.as_deref(), &v);
+                apply_responses_stream_event(
+                    &v,
+                    &event_type,
+                    &mut round_state,
+                    &mut on_delta,
+                    &mut on_reasoning_delta,
+                    options.status_emitter.as_ref(),
+                    request_id,
+                    round,
+                    &model_used,
+                )
+                .await;
+            }
+        }
+
+        if let Some(err) = round_state.stream_error {
+            emit_llm_call_error(
+                options.status_emitter.as_ref(),
+                request_id,
+                model_str,
+                round,
+            );
+            return Err(ResponseError::StreamFailed(err));
+        }
+
+        merge_chat_tool_dispatch(&mut round_state);
+
+        return Ok((round_state, model_used));
     }
 
-    if let Some(err) = round_state.stream_error {
-        emit_llm_call_error(
-            options.status_emitter.as_ref(),
-            request_id,
-            &options.model,
-            round,
-        );
-        return Err(ResponseError::StreamFailed(err));
-    }
-
-    merge_chat_tool_dispatch(&mut round_state);
-
-    Ok((round_state, model_used))
+    Err(last_err.unwrap_or(ResponseError::Chat(ChatError::Http(
+        crate::http::Error::InvalidJson("model fallback exhausted".into()),
+    ))))
 }
 
 fn emit_llm_call_error(
@@ -1529,10 +1827,6 @@ where
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let url = join_base_url(&options.base_url, "/v1/responses");
-    let auth = format!("Bearer {}", options.api_key.expose_secret());
-    let headers = [("Authorization", auth.as_str())];
-
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(caller_messages.len() + 1);
     prepend_system_messages(options, &mut messages);
     messages.extend(caller_messages);
@@ -1572,14 +1866,14 @@ where
     }
 
     let specs = registry.list_specs().await;
-    let tools = if specs.is_empty() {
+    let tools_owned = if specs.is_empty() {
         None
     } else {
-        Some(tools_from_registry(specs))
+        Some(tools_from_registry(&specs))
     };
 
     let mut api_calls = 0u32;
-    let mut previous_response_id: Option<String> = None;
+    let mut previous_response_id = initial_previous_response_id(options);
     let mut tool_input: Option<Vec<ResponseInputItem>> = None;
     let loop_guard = new_tool_loop_guard();
     let credentials = credentials_for(options);
@@ -1630,8 +1924,7 @@ where
                 )
             })?;
 
-        let messages_json_before = serde_json::to_vec(&messages).ok();
-        maybe_summarize_messages(
+        let mutated = maybe_summarize_messages(
             http,
             &credentials,
             &mut messages,
@@ -1644,7 +1937,7 @@ where
         )
         .await
         .map_err(|e| fail_response_partial(ResponseError::from(e), &messages, had_system_prompt))?;
-        if serde_json::to_vec(&messages).ok() != messages_json_before {
+        if mutated {
             reset_chain_after_context_mutation(&mut previous_response_id, &mut tool_input);
         }
 
@@ -1669,13 +1962,19 @@ where
             tool_input = None;
         }
 
-        let input = next_response_input(&messages, &previous_response_id, &tool_input);
+        let provider =
+            crate::providers::resolve_provider(&crate::providers::parse_model_ref(&options.model));
+        let input = if provider.supports_previous_response_id() {
+            next_response_input(&messages, &previous_response_id, &tool_input)
+        } else {
+            chat_messages_to_response_input(&messages)
+        };
 
-        let req = ResponseCreateRequest {
+        let req = ResponseCreateRequestRef {
             model: options.model.clone(),
             input,
             instructions: effective_system_prompt(options),
-            tools: tools.clone(),
+            tools: tools_owned.as_deref(),
             stream: Some(true),
             previous_response_id: previous_response_id.clone(),
             tool_choice: options.tool_choice.clone(),
@@ -1696,8 +1995,13 @@ where
 
         let (round_state, round_model) = stream_one_response_round(
             http,
-            &url,
-            &headers,
+            &credentials,
+            &messages,
+            if specs.is_empty() {
+                None
+            } else {
+                Some(specs.as_slice())
+            },
             &body,
             options,
             &request_id,
@@ -1757,6 +2061,7 @@ where
                 tool_call_id: None,
                 name: None,
                 refusal: None,
+                provider_blocks: round_state.provider_blocks.clone(),
             });
 
             let results = futures_util::future::join_all(tool_calls.iter().map(|tc| {
@@ -1833,6 +2138,7 @@ where
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: round_state.provider_blocks.clone(),
         });
 
         if !guardrails.output_is_empty().await {
@@ -1889,10 +2195,88 @@ fn reset_chain_after_context_mutation(
     *tool_input = None;
 }
 
+/// Gateway-facing single-hop Responses proxy (non-streaming).
+#[cfg(feature = "gateway")]
+pub async fn proxy_responses_post(
+    http: &HttpClient,
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    body: &Value,
+    options: &ChatOptions,
+    request_id: &str,
+) -> Result<(Value, crate::providers::ModelRef), ResponseError> {
+    let (resp, model_used) = provider_responses_post(
+        http,
+        credentials,
+        messages,
+        None,
+        body,
+        options,
+        request_id,
+        1,
+    )
+    .await?;
+    let val = serde_json::to_value(&resp).map_err(ResponseError::Serde)?;
+    let model_ref = crate::providers::parse_model_ref(&model_used);
+    Ok((val, model_ref))
+}
+
+/// Gateway-facing single-hop Responses proxy (streaming).
+#[cfg(feature = "gateway")]
+pub async fn proxy_responses_stream(
+    http: &HttpClient,
+    credentials: &crate::providers::ProviderCredentials,
+    messages: &[ChatMessage],
+    body: &Value,
+    options: &ChatOptions,
+    _request_id: &str,
+) -> Result<
+    (
+        impl futures_util::Stream<Item = Result<bytes::Bytes, crate::http::Error>> + Send + use<>,
+        crate::providers::ModelRef,
+    ),
+    ResponseError,
+> {
+    let model_ref = crate::providers::parse_model_ref(&options.model);
+    credentials
+        .key_for(model_ref.provider)
+        .map_err(|e| ResponseError::Chat(ChatError::Credentials(e)))?;
+
+    let provider = crate::providers::resolve_provider(&model_ref);
+    let ctx = crate::providers::ProviderResponsesContext {
+        model_ref: &model_ref,
+        credentials,
+        body,
+        messages,
+        tools: None,
+        stream: true,
+        options,
+    };
+    let req = provider.build_responses_request(&ctx);
+    let mut shaped_body = req.body;
+    shape_responses_body(&mut shaped_body, provider.as_ref());
+    let header_refs: Vec<(&str, &str)> = req
+        .headers
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let stream = http
+        .post_json_stream_with_headers(
+            &req.url,
+            &shaped_body,
+            &header_refs,
+            Some(req.rate_limit_key),
+        )
+        .await
+        .map_err(ResponseError::Http)?;
+    Ok((stream, model_ref))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::images::{ImageStore, resolve_message_content};
+    use crate::providers::resolve_provider;
     use serde_json::json;
 
     #[test]
@@ -2294,13 +2678,14 @@ mod tests {
 
     #[test]
     fn chat_completion_chunk_without_id_is_accepted() {
-        let chunk = json!({
+        let chunk: ChatCompletionChunk = serde_json::from_value(json!({
             "choices": [{
                 "index": 0,
                 "delta": { "content": "hello" },
                 "finish_reason": null
             }]
-        });
+        }))
+        .unwrap();
         let mut round_state = ResponsesStreamRound::default();
         let mut deltas = Vec::new();
         assert!(apply_chat_completion_chunk_event(
@@ -2423,6 +2808,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: None,
         }];
         let ResponseInput::Items(items) = chat_messages_to_response_input(&messages) else {
             panic!("expected items");
@@ -2456,6 +2842,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: None,
         }];
         let ResponseInput::Items(items) = chat_messages_to_response_input(&messages) else {
             panic!("expected items");
@@ -2489,6 +2876,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 refusal: None,
+                provider_blocks: None,
             },
             ChatMessage {
                 role: "tool".into(),
@@ -2497,6 +2885,7 @@ mod tests {
                 tool_call_id: Some("call_ok".into()),
                 name: Some("echo".into()),
                 refusal: None,
+                provider_blocks: None,
             },
             ChatMessage {
                 role: "tool".into(),
@@ -2505,6 +2894,7 @@ mod tests {
                 tool_call_id: Some("call_missing".into()),
                 name: Some("echo".into()),
                 refusal: None,
+                provider_blocks: None,
             },
         ];
         let ResponseInput::Items(items) = chat_messages_to_response_input(&messages) else {
@@ -2549,6 +2939,43 @@ mod tests {
     }
 
     #[test]
+    fn response_body_includes_previous_response_id_from_extra_json() {
+        let options = ChatOptions {
+            extra_json: Some(json!({"previous_response_id": "resp_tool"})),
+            model: "mock".into(),
+            ..Default::default()
+        };
+        let prev = initial_previous_response_id(&options);
+        assert_eq!(prev.as_deref(), Some("resp_tool"));
+
+        let req = ResponseCreateRequest {
+            model: options.model.clone(),
+            input: ResponseInput::Text("continue".into()),
+            instructions: None,
+            tools: None,
+            stream: None,
+            previous_response_id: prev,
+            tool_choice: None,
+            reasoning: None,
+            prompt_cache_key: None,
+        };
+        let mut body = serde_json::to_value(&req).unwrap();
+        if let Some(extra) = &options.extra_json {
+            if let (Value::Object(b), Value::Object(e)) = (&mut body, extra) {
+                for (k, v) in e {
+                    b.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        let provider = resolve_provider(&crate::providers::parse_model_ref("mock"));
+        shape_responses_body(&mut body, provider.as_ref());
+        assert_eq!(
+            body.get("previous_response_id").and_then(|v| v.as_str()),
+            Some("resp_tool")
+        );
+    }
+
+    #[test]
     fn usage_from_response_json_reads_cached_tokens() {
         let usage = usage_from_response_json(&json!({
             "input_tokens": 120,
@@ -2558,5 +2985,77 @@ mod tests {
         }));
         assert_eq!(usage.prompt_tokens, 120);
         assert_eq!(usage.cached_tokens, Some(90));
+    }
+
+    #[test]
+    fn shape_responses_body_strips_prev_id_for_groq() {
+        let mut body = json!({
+            "model": "groq:llama",
+            "previous_response_id": "resp_1",
+            "store": true,
+            "prompt_cache_key": "key"
+        });
+        let provider = resolve_provider(&crate::providers::parse_model_ref("groq:llama"));
+        shape_responses_body(&mut body, provider.as_ref());
+        assert!(body.get("previous_response_id").is_none());
+        assert!(body.get("store").is_none());
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn shape_responses_body_strips_prompt_cache_key_for_anthropic() {
+        let mut body = json!({
+            "model": "anthropic:claude",
+            "prompt_cache_key": "key"
+        });
+        let provider = resolve_provider(&crate::providers::parse_model_ref(
+            "anthropic:claude-sonnet-4",
+        ));
+        shape_responses_body(&mut body, provider.as_ref());
+        assert!(body.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn shape_responses_body_keeps_fields_for_openai_and_xai() {
+        let mut openai_body = json!({
+            "model": "gpt-4o",
+            "previous_response_id": "resp_1",
+            "store": true,
+            "prompt_cache_key": "key"
+        });
+        let openai = resolve_provider(&crate::providers::parse_model_ref("openai:gpt-4o"));
+        shape_responses_body(&mut openai_body, openai.as_ref());
+        assert_eq!(
+            openai_body
+                .get("previous_response_id")
+                .and_then(|v| v.as_str()),
+            Some("resp_1")
+        );
+        assert_eq!(
+            openai_body.get("store").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            openai_body.get("prompt_cache_key").and_then(|v| v.as_str()),
+            Some("key")
+        );
+
+        let mut xai_body = json!({
+            "model": "xai:grok",
+            "previous_response_id": "resp_2",
+            "prompt_cache_key": "conv"
+        });
+        let xai = resolve_provider(&crate::providers::parse_model_ref("xai:grok-4"));
+        shape_responses_body(&mut xai_body, xai.as_ref());
+        assert_eq!(
+            xai_body
+                .get("previous_response_id")
+                .and_then(|v| v.as_str()),
+            Some("resp_2")
+        );
+        assert_eq!(
+            xai_body.get("prompt_cache_key").and_then(|v| v.as_str()),
+            Some("conv")
+        );
     }
 }

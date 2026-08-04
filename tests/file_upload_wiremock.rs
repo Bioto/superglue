@@ -88,6 +88,7 @@ async fn anthropic_inline_document_in_request() {
         tool_call_id: None,
         name: None,
         refusal: None,
+        provider_blocks: None,
     };
 
     let out = complete_with_tools(

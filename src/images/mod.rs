@@ -132,6 +132,7 @@ pub fn message_with_image_bytes(text: Option<&str>, filename: &str, bytes: &[u8]
         tool_call_id: None,
         name: None,
         refusal: None,
+        provider_blocks: None,
     }
 }
 
@@ -286,6 +287,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: None,
         };
         let restored = restore_image_refs_in_messages(vec![msg], &store);
         let Some(MessageContent::Parts(parts)) = &restored[0].content else {

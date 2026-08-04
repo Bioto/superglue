@@ -146,7 +146,7 @@ async fn http_401_returns_error() {
     .await
     .unwrap_err();
     assert!(
-        matches!(err, ChatError::Http(_)),
+        matches!(err.root_cause(), ChatError::Http(_)),
         "expected Http error, got {err:?}"
     );
 }
@@ -177,7 +177,7 @@ async fn http_403_returns_error_not_retried() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, ChatError::Http(_)));
+    assert!(matches!(err.root_cause(), ChatError::Http(_)));
     assert_eq!(count.load(Ordering::SeqCst), 1, "403 must not be retried");
 }
 
@@ -273,7 +273,10 @@ async fn empty_choices_returns_no_choice_error() {
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, ChatError::NoChoice), "got {err:?}");
+    assert!(
+        matches!(err.root_cause(), ChatError::NoChoice),
+        "got {err:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -312,12 +315,18 @@ async fn malformed_tool_args_returns_error_to_model_not_turn_failure() {
     )
     .await;
     assert!(
-        !matches!(result, Err(ChatError::Serde(_))),
+        !matches!(
+            result.as_ref().err().map(|e| e.root_cause()),
+            Some(ChatError::Serde(_))
+        ),
         "malformed tool args should not propagate as ChatError::Serde; got {result:?}"
     );
     // The mock keeps returning bad args so the run exhausts rounds.
     assert!(
-        matches!(result, Err(ChatError::MaxToolRounds(_))) || result.is_ok(),
+        matches!(
+            result.as_ref().err().map(|e| e.root_cause()),
+            Some(ChatError::MaxToolRounds(_))
+        ) || result.is_ok(),
         "expected MaxToolRounds or success (model recovers), got {result:?}"
     );
 }
@@ -351,7 +360,10 @@ async fn unknown_tool_returns_tool_error() {
     .await
     .unwrap_err();
     assert!(
-        matches!(err, ChatError::Tool(ToolInvokeError::UnknownTool { .. })),
+        matches!(
+            err.root_cause(),
+            ChatError::Tool(ToolInvokeError::UnknownTool { .. })
+        ),
         "got {err:?}"
     );
 }
@@ -385,7 +397,10 @@ async fn tool_handler_error_propagates() {
     .await
     .unwrap_err();
     assert!(
-        matches!(err, ChatError::Tool(ToolInvokeError::HandlerFailed { .. })),
+        matches!(
+            err.root_cause(),
+            ChatError::Tool(ToolInvokeError::HandlerFailed { .. })
+        ),
         "got {err:?}"
     );
 }

@@ -120,6 +120,7 @@ pub fn condense_tool_round(messages: &mut Vec<ChatMessage>, aaak_tool_condensing
         tool_call_id: None,
         name: None,
         refusal: None,
+        provider_blocks: None,
     });
 }
 
@@ -143,6 +144,7 @@ mod tests {
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: None,
         }
     }
 
@@ -157,6 +159,7 @@ mod tests {
                 tool_call_id: Some("c1".into()),
                 name: Some("echo".into()),
                 refusal: None,
+                provider_blocks: None,
             },
         ];
         condense_tool_round(&mut messages, false);
@@ -199,6 +202,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 refusal: None,
+                provider_blocks: None,
             },
             ChatMessage {
                 role: "tool".into(),
@@ -207,6 +211,7 @@ mod tests {
                 tool_call_id: Some("g1".into()),
                 name: Some("grep".into()),
                 refusal: None,
+                provider_blocks: None,
             },
         ];
         condense_tool_round(&mut messages, false);
@@ -242,6 +247,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 refusal: None,
+                provider_blocks: None,
             },
             ChatMessage {
                 role: "tool".into(),
@@ -250,6 +256,7 @@ mod tests {
                 tool_call_id: Some("p1".into()),
                 name: Some("patch".into()),
                 refusal: None,
+                provider_blocks: None,
             },
         ];
         condense_tool_round(&mut messages, false);
@@ -285,6 +292,7 @@ mod tests {
                 tool_call_id: None,
                 name: None,
                 refusal: None,
+                provider_blocks: None,
             },
             ChatMessage {
                 role: "tool".into(),
@@ -295,6 +303,7 @@ mod tests {
                 tool_call_id: Some("c1".into()),
                 name: Some("ask_user".into()),
                 refusal: None,
+                provider_blocks: None,
             },
         ];
         condense_tool_round(&mut messages, false);

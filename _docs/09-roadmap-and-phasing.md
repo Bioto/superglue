@@ -37,12 +37,12 @@
 
 ## Phase 4: gRPC and additional bindings ✅ partial
 
-- ✅ `tonic` gRPC server exposing `complete` (unary) and `stream` (server-streaming) as RPCs.
+- ✅ `tonic` gRPC server exposing `Complete`, `Stream`, `CompleteResponses`, and `StreamResponses` RPCs.
 - ✅ Audit trail — `HookEvent` + `RunRecord` proto types; `RunStore` + `RunRecorder`.
-- 🔲 Proto-generated client stubs for Python (replacing PyO3 for the gRPC deployment mode).
-- 🔲 Node.js binding via `napi-rs`.
+- ✅ Proto-generated gRPC client stubs (`scripts/generate-proto-clients.sh`; Python + JS loader; Rust tonic client).
+- ✅ Node.js binding via `napi-rs`.
 - 🔲 Workflow engine and hook dispatch with protobuf event streams.
-- 🔲 Replay / run-resume from recorded protobuf audit streams.
+- ✅ Replay / run-resume from recorded audit records (`audit::resume_*`).
 
 ## Phase 5: Hardening and ecosystem ✅ partial
 

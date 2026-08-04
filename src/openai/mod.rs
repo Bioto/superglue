@@ -139,6 +139,9 @@ pub struct ChatMessage {
     /// Refusal text from the model (assistant messages only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refusal: Option<String>,
+    /// Provider-native content blocks preserved for round-trip (e.g. Anthropic thinking).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub provider_blocks: Option<Vec<Value>>,
 }
 
 impl ChatMessage {
@@ -151,6 +154,21 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             refusal: None,
+            provider_blocks: None,
+        }
+    }
+}
+
+impl Default for ChatMessage {
+    fn default() -> Self {
+        Self {
+            role: String::new(),
+            content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            refusal: None,
+            provider_blocks: None,
         }
     }
 }
