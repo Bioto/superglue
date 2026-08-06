@@ -17,6 +17,8 @@ pub struct AuthContext {
     pub is_master: bool,
     /// `None` means unrestricted (master key only).
     pub allowed_models: Option<Vec<String>>,
+    /// Max reasoning effort from key metadata; `None` means no cap.
+    pub max_reasoning_effort: Option<String>,
 }
 
 /// Axum extractor for [`AuthContext`] populated by route middleware.
@@ -92,6 +94,7 @@ pub fn authenticate(
             user_id: String::new(),
             is_master: true,
             allowed_models: None,
+            max_reasoning_effort: None,
         });
     }
 
@@ -102,12 +105,25 @@ pub fn authenticate(
     validate_virtual_key(&record)?;
 
     let models = db.list_key_models(&record.id)?;
+    let max_reasoning_effort = record
+        .metadata_json
+        .as_deref()
+        .and_then(parse_max_reasoning_effort);
     Ok(AuthContext {
         key_id: Some(record.id),
         user_id: record.user_id,
         is_master: false,
         allowed_models: Some(models),
+        max_reasoning_effort,
     })
+}
+
+fn parse_max_reasoning_effort(metadata_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(metadata_json).ok()?;
+    value
+        .get("max_reasoning_effort")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 fn validate_virtual_key(record: &ApiKeyRecord) -> GatewayResult<()> {

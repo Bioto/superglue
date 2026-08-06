@@ -173,17 +173,23 @@ impl RemoteClient {
         &self,
         user_id: &str,
         alias: Option<&str>,
-        budget_id: Option<&str>,
+        budget_id: Option<Option<&str>>,
     ) -> GatewayResult<UserRecord> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
             #[serde(skip_serializing_if = "Option::is_none")]
             alias: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            budget_id: Option<&'a str>,
+            budget_id: Option<Option<&'a str>>,
         }
-        self.patch_json(&format!("/v1/users/{user_id}"), &Body { alias, budget_id })
-            .await
+        self.patch_json(
+            &format!("/v1/users/{user_id}"),
+            &Body {
+                alias,
+                budget_id: budget_id.map(|b| b),
+            },
+        )
+        .await
     }
 
     pub async fn delete_user(&self, user_id: &str) -> GatewayResult<DeleteUserResult> {
@@ -235,7 +241,8 @@ impl RemoteClient {
         id: &str,
         active: Option<bool>,
         models: Option<&[String]>,
-        expires_at: Option<&str>,
+        expires_at: Option<Option<&str>>,
+        metadata: Option<serde_json::Value>,
     ) -> GatewayResult<ApiKeyListItem> {
         #[derive(serde::Serialize)]
         struct Body<'a> {
@@ -244,14 +251,17 @@ impl RemoteClient {
             #[serde(skip_serializing_if = "Option::is_none")]
             allowed_models: Option<&'a [String]>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            expires_at: Option<&'a str>,
+            expires_at: Option<Option<&'a str>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            metadata: Option<serde_json::Value>,
         }
         self.patch_json(
             &format!("/v1/keys/{id}"),
             &Body {
                 active,
                 allowed_models: models,
-                expires_at,
+                expires_at: expires_at.map(|e| e),
+                metadata,
             },
         )
         .await
@@ -289,6 +299,44 @@ impl RemoteClient {
         Ok(resp.budgets)
     }
 
+    pub async fn update_budget(
+        &self,
+        id: &str,
+        max_budget: Option<f64>,
+        duration_sec: Option<i64>,
+        enforce: Option<bool>,
+    ) -> GatewayResult<BudgetRecord> {
+        #[derive(serde::Serialize)]
+        struct Body {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_budget: Option<f64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            duration_sec: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            enforce: Option<bool>,
+        }
+        self.patch_json(
+            &format!("/v1/budgets/{id}"),
+            &Body {
+                max_budget,
+                duration_sec,
+                enforce,
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_budget(&self, id: &str) -> GatewayResult<serde_json::Value> {
+        let resp = self
+            .http
+            .delete(format!("{}/v1/budgets/{id}", self.base_url))
+            .header("X-Superglue-Key", self.auth_header())
+            .send()
+            .await
+            .map_err(|e| GatewayError::Internal(format!("request failed: {e}")))?;
+        parse_json(resp).await
+    }
+
     pub async fn list_usage(
         &self,
         user_id: Option<&str>,
@@ -312,6 +360,63 @@ impl RemoteClient {
             .map_err(|e| GatewayError::Internal(format!("request failed: {e}")))?;
         let parsed: UsageResponse = parse_json(resp).await?;
         Ok(parsed.usage)
+    }
+
+    pub async fn usage_summary(
+        &self,
+        user_id: Option<&str>,
+        key_id: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
+        group_by: &str,
+    ) -> GatewayResult<crate::gateway::db::UsageSummary> {
+        let mut req = self
+            .http
+            .get(format!("{}/v1/usage/summary", self.base_url))
+            .header("X-Superglue-Key", self.auth_header())
+            .query(&[("group_by", group_by.to_string())]);
+        if let Some(user_id) = user_id {
+            req = req.query(&[("user_id", user_id)]);
+        }
+        if let Some(key_id) = key_id {
+            req = req.query(&[("key_id", key_id)]);
+        }
+        if let Some(from) = from {
+            req = req.query(&[("from", from)]);
+        }
+        if let Some(to) = to {
+            req = req.query(&[("to", to)]);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| GatewayError::Internal(format!("request failed: {e}")))?;
+        parse_json(resp).await
+    }
+
+    pub async fn list_budget_resets(
+        &self,
+        user_id: Option<&str>,
+        limit: u32,
+    ) -> GatewayResult<Vec<crate::gateway::db::BudgetResetLogRecord>> {
+        let mut req = self
+            .http
+            .get(format!("{}/v1/budget-resets", self.base_url))
+            .header("X-Superglue-Key", self.auth_header())
+            .query(&[("limit", limit.to_string())]);
+        if let Some(user_id) = user_id {
+            req = req.query(&[("user_id", user_id)]);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| GatewayError::Internal(format!("request failed: {e}")))?;
+        #[derive(Deserialize)]
+        struct ResetsResponse {
+            resets: Vec<crate::gateway::db::BudgetResetLogRecord>,
+        }
+        let parsed: ResetsResponse = parse_json(resp).await?;
+        Ok(parsed.resets)
     }
 
     pub async fn list_models(&self, api_key: &str) -> GatewayResult<Vec<serde_json::Value>> {

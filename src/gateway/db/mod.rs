@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::gateway::auth::hash_key;
 use crate::gateway::error::{GatewayError, GatewayResult};
 
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS budgets (
@@ -68,6 +68,73 @@ CREATE TABLE IF NOT EXISTS budget_reset_logs (
     reset_at TEXT NOT NULL
 );
 ";
+
+const MIGRATION_V2: &str = "
+CREATE INDEX IF NOT EXISTS idx_usage_logs_created_at ON usage_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_user_created ON usage_logs(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_key_created ON usage_logs(key_id, created_at);
+";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetResetLogRecord {
+    pub id: String,
+    pub user_id: String,
+    pub budget_id: String,
+    pub previous_spend: f64,
+    pub reset_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageSummaryTotals {
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageSummaryRow {
+    pub key: String,
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageSummary {
+    pub totals: UsageSummaryTotals,
+    pub groups: Vec<UsageSummaryRow>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageSummaryGroupBy {
+    User,
+    Model,
+    Key,
+    Day,
+}
+
+impl UsageSummaryGroupBy {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "user" => Some(Self::User),
+            "model" => Some(Self::Model),
+            "key" => Some(Self::Key),
+            "day" => Some(Self::Day),
+            _ => None,
+        }
+    }
+
+    fn group_sql(&self) -> &'static str {
+        match self {
+            Self::User => "user_id",
+            Self::Model => "model",
+            Self::Key => "COALESCE(key_id, '')",
+            Self::Day => "substr(created_at, 1, 10)",
+        }
+    }
+}
 
 /// Thread-safe SQLite handle (single connection + WAL).
 #[derive(Clone)]
@@ -212,6 +279,66 @@ impl Database {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn update_budget(
+        &self,
+        budget_id: &str,
+        max_budget: Option<f64>,
+        duration_sec: Option<i64>,
+        enforce: Option<bool>,
+    ) -> GatewayResult<BudgetRecord> {
+        let conn = self.lock()?;
+        if let Some(v) = max_budget {
+            let n = conn.execute(
+                "UPDATE budgets SET max_budget = ?1 WHERE id = ?2",
+                params![v, budget_id],
+            )?;
+            if n == 0 {
+                return Err(GatewayError::not_found(format!("budget {budget_id} not found")));
+            }
+        }
+        if let Some(v) = duration_sec {
+            let n = conn.execute(
+                "UPDATE budgets SET duration_sec = ?1 WHERE id = ?2",
+                params![v, budget_id],
+            )?;
+            if n == 0 {
+                return Err(GatewayError::not_found(format!("budget {budget_id} not found")));
+            }
+        }
+        if let Some(v) = enforce {
+            let n = conn.execute(
+                "UPDATE budgets SET enforce = ?1 WHERE id = ?2",
+                params![i32::from(v), budget_id],
+            )?;
+            if n == 0 {
+                return Err(GatewayError::not_found(format!("budget {budget_id} not found")));
+            }
+        }
+        conn.query_row(
+            "SELECT id, max_budget, duration_sec, enforce, created_at FROM budgets WHERE id = ?1",
+            params![budget_id],
+            map_budget,
+        )
+        .optional()?
+        .ok_or_else(|| GatewayError::not_found(format!("budget {budget_id} not found")))
+    }
+
+    /// Delete a budget tier and clear `budget_id` on users that referenced it.
+    pub fn delete_budget(&self, budget_id: &str) -> GatewayResult<u32> {
+        let conn = self.lock()?;
+        let tx = conn.unchecked_transaction()?;
+        let users_cleared = tx.execute(
+            "UPDATE users SET budget_id = NULL, next_budget_reset_at = NULL WHERE budget_id = ?1",
+            params![budget_id],
+        )? as u32;
+        let deleted = tx.execute("DELETE FROM budgets WHERE id = ?1", params![budget_id])?;
+        if deleted == 0 {
+            return Err(GatewayError::not_found(format!("budget {budget_id} not found")));
+        }
+        tx.commit()?;
+        Ok(users_cleared)
     }
 
     pub fn create_user(
@@ -429,6 +556,7 @@ impl Database {
         active: Option<bool>,
         allowed_models: Option<&[String]>,
         expires_at: Option<Option<&str>>,
+        metadata: Option<Option<serde_json::Value>>,
     ) -> GatewayResult<ApiKeyListItem> {
         let conn = self.lock()?;
         let tx = conn.unchecked_transaction()?;
@@ -442,6 +570,29 @@ impl Database {
             tx.execute(
                 "UPDATE api_keys SET expires_at = ?1 WHERE id = ?2",
                 params![exp, key_id],
+            )?;
+        }
+        if let Some(meta) = metadata {
+            let json = match meta {
+                None => None,
+                Some(value) => {
+                    let existing: Option<String> = tx
+                        .query_row(
+                            "SELECT metadata_json FROM api_keys WHERE id = ?1",
+                            params![key_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?;
+                    let merged = merge_metadata_json(existing.as_deref(), &value);
+                    Some(
+                        serde_json::to_string(&merged)
+                            .map_err(|e| GatewayError::bad_request(e.to_string()))?,
+                    )
+                }
+            };
+            tx.execute(
+                "UPDATE api_keys SET metadata_json = ?1 WHERE id = ?2",
+                params![json, key_id],
             )?;
         }
         if let Some(models) = allowed_models {
@@ -616,15 +767,136 @@ impl Database {
         let rows = stmt.query_map(params_ref.as_slice(), map_usage)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    pub fn usage_summary(
+        &self,
+        user_id: Option<&str>,
+        key_id: Option<&str>,
+        from: Option<&str>,
+        to: Option<&str>,
+        group_by: UsageSummaryGroupBy,
+    ) -> GatewayResult<UsageSummary> {
+        let conn = self.lock()?;
+        let mut where_sql = String::from(" WHERE 1=1");
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(uid) = user_id {
+            where_sql.push_str(" AND user_id = ?");
+            params.push(Box::new(uid.to_string()));
+        }
+        if let Some(kid) = key_id {
+            where_sql.push_str(" AND key_id = ?");
+            params.push(Box::new(kid.to_string()));
+        }
+        if let Some(from) = from {
+            where_sql.push_str(" AND created_at >= ?");
+            params.push(Box::new(from.to_string()));
+        }
+        if let Some(to) = to {
+            where_sql.push_str(" AND created_at <= ?");
+            params.push(Box::new(to.to_string()));
+        }
+
+        let totals_sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(cost_usd), 0.0) FROM usage_logs{where_sql}"
+        );
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let (requests, prompt_tokens, completion_tokens, cost_usd): (i64, i64, i64, f64) =
+            conn.query_row(&totals_sql, params_ref.as_slice(), |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+
+        let group_col = group_by.group_sql();
+        let groups_sql = format!(
+            "SELECT {group_col}, COUNT(*), COALESCE(SUM(prompt_tokens), 0), COALESCE(SUM(completion_tokens), 0), COALESCE(SUM(cost_usd), 0.0) FROM usage_logs{where_sql} GROUP BY {group_col} ORDER BY SUM(cost_usd) DESC"
+        );
+        let mut stmt = conn.prepare(&groups_sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            Ok(UsageSummaryRow {
+                key: row.get(0)?,
+                requests: row.get::<_, i64>(1)? as u64,
+                prompt_tokens: row.get::<_, i64>(2)? as u64,
+                completion_tokens: row.get::<_, i64>(3)? as u64,
+                cost_usd: row.get(4)?,
+            })
+        })?;
+        let groups = rows.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(UsageSummary {
+            totals: UsageSummaryTotals {
+                requests: requests as u64,
+                prompt_tokens: prompt_tokens as u64,
+                completion_tokens: completion_tokens as u64,
+                cost_usd,
+            },
+            groups,
+        })
+    }
+
+    pub fn list_budget_reset_logs(
+        &self,
+        user_id: Option<&str>,
+        limit: u32,
+    ) -> GatewayResult<Vec<BudgetResetLogRecord>> {
+        let conn = self.lock()?;
+        let limit = limit.clamp(1, 1000);
+        let mut sql = String::from(
+            "SELECT id, user_id, budget_id, previous_spend, reset_at FROM budget_reset_logs WHERE 1=1",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(uid) = user_id {
+            sql.push_str(" AND user_id = ?");
+            param_values.push(Box::new(uid.to_string()));
+        }
+        sql.push_str(" ORDER BY reset_at DESC LIMIT ?");
+        param_values.push(Box::new(i64::from(limit)));
+
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            Ok(BudgetResetLogRecord {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                budget_id: row.get(2)?,
+                previous_spend: row.get(3)?,
+                reset_at: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }
 
 fn run_migrations(conn: &Connection) -> GatewayResult<()> {
-    let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version < SCHEMA_VERSION {
+    let mut version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < 1 {
         conn.execute_batch(MIGRATION_V1)?;
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        version = 1;
+        conn.pragma_update(None, "user_version", version)?;
+    }
+    if version < 2 {
+        conn.execute_batch(MIGRATION_V2)?;
+        conn.pragma_update(None, "user_version", 2)?;
     }
     Ok(())
+}
+
+fn merge_metadata_json(existing: Option<&str>, patch: &serde_json::Value) -> serde_json::Value {
+    let mut base = existing
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    if let (Some(base_obj), Some(patch_obj)) = (base.as_object_mut(), patch.as_object()) {
+        for (k, v) in patch_obj {
+            if v.is_null() {
+                base_obj.remove(k);
+            } else {
+                base_obj.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    } else {
+        patch.clone()
+    }
 }
 
 fn compute_next_reset(conn: &Connection, budget_id: &str) -> GatewayResult<String> {

@@ -49,7 +49,14 @@ pub fn router(state: Arc<GatewayState>) -> Router {
             "/v1/budgets",
             post(admin::create_budget).get(admin::list_budgets),
         )
+        .route(
+            "/v1/budgets/{id}",
+            patch(admin::update_budget).delete(admin::delete_budget),
+        )
         .route("/v1/usage", get(admin::list_usage))
+        .route("/v1/usage/summary", get(admin::usage_summary))
+        .route("/v1/budget-resets", get(admin::list_budget_resets))
+        .route("/v1/providers", get(admin::list_providers))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

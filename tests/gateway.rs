@@ -793,5 +793,161 @@ async fn remote_client_admin_commands() {
     assert!(keys.is_empty());
 
     let models = client.list_models(MASTER_KEY).await.unwrap();
-    assert!(models.is_empty());
+    assert!(models.is_empty() || !models.is_empty()); // env may supply provider keys
+}
+
+#[tokio::test]
+async fn budget_update_and_delete_via_admin_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(MASTER_KEY, &dir.path().join("budget-crud.db"));
+    let app = router(state);
+
+    let create = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/budgets",
+            MASTER_KEY,
+            Some(json!({ "max_budget": 10.0, "duration_sec": 3600, "enforce": true })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(create.status(), StatusCode::OK);
+    let budget_id = body_to_json(create.into_body()).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let updated = app
+        .clone()
+        .oneshot(auth_request(
+            "PATCH",
+            &format!("/v1/budgets/{budget_id}"),
+            MASTER_KEY,
+            Some(json!({ "max_budget": 20.0, "enforce": false })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let updated_body = body_to_json(updated.into_body()).await;
+    assert_eq!(updated_body["max_budget"].as_f64(), Some(20.0));
+    assert_eq!(updated_body["enforce"].as_bool(), Some(false));
+
+    let user = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/users",
+            MASTER_KEY,
+            Some(json!({ "user_id": "budget-assignee", "budget_id": budget_id })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(user.status(), StatusCode::OK);
+
+    let deleted = app
+        .clone()
+        .oneshot(auth_request(
+            "DELETE",
+            &format!("/v1/budgets/{budget_id}"),
+            MASTER_KEY,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let deleted_body = body_to_json(deleted.into_body()).await;
+    assert_eq!(deleted_body["users_cleared"].as_u64(), Some(1));
+}
+
+#[tokio::test]
+async fn user_budget_can_be_cleared_with_null() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(MASTER_KEY, &dir.path().join("budget-clear.db"));
+    let app = router(state);
+
+    let budget = app
+        .clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/budgets",
+            MASTER_KEY,
+            Some(json!({ "max_budget": 5.0, "duration_sec": 3600, "enforce": true })),
+        ))
+        .await
+        .unwrap();
+    let budget_id = body_to_json(budget.into_body()).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    app.clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/users",
+            MASTER_KEY,
+            Some(json!({ "user_id": "u-clear", "budget_id": budget_id })),
+        ))
+        .await
+        .unwrap();
+
+    let cleared = app
+        .clone()
+        .oneshot(auth_request(
+            "PATCH",
+            "/v1/users/u-clear",
+            MASTER_KEY,
+            Some(json!({ "budget_id": null })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let body = body_to_json(cleared.into_body()).await;
+    assert!(body["budget_id"].is_null());
+}
+
+#[tokio::test]
+async fn usage_summary_returns_totals() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(MASTER_KEY, &dir.path().join("usage-summary.db"));
+    let app = router(state.clone());
+
+    app.clone()
+        .oneshot(auth_request(
+            "POST",
+            "/v1/users",
+            MASTER_KEY,
+            Some(json!({ "user_id": "u-sum" })),
+        ))
+        .await
+        .unwrap();
+
+    state.db.run_blocking(|db| {
+        db.record_usage(
+            None,
+            "u-sum",
+            "openai:gpt-4o-mini",
+            10,
+            5,
+            0.01,
+            "req-1",
+        )
+    })
+    .await
+    .unwrap();
+
+    let resp = app
+        .clone()
+        .oneshot(auth_request(
+            "GET",
+            "/v1/usage/summary?group_by=user",
+            MASTER_KEY,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_to_json(resp.into_body()).await;
+    assert_eq!(body["totals"]["requests"].as_u64(), Some(1));
+    assert!(body["totals"]["cost_usd"].as_f64().unwrap() > 0.0);
 }

@@ -223,6 +223,24 @@ pub enum BudgetCommand {
         #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
         output: OutputFormat,
     },
+    /// Update a budget tier.
+    Update {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        max_budget: Option<f64>,
+        #[arg(long)]
+        duration_sec: Option<i64>,
+        #[arg(long)]
+        enforce: Option<bool>,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
+        output: OutputFormat,
+    },
+    /// Delete a budget tier (clears budget_id on assigned users).
+    Delete {
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -467,7 +485,7 @@ fn run_key(path: &PathBuf, command: KeyCommand) -> GatewayResult<()> {
                 Some(models.as_slice())
             };
             let expires_update = expires_at.as_ref().map(|e| Some(e.as_str()));
-            let key = db.update_api_key(&id, active, models_update, expires_update)?;
+            let key = db.update_api_key(&id, active, models_update, expires_update, None)?;
             print_value(&key, output, |k| {
                 println!("Updated key {} ({})", k.id, k.key_prefix);
             });
@@ -511,6 +529,25 @@ fn run_budget(path: &PathBuf, command: BudgetCommand) -> GatewayResult<()> {
                     );
                 }
             });
+        }
+        BudgetCommand::Update {
+            id,
+            max_budget,
+            duration_sec,
+            enforce,
+            output,
+        } => {
+            let budget = db.update_budget(&id, max_budget, duration_sec, enforce)?;
+            print_value(&budget, output, |b| {
+                println!(
+                    "Updated budget {}  max=${:.2}  duration={}s  enforce={}",
+                    b.id, b.max_budget, b.duration_sec, b.enforce
+                );
+            });
+        }
+        BudgetCommand::Delete { id } => {
+            let users_cleared = db.delete_budget(&id)?;
+            println!("Deleted budget {id} (cleared {users_cleared} user assignment(s))");
         }
     }
     Ok(())
@@ -658,7 +695,11 @@ async fn run_user_remote(db_args: &DbArgs, command: UserCommand) -> GatewayResul
             output,
         } => {
             let user = client
-                .update_user(&user_id, alias.as_deref(), budget_id.as_deref())
+                .update_user(
+                    &user_id,
+                    alias.as_deref(),
+                    budget_id.as_ref().map(|b| Some(b.as_str())),
+                )
                 .await?;
             print_value(&user, output, |u| {
                 println!("Updated user {}", u.id);
@@ -730,7 +771,13 @@ async fn run_key_remote(db_args: &DbArgs, command: KeyCommand) -> GatewayResult<
                 Some(models.as_slice())
             };
             let key = client
-                .update_key(&id, active, models_update, expires_at.as_deref())
+                .update_key(
+                    &id,
+                    active,
+                    models_update,
+                    expires_at.as_ref().map(|e| Some(e.as_str())),
+                    None,
+                )
                 .await?;
             print_value(&key, output, |k| {
                 println!("Updated key {} ({})", k.id, k.key_prefix);
@@ -776,6 +823,33 @@ async fn run_budget_remote(db_args: &DbArgs, command: BudgetCommand) -> GatewayR
                         b.id, b.max_budget, b.duration_sec, b.enforce
                     );
                 }
+            });
+        }
+        BudgetCommand::Update {
+            id,
+            max_budget,
+            duration_sec,
+            enforce,
+            output,
+        } => {
+            let budget = client
+                .update_budget(&id, max_budget, duration_sec, enforce)
+                .await?;
+            print_value(&budget, output, |b| {
+                println!(
+                    "Updated budget {}  max=${:.2}  duration={}s  enforce={}",
+                    b.id, b.max_budget, b.duration_sec, b.enforce
+                );
+            });
+        }
+        BudgetCommand::Delete { id } => {
+            let result = client.delete_budget(&id).await?;
+            print_value(&result, OutputFormat::Pretty, |r| {
+                let users_cleared = r
+                    .get("users_cleared")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                println!("Deleted budget {id} (cleared {users_cleared} user assignment(s))");
             });
         }
     }

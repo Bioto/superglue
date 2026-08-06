@@ -148,6 +148,20 @@ fn chat_options_from_responses(body: &GatewayResponsesBody, request_id: &str) ->
     options
 }
 
+fn apply_reasoning_cap(options: &mut ChatOptions, auth: &AuthContext) {
+    if auth.is_master {
+        return;
+    }
+    let Some(max) = auth.max_reasoning_effort.as_deref() else {
+        return;
+    };
+    if let Some(ref effort) = options.reasoning_effort
+        && let Some(clamped) = crate::chat::reasoning::clamp_reasoning_effort_str(effort, max)
+    {
+        options.reasoning_effort = Some(clamped);
+    }
+}
+
 fn messages_from_responses_input(input: &Value) -> Vec<ChatMessage> {
     if let Some(text) = input.as_str() {
         return vec![ChatMessage::text("user", text)];
@@ -240,7 +254,8 @@ pub async fn proxy_response(
     let model = body.model.clone();
     preflight_async(db, auth, &user_id, &model).await?;
 
-    let options = chat_options_from_responses(&body, &request_id);
+    let mut options = chat_options_from_responses(&body, &request_id);
+    apply_reasoning_cap(&mut options, auth);
     let messages = messages_from_responses_input(&body.input);
     let req_body = responses_body_value(body);
 
@@ -286,7 +301,8 @@ pub async fn proxy_response_stream(
     let model = body.model.clone();
     preflight_async(&db, &auth, &user_id, &model).await?;
 
-    let options = chat_options_from_responses(&body, &request_id);
+    let mut options = chat_options_from_responses(&body, &request_id);
+    apply_reasoning_cap(&mut options, &auth);
     let messages = messages_from_responses_input(&body.input);
     let req_body = responses_body_value(body);
 
@@ -463,7 +479,8 @@ pub async fn proxy_completion(
     let user_id = crate::gateway::auth::resolve_user_id(auth, body.user.as_deref())?;
     preflight_async(db, auth, &user_id, &body.completion.model).await?;
 
-    let options = chat_options_from_request(&body.completion, &request_id);
+    let mut options = chat_options_from_request(&body.completion, &request_id);
+    apply_reasoning_cap(&mut options, auth);
     let tool_specs = tool_specs_from_request(&body.completion);
     let tool_refs = tool_specs.as_deref();
 
@@ -512,7 +529,8 @@ pub async fn proxy_completion_stream(
     let model = body.completion.model.clone();
     preflight_async(&db, &auth, &user_id, &model).await?;
 
-    let options = chat_options_from_request(&body.completion, &request_id);
+    let mut options = chat_options_from_request(&body.completion, &request_id);
+    apply_reasoning_cap(&mut options, &auth);
     let tool_specs = tool_specs_from_request(&body.completion);
     let tool_refs = tool_specs.as_deref();
 

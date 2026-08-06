@@ -145,6 +145,22 @@ pub fn normalize_reasoning_effort_str(model: &str, effort: &str) -> Option<Strin
     ReasoningEffort::parse(effort).and_then(|e| normalize_reasoning_effort(model, e))
 }
 
+pub fn clamp_reasoning_effort(effort: ReasoningEffort, max: ReasoningEffort) -> ReasoningEffort {
+    if effort <= max {
+        effort
+    } else {
+        max
+    }
+}
+
+/// Clamp a string effort to a maximum allowed level.
+#[must_use]
+pub fn clamp_reasoning_effort_str(effort: &str, max: &str) -> Option<String> {
+    let effort = ReasoningEffort::parse(effort)?;
+    let max = ReasoningEffort::parse(max)?;
+    Some(clamp_reasoning_effort(effort, max).as_api_str().to_string())
+}
+
 /// Map OpenAI-style `reasoning_effort` to Anthropic extended-thinking `budget_tokens`.
 ///
 /// Returns `None` when thinking should be omitted (`none`, empty, or unrecognized).

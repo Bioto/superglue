@@ -128,6 +128,16 @@ async fn fetch_provider_models(
         .collect())
 }
 
+/// Probe upstream catalog for admin provider status (returns model count).
+pub async fn fetch_provider_models_for_status(
+    http: &HttpClient,
+    credentials: &ProviderCredentials,
+    provider: ProviderId,
+) -> GatewayResult<u32> {
+    let models = fetch_provider_models(http, credentials, provider).await?;
+    Ok(models.len() as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +149,7 @@ mod tests {
             user_id: String::new(),
             is_master: true,
             allowed_models: None,
+            max_reasoning_effort: None,
         }
     }
 
@@ -153,6 +164,7 @@ mod tests {
                 "openai:gpt-4o-mini".into(),
                 "anthropic:claude-3-5-sonnet-20241022".into(),
             ]),
+            max_reasoning_effort: None,
         };
         let http = HttpClient::new(crate::http::ClientConfig::default()).unwrap();
         let creds = ProviderCredentials::new();
