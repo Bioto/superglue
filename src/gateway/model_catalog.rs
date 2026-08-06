@@ -156,13 +156,8 @@ mod tests {
         };
         let http = HttpClient::new(crate::http::ClientConfig::default()).unwrap();
         let creds = ProviderCredentials::new();
-        let models = rt
-            .block_on(list_models(&http, &creds, &auth))
-            .unwrap();
-        let ids: Vec<_> = models
-            .iter()
-            .filter_map(|m| m["id"].as_str())
-            .collect();
+        let models = rt.block_on(list_models(&http, &creds, &auth)).unwrap();
+        let ids: Vec<_> = models.iter().filter_map(|m| m["id"].as_str()).collect();
         assert!(ids.contains(&"openai:gpt-4o-mini"));
         assert!(ids.contains(&"anthropic:claude-3-5-sonnet-20241022"));
         assert!(!ids.contains(&"*"));

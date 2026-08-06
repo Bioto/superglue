@@ -15,8 +15,8 @@ use super::adapter::{
     LlmProvider, NormalizedCompletion, NormalizedResponse, ProviderParseError, ProviderRequest,
     ProviderRequestContext, ProviderResponsesContext, rate_limit_key_for,
 };
-use super::provider_id::ProviderId;
 use super::model_ref::wire_model_id;
+use super::provider_id::ProviderId;
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const CACHE_CONTROL_EPHEMERAL: &str = "ephemeral";

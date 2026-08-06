@@ -75,11 +75,7 @@ fn operator_env_value(name: &str) -> Option<String> {
             let value = value
                 .strip_prefix('"')
                 .and_then(|v| v.strip_suffix('"'))
-                .or_else(|| {
-                    value
-                        .strip_prefix('\'')
-                        .and_then(|v| v.strip_suffix('\''))
-                })
+                .or_else(|| value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')))
                 .unwrap_or(value);
             return Some(value.to_string());
         }
@@ -311,10 +307,7 @@ pub async fn execute(db_args: &DbArgs, command: GatewayCommand) -> Result<(), Ga
 }
 
 fn model_use_remote(db_args: &DbArgs) -> bool {
-    db_args
-        .url
-        .as_ref()
-        .is_some_and(|u| !u.is_empty())
+    db_args.url.as_ref().is_some_and(|u| !u.is_empty())
         || operator_env_value("SUPERGLUE_GATEWAY_URL").is_some()
 }
 
@@ -665,11 +658,7 @@ async fn run_user_remote(db_args: &DbArgs, command: UserCommand) -> GatewayResul
             output,
         } => {
             let user = client
-                .update_user(
-                    &user_id,
-                    alias.as_deref(),
-                    budget_id.as_deref(),
-                )
+                .update_user(&user_id, alias.as_deref(), budget_id.as_deref())
                 .await?;
             print_value(&user, output, |u| {
                 println!("Updated user {}", u.id);
@@ -695,12 +684,7 @@ async fn run_key_remote(db_args: &DbArgs, command: KeyCommand) -> GatewayResult<
             output,
         } => {
             let created: serde_json::Value = client
-                .create_key(
-                    &user_id,
-                    &models,
-                    name.as_deref(),
-                    expires_at.as_deref(),
-                )
+                .create_key(&user_id, &models, name.as_deref(), expires_at.as_deref())
                 .await?;
             print_value(&created, output, |v| {
                 println!("Created API key (save the key — shown once):");
@@ -709,10 +693,7 @@ async fn run_key_remote(db_args: &DbArgs, command: KeyCommand) -> GatewayResult<
                 println!("  prefix: {}", v["key_prefix"].as_str().unwrap_or("-"));
                 println!("  user_id: {}", v["user_id"].as_str().unwrap_or("-"));
                 if let Some(models) = v["allowed_models"].as_array() {
-                    let joined: Vec<_> = models
-                        .iter()
-                        .filter_map(|m| m.as_str())
-                        .collect();
+                    let joined: Vec<_> = models.iter().filter_map(|m| m.as_str()).collect();
                     println!("  models: {}", joined.join(", "));
                 }
             });

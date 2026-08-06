@@ -18,8 +18,8 @@ use super::adapter::{
     LlmProvider, NormalizedCompletion, NormalizedResponse, ProviderParseError, ProviderRequest,
     ProviderRequestContext, ProviderResponsesContext, rate_limit_key_for,
 };
-use super::provider_id::ProviderId;
 use super::model_ref::wire_model_id;
+use super::provider_id::ProviderId;
 
 #[derive(Debug, Clone, Copy)]
 pub struct OpenAiCompatProvider {

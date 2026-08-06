@@ -192,10 +192,7 @@ pub async fn delete_user(
     Path(id): Path<String>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
     let deleted_id = id.clone();
-    let keys_deleted = state
-        .db
-        .run_blocking(move |db| db.delete_user(&id))
-        .await?;
+    let keys_deleted = state.db.run_blocking(move |db| db.delete_user(&id)).await?;
     Ok(json_ok(serde_json::json!({
         "deleted": deleted_id,
         "keys_deleted": keys_deleted,

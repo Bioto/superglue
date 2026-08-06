@@ -6,9 +6,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::gateway::db::{
-    ApiKeyListItem, BudgetRecord, UsageRecord, UserRecord,
-};
+use crate::gateway::db::{ApiKeyListItem, BudgetRecord, UsageRecord, UserRecord};
 use crate::gateway::error::{GatewayError, GatewayResult};
 
 /// Admin API client for a running gateway server.
@@ -184,11 +182,8 @@ impl RemoteClient {
             #[serde(skip_serializing_if = "Option::is_none")]
             budget_id: Option<&'a str>,
         }
-        self.patch_json(
-            &format!("/v1/users/{user_id}"),
-            &Body { alias, budget_id },
-        )
-        .await
+        self.patch_json(&format!("/v1/users/{user_id}"), &Body { alias, budget_id })
+            .await
     }
 
     pub async fn delete_user(&self, user_id: &str) -> GatewayResult<DeleteUserResult> {

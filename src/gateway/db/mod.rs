@@ -292,12 +292,9 @@ impl Database {
     pub fn delete_user(&self, user_id: &str) -> GatewayResult<u32> {
         let conn = self.lock()?;
         let tx = conn.unchecked_transaction()?;
-        let keys_deleted = tx.execute(
-            "DELETE FROM api_keys WHERE user_id = ?1",
-            params![user_id],
-        )? as u32;
-        let users_deleted =
-            tx.execute("DELETE FROM users WHERE id = ?1", params![user_id])?;
+        let keys_deleted =
+            tx.execute("DELETE FROM api_keys WHERE user_id = ?1", params![user_id])? as u32;
+        let users_deleted = tx.execute("DELETE FROM users WHERE id = ?1", params![user_id])?;
         if users_deleted == 0 {
             return Err(GatewayError::not_found(format!("user {user_id} not found")));
         }

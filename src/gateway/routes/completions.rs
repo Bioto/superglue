@@ -48,8 +48,7 @@ pub async fn list_models(
     State(state): State<Arc<GatewayState>>,
     Auth(auth): Auth,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let data =
-        model_catalog::list_models(&state.http, &state.credentials, &auth).await?;
+    let data = model_catalog::list_models(&state.http, &state.credentials, &auth).await?;
     Ok(Json(serde_json::json!({
         "object": "list",
         "data": data,

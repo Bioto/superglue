@@ -666,7 +666,11 @@ async fn delete_user_removes_keys() {
         .as_array()
         .unwrap()
         .clone();
-    assert!(!keys.iter().any(|k| k["id"].as_str() == Some(key_id.as_str())));
+    assert!(
+        !keys
+            .iter()
+            .any(|k| k["id"].as_str() == Some(key_id.as_str()))
+    );
 
     let missing = app
         .clone()
