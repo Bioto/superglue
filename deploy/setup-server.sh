@@ -83,7 +83,7 @@ fi
 
 if [[ -z "${LOCAL_BINARY}" ]]; then
   echo "Building superglue release binary with gateway feature..."
-  cargo build --release --features gateway --manifest-path "${SUPERGLUE_DIR}/Cargo.toml" --bin superglue
+  cargo build --release --features gateway,capture --manifest-path "${SUPERGLUE_DIR}/Cargo.toml" --bin superglue
   LOCAL_BINARY="${SUPERGLUE_DIR}/target/release/superglue"
 fi
 if [[ ! -x "${LOCAL_BINARY}" ]]; then

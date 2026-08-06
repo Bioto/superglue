@@ -44,6 +44,19 @@
         "route53:GetChange"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "SuperglueGatewayCaptureUpload",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:AbortMultipartUpload",
+        "s3:ListBucketMultipartUploads"
+      ],
+      "Resource": [
+        "arn:aws:s3:::superglue-gateway-capture",
+        "arn:aws:s3:::superglue-gateway-capture/*"
+      ]
     }
   ]
 }

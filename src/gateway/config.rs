@@ -4,12 +4,17 @@ use std::path::PathBuf;
 
 use secrecy::{ExposeSecret, SecretString};
 
+#[cfg(feature = "capture")]
+use crate::gateway::capture::CaptureConfig;
+
 /// Runtime configuration for the LLM gateway server.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub listen_addr: String,
     pub db_path: PathBuf,
     pub master_key: SecretString,
+    #[cfg(feature = "capture")]
+    pub capture: Option<CaptureConfig>,
 }
 
 impl GatewayConfig {
@@ -23,6 +28,8 @@ impl GatewayConfig {
             listen_addr: listen_addr.into(),
             db_path,
             master_key: SecretString::from(master_key.into()),
+            #[cfg(feature = "capture")]
+            capture: None,
         }
     }
 

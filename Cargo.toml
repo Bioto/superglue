@@ -36,6 +36,8 @@ otlp = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", 
 mcp = ["dep:rmcp", "dep:http", "dep:chrono"]
 # Enables the axum HTTP LLM gateway server in `src/gateway/`.
 gateway = ["dep:axum", "dep:tower", "dep:tower-http", "dep:rusqlite", "dep:chrono", "dep:subtle", "dep:tokio-stream"]
+# Enables optional LLM traffic capture (gzip spool + S3 upload) on the gateway.
+capture = ["gateway", "dep:aws-config", "dep:aws-sdk-s3", "dep:aws-smithy-async", "dep:flate2"]
 
 [build-dependencies]
 prost-build = "0.14"
@@ -87,6 +89,10 @@ tower = { version = "0.5", optional = true }
 tower-http = { version = "0.7", optional = true, features = ["trace"] }
 rusqlite = { version = "0.40", optional = true, features = ["bundled"] }
 subtle = { version = "2", optional = true }
+aws-config = { version = "1", optional = true, default-features = false, features = ["behavior-version-latest", "rustls"] }
+aws-sdk-s3 = { version = "1", optional = true, default-features = false, features = ["rustls"] }
+aws-smithy-async = { version = "1", optional = true, features = ["rt-tokio"] }
+flate2 = { version = "1", optional = true }
 
 [[example]]
 name = "28_mcp_tools"
@@ -102,11 +108,17 @@ tempfile = "3"
 criterion = { version = "0.8", features = ["async_tokio"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+flate2 = "1"
 
 [[test]]
 name = "gateway"
 path = "tests/gateway.rs"
 required-features = ["gateway"]
+
+[[test]]
+name = "gateway_capture"
+path = "tests/gateway_capture.rs"
+required-features = ["capture"]
 
 [[test]]
 name = "gateway_cli"

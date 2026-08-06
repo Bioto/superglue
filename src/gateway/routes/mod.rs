@@ -56,7 +56,19 @@ pub fn router(state: Arc<GatewayState>) -> Router {
         .route("/v1/usage", get(admin::list_usage))
         .route("/v1/usage/summary", get(admin::usage_summary))
         .route("/v1/budget-resets", get(admin::list_budget_resets))
-        .route("/v1/providers", get(admin::list_providers))
+        .route("/v1/providers", get(admin::list_providers));
+    #[cfg(feature = "capture")]
+    let admin = admin
+        .route("/v1/capture/status", get(crate::gateway::capture::capture_status))
+        .route(
+            "/v1/capture/records",
+            get(crate::gateway::capture::list_capture_records),
+        )
+        .route(
+            "/v1/capture/records/{request_id}",
+            get(crate::gateway::capture::get_capture_record),
+        );
+    let admin = admin
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             admin_auth_middleware,

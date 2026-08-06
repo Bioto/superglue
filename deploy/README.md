@@ -105,3 +105,32 @@ Store the returned plaintext key; it is shown once.
 | `SUPERGLUE_EC2_INSTANCE_TYPE` | `t3.small` |
 | `SUPERGLUE_ROUTE53_ZONE_ID` | auto-detect `myharn.sh` |
 | `GATEWAY_MASTER_KEY` | generated if unset |
+
+## Optional LLM traffic capture
+
+Build with the `capture` feature (included in `setup-server.sh`). Set on the gateway host:
+
+```bash
+SUPERGLUE_CAPTURE_S3_BUCKET=superglue-gateway-capture
+AWS_REGION=us-west-2
+```
+
+Create the bucket once (example lifecycle: transition to Glacier after 30 days):
+
+```bash
+aws s3api create-bucket --bucket superglue-gateway-capture --region us-west-2 \
+  --create-bucket-configuration LocationConstraint=us-west-2
+aws s3api put-bucket-lifecycle-configuration --bucket superglue-gateway-capture \
+  --lifecycle-configuration '{
+    "Rules": [{
+      "ID": "archive-old-capture",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "gateway-capture/"},
+      "Transitions": [{"Days": 30, "StorageClass": "GLACIER"}]
+    }]
+  }'
+```
+
+Attach the EC2 instance profile with `SuperglueGatewayCaptureUpload` from [`iam-policy.json`](iam-policy.json).
+
+Captured traffic is gzip NDJSON under `gateway-capture/dt=YYYY-MM-DD/hour=HH/` in the bucket. Use `SUPERGLUE_CAPTURE_EXCLUDE_USERS` to skip specific gateway user ids.

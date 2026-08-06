@@ -3,6 +3,8 @@
 mod auth;
 mod budget;
 pub mod cli;
+#[cfg(feature = "capture")]
+pub mod capture;
 mod config;
 mod db;
 mod error;
@@ -28,6 +30,9 @@ use crate::gateway::db::Database;
 use crate::http::{ClientConfig, HttpClient};
 use crate::providers::ProviderCredentials;
 
+#[cfg(feature = "capture")]
+use crate::gateway::capture::{spawn_capture_pipeline, CaptureRuntime};
+
 /// Shared state for all gateway HTTP handlers.
 pub struct GatewayState {
     pub config: GatewayConfig,
@@ -35,9 +40,17 @@ pub struct GatewayState {
     pub http: Arc<HttpClient>,
     pub credentials: Arc<ProviderCredentials>,
     pub master_key_hash: [u8; 32],
+    #[cfg(feature = "capture")]
+    pub capture: Option<Arc<CaptureRuntime>>,
 }
 
 impl GatewayState {
+    /// Capture sink for proxy paths, when capture is enabled.
+    #[cfg(feature = "capture")]
+    #[must_use]
+    pub fn capture_sink(&self) -> Option<Arc<crate::gateway::capture::CaptureSink>> {
+        self.capture.as_ref().map(|runtime| runtime.sink())
+    }
     /// Build gateway state from configuration, opening the database and loading provider credentials.
     pub fn new(config: GatewayConfig) -> Result<Self, GatewayError> {
         Self::with_credentials(config, ProviderCredentials::from_env())
@@ -60,13 +73,27 @@ impl GatewayState {
             http,
             credentials: Arc::new(credentials),
             master_key_hash,
+            #[cfg(feature = "capture")]
+            capture: None,
         })
+    }
+
+    /// Start capture pipeline when configured (async init from [`serve`]).
+    #[cfg(feature = "capture")]
+    pub async fn init_capture(&mut self) -> Result<(), GatewayError> {
+        if let Some(cfg) = self.config.capture.clone() {
+            self.capture = Some(spawn_capture_pipeline(cfg).await?);
+        }
+        Ok(())
     }
 }
 
 /// Start the axum HTTP server on the configured listen address.
 pub async fn serve(config: GatewayConfig) -> Result<(), GatewayError> {
-    let state = Arc::new(GatewayState::new(config)?);
+    let mut state = GatewayState::new(config)?;
+    #[cfg(feature = "capture")]
+    state.init_capture().await?;
+    let state = Arc::new(state);
     let addr: SocketAddr = state
         .config
         .listen_addr
@@ -104,4 +131,24 @@ pub fn test_state_with_openai(
     credentials.insert_key(ProviderId::OpenAi, api_key);
     credentials.insert_base_url(ProviderId::OpenAi, base_url);
     Arc::new(GatewayState::with_credentials(config, credentials).expect("test gateway state"))
+}
+
+#[cfg(feature = "capture")]
+pub async fn test_state_with_openai_and_capture(
+    master_key: &str,
+    db_path: &std::path::Path,
+    base_url: &str,
+    api_key: &str,
+    capture: crate::gateway::capture::CaptureConfig,
+) -> Arc<GatewayState> {
+    use crate::providers::{ProviderCredentials, ProviderId};
+    let mut config = GatewayConfig::new("127.0.0.1:0", db_path.to_path_buf(), master_key);
+    config.capture = Some(capture);
+    let mut credentials = ProviderCredentials::new();
+    credentials.insert_key(ProviderId::OpenAi, api_key);
+    credentials.insert_base_url(ProviderId::OpenAi, base_url);
+    let mut state =
+        GatewayState::with_credentials(config, credentials).expect("test gateway state");
+    state.init_capture().await.expect("init capture");
+    Arc::new(state)
 }

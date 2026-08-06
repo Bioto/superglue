@@ -21,12 +21,23 @@ pub async fn chat_completions(
 ) -> Result<Response, GatewayError> {
     let stream = body.completion.stream.unwrap_or(false);
     if stream {
+        #[cfg(not(feature = "capture"))]
         let byte_stream = proxy::proxy_completion_stream(
             &state.http,
             &state.credentials,
             state.db.clone(),
             auth,
             body,
+        )
+        .await?;
+        #[cfg(feature = "capture")]
+        let byte_stream = proxy::proxy_completion_stream(
+            &state.http,
+            &state.credentials,
+            state.db.clone(),
+            auth,
+            body,
+            state.capture_sink(),
         )
         .await?;
         let body = Body::from_stream(byte_stream);
@@ -37,9 +48,20 @@ pub async fn chat_completions(
             .body(body)
             .unwrap())
     } else {
+        #[cfg(not(feature = "capture"))]
         let (val, _request_id) =
             proxy::proxy_completion(&state.http, &state.credentials, &state.db, &auth, body)
                 .await?;
+        #[cfg(feature = "capture")]
+        let (val, _request_id) = proxy::proxy_completion(
+            &state.http,
+            &state.credentials,
+            &state.db,
+            &auth,
+            body,
+            state.capture_sink(),
+        )
+        .await?;
         Ok(Json(val).into_response())
     }
 }

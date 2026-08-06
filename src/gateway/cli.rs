@@ -94,6 +94,16 @@ pub enum GatewayCommand {
         /// Master key for admin operations.
         #[arg(long, env = "GATEWAY_MASTER_KEY")]
         master_key: String,
+
+        /// S3 bucket for optional LLM traffic capture (requires `capture` feature).
+        #[cfg(feature = "capture")]
+        #[arg(long, env = "SUPERGLUE_CAPTURE_S3_BUCKET")]
+        capture_s3_bucket: Option<String>,
+
+        /// S3 key prefix for capture objects (default: gateway-capture).
+        #[cfg(feature = "capture")]
+        #[arg(long, env = "SUPERGLUE_CAPTURE_S3_PREFIX")]
+        capture_s3_prefix: Option<String>,
     },
     /// Manage gateway users.
     User {
@@ -282,8 +292,23 @@ struct KeyCreateOutput {
 /// Run a gateway CLI command.
 pub async fn execute(db_args: &DbArgs, command: GatewayCommand) -> Result<(), GatewayError> {
     match command {
-        GatewayCommand::Serve { addr, master_key } => {
-            let config = GatewayConfig::new(addr, db_args.db.clone(), master_key);
+        GatewayCommand::Serve {
+            addr,
+            master_key,
+            #[cfg(feature = "capture")]
+            capture_s3_bucket,
+            #[cfg(feature = "capture")]
+            capture_s3_prefix,
+        } => {
+            let mut config = GatewayConfig::new(addr, db_args.db.clone(), master_key);
+            #[cfg(feature = "capture")]
+            {
+                config.capture = crate::gateway::capture::CaptureConfig::from_serve_args(
+                    &db_args.db,
+                    capture_s3_bucket,
+                    capture_s3_prefix,
+                );
+            }
             serve(config).await
         }
         GatewayCommand::User { command } => {

@@ -26,8 +26,19 @@ use crate::responses::{self, ResponseError};
 use crate::tools::ToolSpec;
 use serde_json::json;
 
+#[cfg(feature = "capture")]
+use crate::gateway::capture::{CaptureApi, CaptureSink, CaptureTap, CaptureTapContext};
+
 /// Bounded buffer for gateway SSE proxy streams (matches gRPC stream channel size).
 const GATEWAY_STREAM_BUFFER: usize = 64;
+
+#[cfg(feature = "capture")]
+fn capture_max_bytes(capture: &Option<Arc<CaptureSink>>) -> usize {
+    capture
+        .as_ref()
+        .map(|sink| sink.max_response_bytes())
+        .unwrap_or(0)
+}
 
 fn extract_openai_chat_usage(data: &str) -> Option<proto::Usage> {
     if !data.contains("\"usage\"") {
@@ -248,16 +259,36 @@ pub async fn proxy_response(
     db: &Database,
     auth: &AuthContext,
     body: GatewayResponsesBody,
+    #[cfg(feature = "capture")] capture: Option<Arc<CaptureSink>>,
 ) -> GatewayResult<(Value, String)> {
     let request_id = Uuid::new_v4().to_string();
     let user_id = crate::gateway::auth::resolve_user_id(auth, body.user.as_deref())?;
     let model = body.model.clone();
-    preflight_async(db, auth, &user_id, &model).await?;
+    #[cfg(feature = "capture")]
+    let max_response_bytes = capture_max_bytes(&capture);
+    #[cfg(feature = "capture")]
+    let mut tap = CaptureTap::begin(CaptureTapContext {
+        sink: capture,
+        request_id: request_id.clone(),
+        user_id: user_id.clone(),
+        key_id: auth.key_id.clone(),
+        api: CaptureApi::Responses,
+        model_requested: model.clone(),
+        stream: false,
+        max_response_bytes,
+    });
+    if let Err(err) = preflight_async(db, auth, &user_id, &model).await {
+        #[cfg(feature = "capture")]
+        tap.finish_err(err.to_string());
+        return Err(err);
+    }
 
     let mut options = chat_options_from_responses(&body, &request_id);
     apply_reasoning_cap(&mut options, auth);
     let messages = messages_from_responses_input(&body.input);
     let req_body = responses_body_value(body);
+    #[cfg(feature = "capture")]
+    tap.set_request(&req_body);
 
     let (val, model_ref) = responses::proxy_responses_post(
         http,
@@ -268,10 +299,21 @@ pub async fn proxy_response(
         &request_id,
     )
     .await
-    .map_err(response_error_to_gateway)?;
+    .map_err(|e| {
+        #[cfg(feature = "capture")]
+        tap.finish_err(e.to_string());
+        response_error_to_gateway(e)
+    })?;
+
+    #[cfg(feature = "capture")]
+    {
+        tap.set_model_resolved(model_ref.raw.clone());
+        tap.set_response(&val);
+    }
 
     if let Some(usage) = val.get("usage") {
         let proto_usage = usage_from_responses_json(usage);
+        let cost = estimate_model_call_cost_usd(model_ref.raw.as_str(), &proto_usage);
         record_usage_async(
             db,
             auth.key_id.as_deref(),
@@ -281,6 +323,11 @@ pub async fn proxy_response(
             &request_id,
         )
         .await?;
+        #[cfg(feature = "capture")]
+        tap.finish(Some(&proto_usage), Some(cost));
+    } else {
+        #[cfg(feature = "capture")]
+        tap.finish(None, None);
     }
 
     Ok((val, request_id))
@@ -293,18 +340,38 @@ pub async fn proxy_response_stream(
     db: Database,
     auth: AuthContext,
     body: GatewayResponsesBody,
+    #[cfg(feature = "capture")] capture: Option<Arc<CaptureSink>>,
 ) -> GatewayResult<
     impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
 > {
     let request_id = Uuid::new_v4().to_string();
     let user_id = crate::gateway::auth::resolve_user_id(&auth, body.user.as_deref())?;
     let model = body.model.clone();
-    preflight_async(&db, &auth, &user_id, &model).await?;
+    #[cfg(feature = "capture")]
+    let max_response_bytes = capture_max_bytes(&capture);
+    #[cfg(feature = "capture")]
+    let mut tap = CaptureTap::begin(CaptureTapContext {
+        sink: capture,
+        request_id: request_id.clone(),
+        user_id: user_id.clone(),
+        key_id: auth.key_id.clone(),
+        api: CaptureApi::Responses,
+        model_requested: model.clone(),
+        stream: true,
+        max_response_bytes,
+    });
+    if let Err(err) = preflight_async(&db, &auth, &user_id, &model).await {
+        #[cfg(feature = "capture")]
+        tap.finish_err(err.to_string());
+        return Err(err);
+    }
 
     let mut options = chat_options_from_responses(&body, &request_id);
     apply_reasoning_cap(&mut options, &auth);
     let messages = messages_from_responses_input(&body.input);
     let req_body = responses_body_value(body);
+    #[cfg(feature = "capture")]
+    tap.set_request(&req_body);
 
     let (byte_stream, model_ref) = responses::proxy_responses_stream(
         http,
@@ -315,16 +382,23 @@ pub async fn proxy_response_stream(
         &request_id,
     )
     .await
-    .map_err(response_error_to_gateway)?;
+    .map_err(|e| {
+        #[cfg(feature = "capture")]
+        tap.finish_err(e.to_string());
+        response_error_to_gateway(e)
+    })?;
 
     let key_id = auth.key_id.clone();
     let (tx, rx) = mpsc::channel(GATEWAY_STREAM_BUFFER);
     let is_anthropic = model_ref.provider == ProviderId::Anthropic;
+    let model_raw = model_ref.raw.clone();
 
     tokio::spawn(async move {
         let mut stream = byte_stream;
         let mut parser = SseParser::new();
         let mut round_usage: Option<proto::Usage> = None;
+        #[cfg(feature = "capture")]
+        tap.set_model_resolved(model_raw.clone());
 
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -333,6 +407,8 @@ pub async fn proxy_response_stream(
                     if let Ok(events) = parser.push_str(&text) {
                         for event in events {
                             let data = event.data.trim();
+                            #[cfg(feature = "capture")]
+                            tap.push_sse(data);
                             if data.is_empty() || data == "[DONE]" {
                                 continue;
                             }
@@ -347,10 +423,14 @@ pub async fn proxy_response_stream(
                         }
                     }
                     if tx.send(Ok(bytes)).await.is_err() {
+                        #[cfg(feature = "capture")]
+                        tap.finish(None, None);
                         return;
                     }
                 }
                 Err(e) => {
+                    #[cfg(feature = "capture")]
+                    tap.finish_err(e.to_string());
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                     return;
                 }
@@ -358,15 +438,21 @@ pub async fn proxy_response_stream(
         }
 
         if let Some(usage) = round_usage {
+            let cost = estimate_model_call_cost_usd(model_raw.as_str(), &usage);
             let _ = record_usage_async(
                 &db,
                 key_id.as_deref(),
                 &user_id,
-                &model_ref.raw,
+                &model_raw,
                 &usage,
                 &request_id,
             )
             .await;
+            #[cfg(feature = "capture")]
+            tap.finish(Some(&usage), Some(cost));
+        } else {
+            #[cfg(feature = "capture")]
+            tap.finish(None, None);
         }
     });
 
@@ -474,15 +560,37 @@ pub async fn proxy_completion(
     db: &Database,
     auth: &AuthContext,
     body: GatewayCompletionBody,
+    #[cfg(feature = "capture")] capture: Option<Arc<CaptureSink>>,
 ) -> GatewayResult<(Value, String)> {
     let request_id = Uuid::new_v4().to_string();
     let user_id = crate::gateway::auth::resolve_user_id(auth, body.user.as_deref())?;
-    preflight_async(db, auth, &user_id, &body.completion.model).await?;
+    #[cfg(feature = "capture")]
+    let max_response_bytes = capture_max_bytes(&capture);
+    #[cfg(feature = "capture")]
+    let mut tap = CaptureTap::begin(CaptureTapContext {
+        sink: capture,
+        request_id: request_id.clone(),
+        user_id: user_id.clone(),
+        key_id: auth.key_id.clone(),
+        api: CaptureApi::ChatCompletions,
+        model_requested: body.completion.model.clone(),
+        stream: false,
+        max_response_bytes,
+    });
+    if let Err(err) = preflight_async(db, auth, &user_id, &body.completion.model).await {
+        #[cfg(feature = "capture")]
+        tap.finish_err(err.to_string());
+        return Err(err);
+    }
 
     let mut options = chat_options_from_request(&body.completion, &request_id);
     apply_reasoning_cap(&mut options, auth);
     let tool_specs = tool_specs_from_request(&body.completion);
     let tool_refs = tool_specs.as_deref();
+    #[cfg(feature = "capture")]
+    if let Ok(request) = serde_json::to_value(&body.completion) {
+        tap.set_request(&request);
+    }
 
     let (val, model_ref) = proxy_chat_post(
         http,
@@ -493,13 +601,24 @@ pub async fn proxy_completion(
         &request_id,
     )
     .await
-    .map_err(chat_error_to_gateway)?;
+    .map_err(|e| {
+        #[cfg(feature = "capture")]
+        tap.finish_err(e.to_string());
+        chat_error_to_gateway(e)
+    })?;
 
     let response: ChatCompletionResponse =
         serde_json::from_value(val.clone()).map_err(|e| GatewayError::upstream(e.to_string()))?;
 
+    #[cfg(feature = "capture")]
+    {
+        tap.set_model_resolved(model_ref.raw.clone());
+        tap.set_response(&val);
+    }
+
     if let Some(usage) = &response.usage {
         let proto_usage = usage_from_compat(usage);
+        let cost = estimate_model_call_cost_usd(model_ref.raw.as_str(), &proto_usage);
         record_usage_async(
             db,
             auth.key_id.as_deref(),
@@ -509,6 +628,11 @@ pub async fn proxy_completion(
             &request_id,
         )
         .await?;
+        #[cfg(feature = "capture")]
+        tap.finish(Some(&proto_usage), Some(cost));
+    } else {
+        #[cfg(feature = "capture")]
+        tap.finish(None, None);
     }
 
     Ok((val, request_id))
@@ -521,18 +645,40 @@ pub async fn proxy_completion_stream(
     db: Database,
     auth: AuthContext,
     body: GatewayCompletionBody,
+    #[cfg(feature = "capture")] capture: Option<Arc<CaptureSink>>,
 ) -> GatewayResult<
     impl futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
 > {
     let request_id = Uuid::new_v4().to_string();
     let user_id = crate::gateway::auth::resolve_user_id(&auth, body.user.as_deref())?;
     let model = body.completion.model.clone();
-    preflight_async(&db, &auth, &user_id, &model).await?;
+    #[cfg(feature = "capture")]
+    let max_response_bytes = capture_max_bytes(&capture);
+    #[cfg(feature = "capture")]
+    let mut tap = CaptureTap::begin(CaptureTapContext {
+        sink: capture,
+        request_id: request_id.clone(),
+        user_id: user_id.clone(),
+        key_id: auth.key_id.clone(),
+        api: CaptureApi::ChatCompletions,
+        model_requested: model.clone(),
+        stream: true,
+        max_response_bytes,
+    });
+    if let Err(err) = preflight_async(&db, &auth, &user_id, &model).await {
+        #[cfg(feature = "capture")]
+        tap.finish_err(err.to_string());
+        return Err(err);
+    }
 
     let mut options = chat_options_from_request(&body.completion, &request_id);
     apply_reasoning_cap(&mut options, &auth);
     let tool_specs = tool_specs_from_request(&body.completion);
     let tool_refs = tool_specs.as_deref();
+    #[cfg(feature = "capture")]
+    if let Ok(request) = serde_json::to_value(&body.completion) {
+        tap.set_request(&request);
+    }
 
     let (byte_stream, model_ref) = proxy_chat_stream(
         http,
@@ -543,16 +689,23 @@ pub async fn proxy_completion_stream(
         &request_id,
     )
     .await
-    .map_err(chat_error_to_gateway)?;
+    .map_err(|e| {
+        #[cfg(feature = "capture")]
+        tap.finish_err(e.to_string());
+        chat_error_to_gateway(e)
+    })?;
 
     let is_anthropic = model_ref.provider == ProviderId::Anthropic;
     let key_id = auth.key_id.clone();
+    let model_raw = model_ref.raw.clone();
     let (tx, rx) = mpsc::channel(GATEWAY_STREAM_BUFFER);
 
     tokio::spawn(async move {
         let mut stream = byte_stream;
         let mut parser = SseParser::new();
         let mut round_usage: Option<proto::Usage> = None;
+        #[cfg(feature = "capture")]
+        tap.set_model_resolved(model_raw.clone());
 
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -561,6 +714,8 @@ pub async fn proxy_completion_stream(
                     if let Ok(events) = parser.push_str(&text) {
                         for event in events {
                             let data = event.data.trim();
+                            #[cfg(feature = "capture")]
+                            tap.push_sse(data);
                             if data == "[DONE]" {
                                 continue;
                             }
@@ -575,10 +730,14 @@ pub async fn proxy_completion_stream(
                         }
                     }
                     if tx.send(Ok(bytes)).await.is_err() {
+                        #[cfg(feature = "capture")]
+                        tap.finish(None, None);
                         return;
                     }
                 }
                 Err(e) => {
+                    #[cfg(feature = "capture")]
+                    tap.finish_err(e.to_string());
                     let _ = tx.send(Err(std::io::Error::other(e.to_string()))).await;
                     return;
                 }
@@ -586,15 +745,21 @@ pub async fn proxy_completion_stream(
         }
 
         if let Some(usage) = round_usage {
+            let cost = estimate_model_call_cost_usd(model_raw.as_str(), &usage);
             let _ = record_usage_async(
                 &db,
                 key_id.as_deref(),
                 &user_id,
-                &model_ref.raw,
+                &model_raw,
                 &usage,
                 &request_id,
             )
             .await;
+            #[cfg(feature = "capture")]
+            tap.finish(Some(&usage), Some(cost));
+        } else {
+            #[cfg(feature = "capture")]
+            tap.finish(None, None);
         }
     });
 
