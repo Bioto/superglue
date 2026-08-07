@@ -42,7 +42,7 @@ pub mod scrub;
 
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-use scrub::ScrubFields;
+use scrub::{ScrubFields, ScrubJsonFields};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -119,7 +119,7 @@ macro_rules! boxed_fmt_layer {
             }
             (LogFormat::Json, mode) => tracing_subscriber::fmt::layer()
                 .json()
-                .fmt_fields(ScrubFields(mode))
+                .fmt_fields(ScrubJsonFields(mode))
                 .with_target(true)
                 .boxed(),
             (LogFormat::Pretty, mode) => tracing_subscriber::fmt::layer()
