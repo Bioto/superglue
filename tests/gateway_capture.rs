@@ -326,3 +326,116 @@ async fn capture_excludes_configured_users() {
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(read_spool_records(&spool_dir).is_empty());
 }
+
+#[tokio::test]
+async fn capture_admin_status_when_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state_with_openai(
+        MASTER_KEY,
+        &dir.path().join("gw.db"),
+        "http://127.0.0.1:9",
+        "sk-test",
+    );
+    let app = router(state);
+    let resp = app
+        .oneshot(auth_request("GET", "/v1/capture/status", MASTER_KEY, None))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["enabled"], false);
+}
+
+#[tokio::test]
+async fn capture_admin_list_and_detail_from_spool() {
+    let dir = tempfile::tempdir().unwrap();
+    let spool_dir = dir.path().join("spool");
+    std::fs::create_dir_all(&spool_dir).unwrap();
+    let record = json!({
+        "schema": 1,
+        "request_id": "req-admin-1",
+        "ts_start": "2026-08-06T12:00:00Z",
+        "duration_ms": 42,
+        "user_id": "user-1",
+        "api": "chat_completions",
+        "model_requested": "openai:gpt-4o-mini",
+        "model_resolved": "gpt-4o-mini",
+        "stream": false,
+        "request": {"model": "openai:gpt-4o-mini", "messages": [{"role": "user", "content": "hi"}]},
+        "response": {"choices": []},
+        "sse": [],
+        "sse_truncated": false,
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        "cost_usd": 0.0001
+    });
+    let path = spool_dir.join("gateway-admin-test.ndjson.gz");
+    {
+        use std::io::Write;
+        let file = std::fs::File::create(&path).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut line = serde_json::to_vec(&record).unwrap();
+        line.push(b'\n');
+        encoder.write_all(&line).unwrap();
+        encoder.finish().unwrap();
+    }
+
+    let state = test_state_with_openai_and_capture(
+        MASTER_KEY,
+        &dir.path().join("gw.db"),
+        "http://127.0.0.1:9",
+        "sk-test",
+        capture_config(spool_dir),
+    )
+    .await;
+    let app = router(state);
+
+    let status_resp = app
+        .clone()
+        .oneshot(auth_request("GET", "/v1/capture/status", MASTER_KEY, None))
+        .await
+        .unwrap();
+    assert_eq!(status_resp.status(), StatusCode::OK);
+    let status: Value = serde_json::from_slice(
+        &status_resp.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(status["enabled"], true);
+    assert!(status["stats"]["pending_spool_files"].as_u64().unwrap() >= 1);
+
+    let list_resp = app
+        .clone()
+        .oneshot(auth_request(
+            "GET",
+            "/v1/capture/records?from=2026-08-06T00:00:00Z&to=2026-08-06T23:59:59Z",
+            MASTER_KEY,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(list_resp.status(), StatusCode::OK);
+    let list: Value = serde_json::from_slice(
+        &list_resp.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(list["records"].as_array().unwrap().len(), 1);
+    assert_eq!(list["records"][0]["request_id"], "req-admin-1");
+
+    let detail_resp = app
+        .clone()
+        .oneshot(auth_request(
+            "GET",
+            "/v1/capture/records/req-admin-1?from=2026-08-06T00:00:00Z&to=2026-08-06T23:59:59Z",
+            MASTER_KEY,
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(detail_resp.status(), StatusCode::OK);
+    let detail: Value = serde_json::from_slice(
+        &detail_resp.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(detail["record"]["request_id"], "req-admin-1");
+    assert_eq!(detail["record"]["request"]["messages"][0]["content"], "hi");
+}

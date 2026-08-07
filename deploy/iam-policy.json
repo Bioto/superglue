@@ -57,6 +57,29 @@
         "arn:aws:s3:::superglue-gateway-capture",
         "arn:aws:s3:::superglue-gateway-capture/*"
       ]
+    },
+    {
+      "Sid": "SuperglueGatewayCaptureReadList",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::superglue-gateway-capture",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": [
+            "gateway-capture/*"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "SuperglueGatewayCaptureReadGet",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::superglue-gateway-capture/gateway-capture/*"
     }
   ]
 }

@@ -131,6 +131,8 @@ aws s3api put-bucket-lifecycle-configuration --bucket superglue-gateway-capture 
   }'
 ```
 
-Attach the EC2 instance profile with `SuperglueGatewayCaptureUpload` from [`iam-policy.json`](iam-policy.json).
+Attach the EC2 instance profile with `SuperglueGatewayCaptureUpload` and `SuperglueGatewayCaptureRead*` from [`iam-policy.json`](iam-policy.json).
 
-Captured traffic is gzip NDJSON under `gateway-capture/dt=YYYY-MM-DD/hour=HH/` in the bucket. Use `SUPERGLUE_CAPTURE_EXCLUDE_USERS` to skip specific gateway user ids.
+Captured traffic is gzip NDJSON under `gateway-capture/dt=YYYY-MM-DD/hour=HH/` in the bucket. Browse it via the harn admin UI (**Gateway → Capture**) or the gateway admin API (`GET /v1/capture/status`, `/v1/capture/records`, `/v1/capture/records/{request_id}`). Redeploy with `--features gateway,capture` after upgrading to pick up the admin endpoints.
+
+Use `SUPERGLUE_CAPTURE_EXCLUDE_USERS` to skip specific gateway user ids.

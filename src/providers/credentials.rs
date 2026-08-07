@@ -33,6 +33,14 @@ impl ProviderCredentials {
         self.base_urls.insert(provider, url.into());
     }
 
+    pub fn remove_key(&mut self, provider: ProviderId) {
+        self.keys.remove(&provider);
+    }
+
+    pub fn remove_base_url(&mut self, provider: ProviderId) {
+        self.base_urls.remove(&provider);
+    }
+
     /// Load keys from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`.
     #[must_use]
     pub fn from_env() -> Self {

@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aws_sdk_s3::Client as S3Client;
 use axum::extract::{Path as AxumPath, Query, State};
 use base64::Engine;
-use chrono::{DateTime, Duration, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 
@@ -291,7 +291,10 @@ async fn find_record_detail(
 ) -> Result<Option<CaptureRecordDetailResponse>, String> {
     let files = collect_capture_files(&runtime.s3, &runtime.config, from, to).await;
     for file in &files {
-        let lines = read_capture_file_lines(&runtime.s3, &runtime.config, file).await?;
+        let lines = match read_capture_file_lines(&runtime.s3, &runtime.config, file).await {
+            Ok(lines) => lines,
+            Err(_) => continue,
+        };
         for line in lines {
             let record: CaptureRecord = serde_json::from_str(&line)
                 .map_err(|e| format!("parse capture record: {e}"))?;
@@ -535,7 +538,10 @@ async fn scan_records(
 
     'files: for file_index in start.file_index..files.len() {
         let file = &files[file_index];
-        let lines = read_capture_file_lines(s3, config, file).await?;
+        let lines = match read_capture_file_lines(s3, config, file).await {
+            Ok(lines) => lines,
+            Err(_) => continue,
+        };
         let line_count = lines.len();
         let skip = if file_index == start.file_index {
             start.line_offset
