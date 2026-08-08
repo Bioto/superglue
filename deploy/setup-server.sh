@@ -75,8 +75,9 @@ OPENAI_KEY="${OPENAI_API_KEY:-}"
 ANTHROPIC_KEY="${ANTHROPIC_API_KEY:-}"
 XAI_KEY="${XAI_API_KEY:-}"
 GROQ_KEY="${GROQ_API_KEY:-}"
+OPENROUTER_KEY="${OPENROUTER_API_KEY:-}"
 
-if [[ -z "${OPENAI_KEY}" && -z "${ANTHROPIC_KEY}" && -z "${XAI_KEY}" && -z "${GROQ_KEY}" ]]; then
+if [[ -z "${OPENAI_KEY}" && -z "${ANTHROPIC_KEY}" && -z "${XAI_KEY}" && -z "${GROQ_KEY}" && -z "${OPENROUTER_KEY}" ]]; then
   echo "error: no provider API keys found; set OPENAI_API_KEY (or another provider) locally" >&2
   exit 1
 fi
@@ -145,6 +146,7 @@ OPENAI_API_KEY=${OPENAI_KEY}
 ANTHROPIC_API_KEY=${ANTHROPIC_KEY}
 XAI_API_KEY=${XAI_KEY}
 GROQ_API_KEY=${GROQ_KEY}
+OPENROUTER_API_KEY=${OPENROUTER_KEY}
 RUST_LOG=info
 EOF
 scp -q "${LOCAL_ENV_TMP}" "${REMOTE}:${ENV_DIR}/server.env"

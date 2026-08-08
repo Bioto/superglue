@@ -1,4 +1,4 @@
-//! Known LLM provider identifiers (`openai`, `anthropic`, `xai`, `groq`).
+//! Known LLM provider identifiers (`openai`, `anthropic`, `xai`, `groq`, `openrouter`).
 
 use std::fmt;
 use std::str::FromStr;
@@ -11,6 +11,7 @@ pub enum ProviderId {
     Anthropic,
     Xai,
     Groq,
+    OpenRouter,
 }
 
 #[derive(Debug, Error)]
@@ -18,11 +19,12 @@ pub enum ProviderId {
 pub struct UnknownProvider(pub String);
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 4] = [
+    pub const ALL: [ProviderId; 5] = [
         ProviderId::OpenAi,
         ProviderId::Anthropic,
         ProviderId::Xai,
         ProviderId::Groq,
+        ProviderId::OpenRouter,
     ];
 
     #[must_use]
@@ -32,6 +34,7 @@ impl ProviderId {
             ProviderId::Anthropic => "anthropic",
             ProviderId::Xai => "xai",
             ProviderId::Groq => "groq",
+            ProviderId::OpenRouter => "openrouter",
         }
     }
 
@@ -42,6 +45,7 @@ impl ProviderId {
             ProviderId::Anthropic => "https://api.anthropic.com",
             ProviderId::Xai => "https://api.x.ai",
             ProviderId::Groq => "https://api.groq.com/openai",
+            ProviderId::OpenRouter => "https://openrouter.ai/api",
         }
     }
 
@@ -52,6 +56,7 @@ impl ProviderId {
             ProviderId::Anthropic => "ANTHROPIC_API_KEY",
             ProviderId::Xai => "XAI_API_KEY",
             ProviderId::Groq => "GROQ_API_KEY",
+            ProviderId::OpenRouter => "OPENROUTER_API_KEY",
         }
     }
 
@@ -59,7 +64,10 @@ impl ProviderId {
     pub fn uses_openai_compat(self) -> bool {
         matches!(
             self,
-            ProviderId::OpenAi | ProviderId::Xai | ProviderId::Groq
+            ProviderId::OpenAi
+                | ProviderId::Xai
+                | ProviderId::Groq
+                | ProviderId::OpenRouter
         )
     }
 
@@ -85,6 +93,7 @@ impl FromStr for ProviderId {
             "anthropic" => Ok(ProviderId::Anthropic),
             "xai" => Ok(ProviderId::Xai),
             "groq" => Ok(ProviderId::Groq),
+            "openrouter" => Ok(ProviderId::OpenRouter),
             other => Err(UnknownProvider(other.to_string())),
         }
     }

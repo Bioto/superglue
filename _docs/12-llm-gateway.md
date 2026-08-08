@@ -170,7 +170,7 @@ Token counts are logged from provider responses. USD cost uses the static rates 
 
 ## Provider credentials
 
-Upstream provider API keys are loaded from environment variables on the server (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENAI_BASE_URL`). Clients never see provider credentials.
+Upstream provider API keys are loaded from environment variables on the server (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_BASE_URL`). Clients never see provider credentials.
 
 ## API reference
 

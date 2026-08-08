@@ -10,6 +10,7 @@ Superglue chat models use a `provider:model` string (for example `openai:gpt-4o-
 | Anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | xAI | `XAI_API_KEY` | `XAI_BASE_URL` |
 | Groq | `GROQ_API_KEY` | `GROQ_BASE_URL` |
+| OpenRouter | `OPENROUTER_API_KEY` | `OPENROUTER_BASE_URL` |
 
 Bindings load these via `ProviderCredentials::from_env()` when constructing a client. You can override per provider with `api_keys` (Python/JS/Kotlin) or `ClientBuilder` in Rust.
 

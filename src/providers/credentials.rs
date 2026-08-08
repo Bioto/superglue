@@ -41,7 +41,8 @@ impl ProviderCredentials {
         self.base_urls.remove(&provider);
     }
 
-    /// Load keys from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`.
+    /// Load keys from `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`,
+    /// `OPENROUTER_API_KEY`.
     #[must_use]
     pub fn from_env() -> Self {
         let mut creds = Self::new();

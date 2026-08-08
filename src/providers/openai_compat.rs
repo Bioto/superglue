@@ -1,4 +1,4 @@
-//! OpenAI-compatible chat API (OpenAI, Groq, xAI).
+//! OpenAI-compatible chat API (OpenAI, Groq, xAI, OpenRouter).
 
 use std::collections::HashMap;
 
@@ -242,11 +242,11 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 
     fn supports_previous_response_id(&self) -> bool {
-        self.provider != ProviderId::Groq
+        matches!(self.provider, ProviderId::OpenAi | ProviderId::Xai)
     }
 
     fn supports_file_upload(&self) -> bool {
-        self.provider == ProviderId::OpenAi || self.provider == ProviderId::Xai
+        matches!(self.provider, ProviderId::OpenAi | ProviderId::Xai)
     }
 }
 
