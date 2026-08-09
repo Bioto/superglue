@@ -6,7 +6,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::openai::{ChatMessage, ContentPart, ImageUrl, MessageContent};
+use crate::openai::{ChatMessage, ContentPart, ImageDetail, ImageUrl, MessageContent};
+use serde_json::Value;
 
 /// LLM-ready image payload cached by content hash.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -217,6 +218,77 @@ pub fn parts_text_for_summary(parts: &[ContentPart]) -> String {
     chunks.join("\n")
 }
 
+/// Scan the most recent contiguous `tool` messages for `vision.image_hash` and append a
+/// multimodal user message with resolved [`ContentPart::ImageUrl`] parts.
+///
+/// Tool results stay short (hash/path only); this is how screenshots become real vision input.
+/// Returns the number of images attached (0 if none / missing from store).
+pub fn attach_vision_from_tool_results(
+    messages: &mut Vec<ChatMessage>,
+    store: &ImageStore,
+) -> usize {
+    let mut pending: Vec<(String, Option<String>)> = Vec::new();
+    for msg in messages.iter().rev() {
+        if msg.role != "tool" {
+            break;
+        }
+        let Some(text) = msg.content.as_ref().and_then(MessageContent::as_text) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(text) else {
+            continue;
+        };
+        let Some(vision) = value.get("vision") else {
+            continue;
+        };
+        let Some(hash) = vision.get("image_hash").and_then(Value::as_str) else {
+            continue;
+        };
+        let filename = vision
+            .get("filename")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        pending.push((hash.to_string(), filename));
+    }
+    pending.reverse();
+
+    let mut parts = Vec::new();
+    let mut attached = 0usize;
+    for (hash, _filename) in pending {
+        let Some(payload) = store.get(&hash) else {
+            continue;
+        };
+        if attached == 0 {
+            parts.push(ContentPart::Text {
+                text: "Screenshot(s) attached for vision — describe/analyze these images directly."
+                    .into(),
+            });
+        }
+        parts.push(ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: payload.data_url.clone(),
+                detail: Some(ImageDetail::Auto),
+            },
+        });
+        attached += 1;
+    }
+
+    if attached == 0 {
+        return 0;
+    }
+
+    messages.push(ChatMessage {
+        role: "user".to_string(),
+        content: Some(MessageContent::Parts(parts)),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        refusal: None,
+        provider_blocks: None,
+    });
+    attached
+}
+
 /// Replace resolved `image_url` parts with lazy refs when the URL matches the store.
 #[must_use]
 pub fn restore_image_refs_in_messages(
@@ -333,6 +405,46 @@ mod tests {
         };
         assert_eq!(parts.len(), 2);
         assert!(matches!(parts[1], ContentPart::ImageUrl { .. }));
+    }
+
+    #[test]
+    fn attach_vision_from_tool_results_appends_user_image() {
+        let bytes = b"\x89PNG\r\n\x1a\nvision";
+        let mut store = ImageStore::default();
+        let hash = store.insert_from_bytes("shot.png", bytes);
+        let mut messages = vec![
+            ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+                refusal: None,
+                provider_blocks: None,
+            },
+            ChatMessage {
+                role: "tool".into(),
+                content: Some(MessageContent::Text(
+                    serde_json::json!({
+                        "ok": true,
+                        "vision": { "image_hash": hash, "filename": "shot.png" }
+                    })
+                    .to_string(),
+                )),
+                tool_calls: None,
+                tool_call_id: Some("call_1".into()),
+                name: Some("browser".into()),
+                refusal: None,
+                provider_blocks: None,
+            },
+        ];
+        assert_eq!(attach_vision_from_tool_results(&mut messages, &store), 1);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].role, "user");
+        let Some(MessageContent::Parts(parts)) = &messages[2].content else {
+            panic!("expected multipart vision message");
+        };
+        assert!(parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. })));
     }
 
     #[test]

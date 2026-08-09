@@ -132,6 +132,26 @@ impl AnthropicStreamAccumulator {
         Ok(None)
     }
 
+    /// True when this SSE frame ends the message, so readers can stop instead of
+    /// waiting for the provider to close the connection.
+    #[must_use]
+    pub fn is_terminal_sse_data(data: &str) -> bool {
+        if data == "[DONE]" {
+            return true;
+        }
+        if !data.contains("message_stop") {
+            return false;
+        }
+        serde_json::from_str::<Value>(data)
+            .ok()
+            .and_then(|v| {
+                v.get("type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t == "message_stop")
+            })
+            .unwrap_or(false)
+    }
+
     /// Update usage from Anthropic SSE data without accumulating content.
     pub fn apply_usage_from_sse_data(
         usage: &mut Option<proto::Usage>,

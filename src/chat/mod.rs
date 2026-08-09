@@ -306,6 +306,9 @@ pub struct ChatOptions {
     pub context_block_provider: Option<ContextBlockProvider>,
     /// Optional sink for context lifecycle diagnostics.
     pub context_event_logger: Option<ContextEventLogger>,
+
+    /// Session image cache used to turn tool `vision.image_hash` results into multimodal input.
+    pub image_store: Option<Arc<tokio::sync::Mutex<crate::images::ImageStore>>>,
 }
 
 impl Default for ChatOptions {
@@ -352,6 +355,7 @@ impl Default for ChatOptions {
             aaak_compression_model: None,
             context_block_provider: None,
             context_event_logger: None,
+            image_store: None,
         }
     }
 }
@@ -442,6 +446,7 @@ impl From<proto::ChatOptions> for ChatOptions {
             aaak_compression_model: p.aaak_compression_model,
             context_block_provider: None,
             context_event_logger: None,
+            image_store: None,
         }
     }
 }
@@ -1487,6 +1492,11 @@ pub async fn complete_with_tools(
                 messages.push(r.map_err(|e| fail_partial(e, &messages, had_system_prompt))?);
             }
 
+            if let Some(store) = &options.image_store {
+                let store = store.lock().await;
+                let _ = crate::images::attach_vision_from_tool_results(&mut messages, &store);
+            }
+
             if options.condense_tool_messages {
                 condense_tool_round(
                     &mut messages,
@@ -2287,6 +2297,14 @@ where
                                     }
                                 }
                             }
+                            // Anthropic never sends `[DONE]`; stop at `message_stop`
+                            // rather than waiting for the socket to close.
+                            if crate::providers::anthropic_stream::AnthropicStreamAccumulator::
+                                is_terminal_sse_data(data)
+                            {
+                                stream_done = true;
+                                break;
+                            }
                         } else {
                             let chunk: ChatCompletionChunk = serde_json::from_str(data)
                                 .map_err(|e| {
@@ -2548,6 +2566,11 @@ where
                 for r in results {
                     messages.push(r.map_err(|e| fail_partial(e, &messages, had_system_prompt))?);
                 }
+            }
+
+            if let Some(store) = &options.image_store {
+                let store = store.lock().await;
+                let _ = crate::images::attach_vision_from_tool_results(&mut messages, &store);
             }
 
             if options.condense_tool_messages {

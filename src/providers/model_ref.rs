@@ -83,6 +83,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_groq_gpt_oss() {
+        let r = parse_model_ref("groq:openai/gpt-oss-120b");
+        assert_eq!(r.provider, ProviderId::Groq);
+        assert_eq!(r.model, "openai/gpt-oss-120b");
+    }
+
+    #[test]
     fn wire_model_uses_prefix_for_gateway_base_url() {
         let model_ref = parse_model_ref("openai:gpt-4o-mini");
         let wired = wire_model_id(

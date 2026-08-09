@@ -82,7 +82,9 @@ impl LlmProvider for OpenAiCompatProvider {
         };
 
         let mut extra = HashMap::new();
-        if let Some(key) = &options.prompt_cache_key {
+        if self.supports_prompt_cache_key()
+            && let Some(key) = &options.prompt_cache_key
+        {
             extra.insert("prompt_cache_key".to_string(), json!(key));
         }
 
@@ -346,6 +348,32 @@ mod tests {
             req.body.get("prompt_cache_key").and_then(|v| v.as_str()),
             Some("session-abc")
         );
+    }
+
+    #[test]
+    fn groq_chat_request_omits_prompt_cache_key() {
+        let mut creds = ProviderCredentials::new();
+        creds.insert_key(ProviderId::Groq, "gsk-test");
+        let model_ref = ModelRef {
+            provider: ProviderId::Groq,
+            model: "openai/gpt-oss-120b".into(),
+            raw: "groq:openai/gpt-oss-120b".into(),
+        };
+        let options = ChatOptions {
+            prompt_cache_key: Some("session-abc".into()),
+            ..Default::default()
+        };
+        let ctx = ProviderRequestContext {
+            model_ref: &model_ref,
+            credentials: &creds,
+            messages: &[ChatMessage::text("user", "hi")],
+            tools: None,
+            chat_tools: None,
+            stream: false,
+            options: &options,
+        };
+        let req = OpenAiCompatProvider::new(ProviderId::Groq).build_chat_request(&ctx);
+        assert!(req.body.get("prompt_cache_key").is_none());
     }
 
     #[test]

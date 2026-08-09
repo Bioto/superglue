@@ -839,6 +839,13 @@ async fn responses_tool_loop(
                 });
                 messages.push(msg);
             }
+            if let Some(store) = &options.image_store {
+                let store = store.lock().await;
+                if crate::images::attach_vision_from_tool_results(&mut messages, &store) > 0 {
+                    reset_chain_after_context_mutation(&mut previous_response_id, &mut tool_input);
+                    continue;
+                }
+            }
             tool_input = Some(outputs);
             continue;
         }
@@ -1170,6 +1177,9 @@ struct ResponsesStreamRound {
     chat_tool_dispatch: stream_tools::StreamingToolDispatch,
     chat_finish_reason: Option<String>,
     provider_blocks: Option<Vec<Value>>,
+    /// Set once a terminal SSE event arrives so the reader stops instead of
+    /// waiting for the provider to close the connection.
+    terminal: bool,
 }
 
 fn format_sse_error_object(err: &Value) -> Option<String> {
@@ -1316,14 +1326,10 @@ fn parse_response_output_items(output: &Value) -> Vec<ResponseOutputItem> {
         .collect()
 }
 
-async fn ingest_stream_output_item(
+fn ingest_stream_output_item(
     parsed: ResponseOutputItem,
     round_state: &mut ResponsesStreamRound,
     on_delta: &mut impl FnMut(String),
-    status_emitter: Option<&Arc<StatusEmitter>>,
-    request_id: &str,
-    round: u32,
-    model: &str,
 ) {
     round_state.raw_output.push(parsed.clone());
     match parsed {
@@ -1335,22 +1341,14 @@ async fn ingest_stream_output_item(
         } if !name.is_empty() => {
             let resolved_call_id = effective_function_call_id(&call_id, &id);
             let call = StreamedFunctionCall {
-                call_id: resolved_call_id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
+                call_id: resolved_call_id,
+                name,
+                arguments,
             };
-            if push_streamed_function_call(round_state, call)
-                && let Some(emitter) = status_emitter
-            {
-                let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
-                ev.round = round;
-                ev.metadata.insert("tool_name".to_string(), name);
-                ev.metadata.insert(
-                    "arguments".to_string(),
-                    crate::chat::truncate_tool_event_metadata(arguments.trim()),
-                );
-                emit_safe(Some(emitter), ev).await;
-            }
+            // Do not emit ToolCallStart here — the stream may still be open for
+            // seconds after args complete. dispatch_one emits start when the tool
+            // actually runs so the UI does not show a stuck "running" row.
+            let _ = push_streamed_function_call(round_state, call);
         }
         item => {
             if round_state.content.is_empty()
@@ -1478,44 +1476,25 @@ async fn apply_responses_stream_event(
                 if !name.is_empty() {
                     let call = StreamedFunctionCall {
                         call_id,
-                        name: name.clone(),
-                        arguments: arguments.clone(),
+                        name,
+                        arguments,
                     };
-                    if push_streamed_function_call(round_state, call)
-                        && let Some(emitter) = status_emitter
-                    {
-                        let mut ev =
-                            ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
-                        ev.round = round;
-                        ev.metadata.insert("tool_name".to_string(), name);
-                        ev.metadata.insert(
-                            "arguments".to_string(),
-                            crate::chat::truncate_tool_event_metadata(arguments.trim()),
-                        );
-                        emit_safe(Some(emitter), ev).await;
-                    }
+                    // Record the call only; ToolCallStart waits for dispatch_one.
+                    let _ = push_streamed_function_call(round_state, call);
                 }
             }
         }
         "response.output_item.done" => {
             if let Some(item) = v.get("item") {
                 if let Ok(parsed) = serde_json::from_value::<ResponseOutputItem>(item.clone()) {
-                    ingest_stream_output_item(
-                        parsed,
-                        round_state,
-                        on_delta,
-                        status_emitter,
-                        request_id,
-                        round,
-                        model,
-                    )
-                    .await;
+                    ingest_stream_output_item(parsed, round_state, on_delta);
                 } else {
                     tracing::debug!("responses: failed to parse output_item.done item");
                 }
             }
         }
-        "response.completed" => {
+        "response.completed" | "response.incomplete" => {
+            round_state.terminal = true;
             if let Some(u) = v.pointer("/response/usage") {
                 round_state.usage = Some(usage_from_response_json(u));
             }
@@ -1553,6 +1532,7 @@ async fn apply_responses_stream_event(
             }
         }
         "error" | "response.error" | "response.failed" => {
+            round_state.terminal = true;
             if let Some(id) = v.pointer("/response/id").and_then(|id| id.as_str()) {
                 round_state.response_id = id.to_string();
             }
@@ -1707,6 +1687,14 @@ where
                             }
                         }
                     }
+                    if crate::providers::anthropic_stream::AnthropicStreamAccumulator::
+                        is_terminal_sse_data(data)
+                    {
+                        round_state.terminal = true;
+                    }
+                }
+                if round_state.terminal {
+                    break;
                 }
             }
             let thinking = acc.thinking_text().to_string();
@@ -1743,8 +1731,9 @@ where
                 if data.is_empty() {
                     continue;
                 }
-                if data.is_empty() {
-                    continue;
+                if data == "[DONE]" {
+                    round_state.terminal = true;
+                    break;
                 }
                 if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
                     if apply_chat_completion_chunk_event(&chunk, &mut round_state, &mut on_delta) {
@@ -1765,6 +1754,11 @@ where
                     &model_used,
                 )
                 .await;
+            }
+            // The response is finished; do not wait for the provider to close the
+            // body (that idle tail added seconds before the turn could complete).
+            if round_state.terminal {
+                break;
             }
         }
 
@@ -2077,7 +2071,7 @@ where
                     &request_id,
                     api_calls,
                     &model_used,
-                    false,
+                    true,
                     options.tool_result_max_chars,
                     Some(&loop_guard),
                 )
@@ -2099,6 +2093,14 @@ where
                     call_id: tc.id.clone(),
                     output: out_text.to_string(),
                 });
+            }
+
+            if let Some(store) = &options.image_store {
+                let store = store.lock().await;
+                if crate::images::attach_vision_from_tool_results(&mut messages, &store) > 0 {
+                    reset_chain_after_context_mutation(&mut previous_response_id, &mut tool_input);
+                    continue;
+                }
             }
 
             if options.condense_tool_messages {
@@ -2523,6 +2525,51 @@ mod tests {
 
         assert_eq!(round_state.content, "recovered");
         assert_eq!(deltas, vec!["recovered".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn terminal_events_stop_the_stream_reader() {
+        for event_type in ["response.completed", "response.incomplete", "response.failed"] {
+            let mut round_state = ResponsesStreamRound::default();
+            apply_responses_stream_event(
+                &json!({ "type": event_type, "response": { "id": "resp_test" } }),
+                event_type,
+                &mut round_state,
+                &mut |_delta| {},
+                &mut |_reasoning| {},
+                None,
+                "req-1",
+                1,
+                "gpt-test",
+            )
+            .await;
+            assert!(round_state.terminal, "{event_type} should end the round");
+        }
+
+        let mut mid_round = ResponsesStreamRound::default();
+        apply_responses_stream_event(
+            &json!({ "type": "response.output_text.delta", "delta": "hi" }),
+            "response.output_text.delta",
+            &mut mid_round,
+            &mut |_delta| {},
+            &mut |_reasoning| {},
+            None,
+            "req-1",
+            1,
+            "gpt-test",
+        )
+        .await;
+        assert!(!mid_round.terminal, "deltas must not end the round");
+    }
+
+    #[test]
+    fn anthropic_message_stop_is_terminal() {
+        use crate::providers::anthropic_stream::AnthropicStreamAccumulator as Acc;
+        assert!(Acc::is_terminal_sse_data(r#"{"type":"message_stop"}"#));
+        assert!(Acc::is_terminal_sse_data("[DONE]"));
+        assert!(!Acc::is_terminal_sse_data(
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}"#
+        ));
     }
 
     #[tokio::test]
