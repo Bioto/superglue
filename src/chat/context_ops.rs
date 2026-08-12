@@ -389,7 +389,25 @@ pub fn condense_tool_round(
 ) {
     let len_before = messages.len();
     let chars_before = estimate_context_chars(messages);
+    let original = messages.clone();
     condense_round(messages, aaak_tool_condensing);
+    let chars_after = estimate_context_chars(messages);
+    if messages.len() != len_before && chars_after >= chars_before {
+        *messages = original;
+        if let Some(logger) = context_event_logger {
+            logger.log(format!(
+                "context condense skipped before_messages={} before_chars={} after_chars={} aaak={}",
+                len_before, chars_before, chars_after, aaak_tool_condensing
+            ));
+        }
+        if let Some(provider) = context_block_provider {
+            let context_block = provider.render();
+            if !context_block.trim().is_empty() {
+                messages.push(ChatMessage::text("user", context_block));
+            }
+        }
+        return;
+    }
     if messages.len() != len_before
         && let Some(logger) = context_event_logger
     {
@@ -398,7 +416,7 @@ pub fn condense_tool_round(
             len_before,
             messages.len(),
             chars_before,
-            estimate_context_chars(messages),
+            chars_after,
             aaak_tool_condensing,
         ));
     }
@@ -454,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn appends_context_block_to_condensed_round() {
+    fn preserves_unprofitable_tool_round_and_appends_context_block() {
         let provider = ContextBlockProvider::new(|| "[Notepad index]\nentry-1".into());
         let mut messages = tool_round();
 
@@ -469,7 +487,12 @@ mod tests {
             .as_text()
             .unwrap();
         assert!(text.contains("[Notepad index]\nentry-1"));
-        assert!(text.contains("grep({\"pattern\":\"needle\"})"));
+        assert!(messages.iter().any(|message| {
+            message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| calls[0].function.name == "grep")
+        }));
     }
 
     #[test]
