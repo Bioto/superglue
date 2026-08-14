@@ -67,6 +67,26 @@ pub async fn register_benchmark_tools(registry: &ToolRegistry) -> Result<(), Too
     Ok(())
 }
 
+/// Same tools with a bulky `raw` field so programmatic calling can drop intermediates.
+#[allow(dead_code)]
+pub async fn register_fat_benchmark_tools(
+    registry: &ToolRegistry,
+    raw_chars: usize,
+) -> Result<(), ToolInvokeError> {
+    let blob = "x".repeat(raw_chars);
+    for tool in all_benchmark_tools() {
+        let spec = tool.spec();
+        let mut result = tool.call(json!({})).await?;
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("raw".into(), json!(blob));
+        }
+        registry
+            .register(Arc::new(JsonTool { spec, result }))
+            .await?;
+    }
+    Ok(())
+}
+
 /// Tool instances for live client registration.
 #[must_use]
 pub fn all_benchmark_tools() -> Vec<Arc<dyn Tool>> {

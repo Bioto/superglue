@@ -25,7 +25,7 @@ use superglue::chat::{ChatError, ChatOptions, CompletionOutcome, complete_with_t
 use superglue::guardrails::GuardrailRegistry;
 use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
-use superglue::tools::{ROUTER_TOOL_NAME, ToolMode, ToolRegistry};
+use superglue::tools::{CODE_TOOL_NAME, ROUTER_TOOL_NAME, ToolMode, ToolRegistry};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -206,12 +206,64 @@ fn final_text_response() -> Value {
     })
 }
 
-fn scripted_response(call_index: u32, dynamic: bool, profile: ConversationProfile) -> Value {
+fn code_tool_call_response(tools: &[&str]) -> Value {
+    let mut source = String::new();
+    for name in tools {
+        source.push_str(&format!("const {name} = tools.{name}({{}});\n"));
+    }
+    source.push_str("return {\n");
+    source
+        .push_str("  temp: (typeof get_weather !== 'undefined' && get_weather.temp_f) || null,\n");
+    source.push_str(
+        "  highs: (typeof get_forecast !== 'undefined' && get_forecast.days) ? get_forecast.days.length : 0,\n",
+    );
+    source.push_str("  avg: (typeof calculate !== 'undefined' && calculate.result) || null,\n");
+    source.push_str(
+        "  price: (typeof search_flights !== 'undefined' && search_flights.price_usd) || null,\n",
+    );
+    source.push_str(
+        "  rate: (typeof get_exchange_rate !== 'undefined' && get_exchange_rate.rate) || null,\n",
+    );
+    source.push_str(
+        "  hello: (typeof translate_text !== 'undefined' && translate_text.translation) || null\n",
+    );
+    source.push_str("};\n");
+    json!({
+        "model": "mock",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_code",
+                    "type": "function",
+                    "function": {
+                        "name": CODE_TOOL_NAME,
+                        "arguments": serde_json::to_string(&json!({ "source": source })).unwrap()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })
+}
+
+fn scripted_response(call_index: u32, mode: ToolMode, profile: ConversationProfile) -> Value {
     let expected = profile.expected_tools();
-    let tool_offset = if dynamic { 2 } else { 0 };
+    let uses_router = mode.uses_router();
+    let tool_offset = if uses_router { 2 } else { 0 };
     let parallel = profile.execution_style() == ToolExecutionStyle::Parallel;
 
-    if dynamic {
+    if mode == ToolMode::Code {
+        return match call_index {
+            0 => router_call_response(),
+            1 => route_resolve_response(expected),
+            2 => code_tool_call_response(expected),
+            _ => final_text_response(),
+        };
+    }
+
+    if uses_router {
         match call_index {
             0 => return router_call_response(),
             1 => return route_resolve_response(expected),
@@ -263,10 +315,16 @@ fn record_request(body: &[u8], collector: &Mutex<RequestMetricsCollector>) {
     }
 }
 
-async fn register_tools(registry: &ToolRegistry) {
-    benchmark_tools::register_benchmark_tools(registry)
-        .await
-        .expect("register benchmark tools");
+async fn register_tools_with_raw(registry: &ToolRegistry, raw_chars: usize) {
+    if raw_chars == 0 {
+        benchmark_tools::register_benchmark_tools(registry)
+            .await
+            .expect("register benchmark tools");
+    } else {
+        benchmark_tools::register_fat_benchmark_tools(registry, raw_chars)
+            .await
+            .expect("register fat benchmark tools");
+    }
 }
 
 /// Run one scripted multi-round tool-chain scenario against wiremock and collect metrics.
@@ -274,7 +332,17 @@ pub async fn run_scenario(
     opts: ChatOptions,
     profile: ConversationProfile,
 ) -> Result<(CompletionOutcome, ScenarioMetrics), ChatError> {
-    let dynamic = opts.tool_mode == ToolMode::Dynamic;
+    run_scenario_with_raw(opts, profile, 0).await
+}
+
+/// Same as [`run_scenario`] but each tool result includes a `raw` blob of `raw_chars`.
+pub async fn run_scenario_with_raw(
+    opts: ChatOptions,
+    profile: ConversationProfile,
+    raw_chars: usize,
+) -> Result<(CompletionOutcome, ScenarioMetrics), ChatError> {
+    let mode = opts.tool_mode;
+    let uses_router = mode.uses_router();
     let initial_messages = profile.initial_messages();
     let server = MockServer::start().await;
     let call_idx = Arc::new(AtomicU32::new(0));
@@ -293,7 +361,7 @@ pub async fn run_scenario(
                 return ResponseTemplate::new(200).set_body_json(summarize_response());
             }
             let i = call_idx2.fetch_add(1, Ordering::SeqCst);
-            let body = scripted_response(i, dynamic, profile);
+            let body = scripted_response(i, mode, profile);
             ResponseTemplate::new(200).set_body_json(body)
         })
         .mount(&server)
@@ -301,14 +369,14 @@ pub async fn run_scenario(
 
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let registry = ToolRegistry::new();
-    register_tools(&registry).await;
+    register_tools_with_raw(&registry, raw_chars).await;
 
     let mut opts = opts;
     opts.base_url = server.uri();
     opts.api_key = secrecy::SecretString::from("sk-test".to_string());
     opts.model = "mock".into();
     opts.max_tool_rounds = 12;
-    if dynamic {
+    if uses_router {
         opts.tool_route_model = Some("mock".into());
     }
 

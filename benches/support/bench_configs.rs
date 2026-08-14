@@ -20,6 +20,7 @@ pub enum ConfigKind {
     CondensePlain,
     CondenseAaak,
     Combined,
+    Code,
 }
 
 impl BenchConfig {
@@ -32,12 +33,12 @@ impl BenchConfig {
         ) {
             (ToolMode::Standard, false, _) => ConfigKind::Standard,
             (ToolMode::Dynamic, false, _) => ConfigKind::Dynamic,
-            (ToolMode::Code, false, _) => ConfigKind::Dynamic,
+            (ToolMode::Code, false, _) => ConfigKind::Code,
             (ToolMode::Standard, true, false) => ConfigKind::CondensePlain,
             (ToolMode::Standard, true, true) => ConfigKind::CondenseAaak,
             (ToolMode::Dynamic, true, true) => ConfigKind::Combined,
             (ToolMode::Dynamic, true, false) => ConfigKind::Dynamic,
-            (ToolMode::Code, true, _) => ConfigKind::Dynamic,
+            (ToolMode::Code, true, _) => ConfigKind::Code,
         }
     }
 
@@ -82,6 +83,18 @@ pub const BENCH_CONFIGS: &[BenchConfig] = &[
         tool_mode: ToolMode::Dynamic,
         condense_tool_messages: true,
         aaak_tool_condensing: true,
+    },
+    BenchConfig {
+        label: "code",
+        tool_mode: ToolMode::Code,
+        condense_tool_messages: false,
+        aaak_tool_condensing: false,
+    },
+    BenchConfig {
+        label: "code_condense",
+        tool_mode: ToolMode::Code,
+        condense_tool_messages: true,
+        aaak_tool_condensing: false,
     },
 ];
 

@@ -17,7 +17,7 @@ use superglue::guardrails::GuardrailRegistry;
 use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
-use superglue::tools::{ROUTER_TOOL_NAME, ToolMode, ToolRegistry};
+use superglue::tools::{CODE_TOOL_NAME, ROUTER_TOOL_NAME, ToolMode, ToolRegistry};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -147,6 +147,27 @@ fn route_resolve_response() -> Value {
     })
 }
 
+fn weather_code_call_response() -> Value {
+    json!({
+        "model": "mock",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_code",
+                    "type": "function",
+                    "function": {
+                        "name": CODE_TOOL_NAME,
+                        "arguments": "{\"source\":\"const w = tools.get_weather({city:\\\"Paris\\\"}); return {temp: w.temp_f};\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })
+}
+
 fn weather_tool_call_response() -> Value {
     json!({
         "model": "mock",
@@ -184,11 +205,19 @@ fn record_tokens(body: &[u8], collector: &Mutex<TokenCollector>) {
     guard.cum_total_tokens += prompt_est + COMPLETION_TOKENS_ESTIMATE;
 }
 
-fn scripted_turn_response(local_call: u32, dynamic: bool, tool_turn: bool) -> Value {
+fn scripted_turn_response(local_call: u32, mode: ToolMode, tool_turn: bool) -> Value {
     if !tool_turn {
         return final_text_response();
     }
-    if dynamic {
+    if mode == ToolMode::Code {
+        return match local_call {
+            0 => router_call_response(),
+            1 => route_resolve_response(),
+            2 => weather_code_call_response(),
+            _ => final_text_response(),
+        };
+    }
+    if mode.uses_router() {
         return match local_call {
             0 => router_call_response(),
             1 => route_resolve_response(),
@@ -222,7 +251,8 @@ pub fn chat_options_for_multiturn(cfg: &BenchConfig) -> ChatOptions {
 
 /// Run a multi-turn conversation against wiremock; history is fed forward each turn.
 pub async fn run_multiturn_wiremock(cfg: &BenchConfig) -> Result<MultiTurnMetrics, ChatError> {
-    let dynamic = cfg.tool_mode == ToolMode::Dynamic;
+    let mode = cfg.tool_mode;
+    let uses_router = mode.uses_router();
     let server = MockServer::start().await;
     let turn_state = Arc::new(TurnScriptState {
         calls_in_session: AtomicU32::new(0),
@@ -245,7 +275,7 @@ pub async fn run_multiturn_wiremock(cfg: &BenchConfig) -> Result<MultiTurnMetric
             let local = turn_state2.calls_in_session.fetch_add(1, Ordering::SeqCst);
             let turn = turn_state2.turn_index.load(Ordering::SeqCst) as usize;
             let tool_turn = TOOL_TURN_INDICES.contains(&turn);
-            let body = scripted_turn_response(local, dynamic, tool_turn);
+            let body = scripted_turn_response(local, mode, tool_turn);
             ResponseTemplate::new(200).set_body_json(body)
         })
         .mount(&server)
@@ -261,7 +291,7 @@ pub async fn run_multiturn_wiremock(cfg: &BenchConfig) -> Result<MultiTurnMetric
     opts.base_url = server.uri();
     opts.api_key = secrecy::SecretString::from("sk-test".to_string());
     opts.model = "mock".into();
-    if dynamic {
+    if uses_router {
         opts.tool_route_model = Some("mock".into());
     }
 
