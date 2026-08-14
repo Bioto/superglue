@@ -621,10 +621,10 @@ impl Client {
         .map_err(|e: ClientBuildError| Error::from_reason(e.to_string()))?;
 
         let mut options = bootstrap.options;
-        options.tool_mode = match tool_mode.as_deref() {
-            Some("dynamic") => superglue::tools::ToolMode::Dynamic,
-            _ => superglue::tools::ToolMode::Standard,
-        };
+        options.tool_mode = tool_mode
+            .as_deref()
+            .map(superglue::tools::ToolMode::parse)
+            .unwrap_or_default();
         options.tool_route_model = tool_route_model;
         options.condense_tool_messages = condense_tool_messages.unwrap_or(false);
         options.aaak_tool_condensing = aaak_tool_condensing.unwrap_or(false);

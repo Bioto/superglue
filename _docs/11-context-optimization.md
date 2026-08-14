@@ -9,6 +9,7 @@ For agents that register many tools or run multi-round tool loops, enable contex
 | Setting | Why |
 |---------|-----|
 | `tool_mode = Dynamic` | Sends only the router + static tools on early rounds; matched schemas afterward. Cuts prompt size and improves time-to-first-token when you have a large tool registry. |
+| `tool_mode = Code` | Same router as Dynamic, but the result is a JSON catalog of matched tools/args plus a single `code` tool. The model writes JavaScript that calls `tools.<name>(args)` so intermediate payloads never re-enter chat. |
 | `condense_tool_messages = true` | Replaces each assistant + N tool messages with one compact user summary after every tool batch. Shrinks history on later LLM rounds. |
 
 **Trade-off:** dynamic routing adds one small routing LLM call up front. Net win when tool count and conversation depth are large; skip for single-tool or one-shot workloads.
@@ -20,7 +21,8 @@ Pin always-needed tools with `static_tool = true` so they stay available in dyna
 | Feature | Option | What it does |
 |---------|--------|--------------|
 | **Dynamic tool routing** | `tool_mode = Dynamic` | Exposes router tool `request_tools` first; a fast model selects relevant tools; only matched schemas are sent on later rounds |
-| **Static tools** | `ToolSpec.static_tool = true` | Always included in dynamic mode (GlueLLM `@static_tool`) |
+| **Programmatic tool calling** | `tool_mode = Code` | `request_tools` returns matched name/description/parameter schemas; the model then calls `code` with JavaScript |
+| **Static tools** | `ToolSpec.static_tool = true` | Always included in dynamic and code modes (GlueLLM `@static_tool`) |
 | **Tool-round condensing** | `condense_tool_messages = true` | After each tool round, replaces assistant + N tool messages with one compact user summary |
 | **AAAK tool encoding** | `aaak_tool_condensing = true` | Uses deterministic `[AT]` blocks instead of plain `[Tool Results]` (requires condensing) |
 | **History compression** | `summarize_context.enabled = true` | LLM-compresses older messages when `messages.len() > threshold`, keeping the tail |
@@ -34,6 +36,37 @@ Pin always-needed tools with `static_tool = true` so they stay available in dyna
 5. On routing failure, all dynamic tools are included (never bricks the agent).
 
 Emit `ProcessEventKind::ToolRoute` with metadata `route_query` and `matched_tools` when a `StatusEmitter` is attached.
+
+## Code mode (programmatic tool calling)
+
+`tool_mode = Code` combines dynamic routing with a single execution tool:
+
+1. First LLM round sees `request_tools` plus any `static_tool` tools (same as Dynamic).
+2. When the model calls `request_tools`, superglue routes as usual, then **returns the matched catalog as the tool result** (name, description, JSON Schema args) instead of injecting those tools into `tools[]`.
+3. Later rounds see only `code` plus static tools. The model writes JavaScript:
+
+```javascript
+const w = tools.get_weather({ city: "Paris" });
+return { temp: w.temp };
+```
+
+`tools.call("get_weather", { city: "Paris" })` is also accepted. Nested calls go through the real `ToolRegistry` (hooks, approvals, and policies still run). `code` and `request_tools` cannot be invoked from the script. Default limits: 30s timeout, 32 nested calls.
+
+Use Code mode when the win is **reducing intermediate tool output in context**. Keep Dynamic when the model should call matched tools directly.
+
+```rust
+.tool_mode(ToolMode::Code)
+```
+
+```python
+tool_mode="code"
+```
+
+```javascript
+toolMode: "code"
+```
+
+Rust: `cargo run --example 35_code_tool_mode`. Tests: `tools::code` unit tests and `code_mode_returns_catalog_then_runs_javascript`.
 
 ## Configuration reference
 

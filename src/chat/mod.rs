@@ -45,8 +45,9 @@ use crate::openai::{
 };
 use crate::proto;
 use crate::tools::{
-    ActiveToolSet, DEFAULT_TOOL_ROUTE_MODEL, OnToolError, ToolInvokeError, ToolMode, ToolRegistry,
-    ToolRetryPolicy, is_router_call, router_query_from_calls,
+    ActiveToolSet, CODE_TOOL_NAME, CodeLimits, DEFAULT_TOOL_ROUTE_MODEL, OnToolError,
+    ToolInvokeError, ToolMode, ToolRegistry, ToolRetryPolicy, execute_code, is_router_call,
+    router_call_id_from_calls, router_query_from_calls, source_from_arguments,
 };
 
 /// Callback for a compact context block appended after a condensed tool round.
@@ -452,10 +453,7 @@ impl From<proto::ChatOptions> for ChatOptions {
 }
 
 fn parse_tool_mode(s: Option<&str>) -> ToolMode {
-    match s {
-        Some("dynamic") => ToolMode::Dynamic,
-        _ => ToolMode::Standard,
-    }
+    s.map(ToolMode::parse).unwrap_or_default()
 }
 
 /// Outcome of a completed turn (assistant returned text or empty after tool loop).
@@ -979,6 +977,7 @@ pub(crate) async fn dispatch_one(
     emit_start: bool,
     tool_result_max_chars: usize,
     loop_guard: Option<&SharedToolLoopGuard>,
+    code_allowlist: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 ) -> Result<ChatMessage, ChatError> {
     let tool_name = tc.function.name.clone();
     if emit_start && let Some(emitter) = status_emitter {
@@ -1048,6 +1047,20 @@ pub(crate) async fn dispatch_one(
                 }
             }
         };
+        if tc.function.name == CODE_TOOL_NAME {
+            let Some(allowlist) = code_allowlist.as_deref() else {
+                return Ok(serde_json::to_string(&json!({
+                    "ok": false,
+                    "error": "code is only available after request_tools in tool_mode=code"
+                }))?);
+            };
+            let source = source_from_arguments(&args).map_err(ChatError::Tool)?;
+            let value = execute_code(&source, allowlist, registry, CodeLimits::default())
+                .await
+                .map_err(ChatError::Tool)?;
+            return Ok(serde_json::to_string(&value)?);
+        }
+
         let (tool, policy) = registry
             .resolve_invocation(&tc.function.name)
             .await
@@ -1444,14 +1457,21 @@ pub async fn complete_with_tools(
                     &request_id,
                 )
                 .await;
+                let catalog = (active_set.mode() == ToolMode::Code)
+                    .then(|| active_set.route_catalog(&matched));
+                let router_call_id = router_call_id_from_calls(&normalized.tool_calls);
                 active_set.apply_route(matched);
-                let matched_names: Vec<String> = active_set
-                    .specs_for_llm()
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter(|s| !s.static_tool && s.name != crate::tools::ROUTER_TOOL_NAME)
-                    .map(|s| s.name.clone())
-                    .collect();
+                let matched_names: Vec<String> = if active_set.mode() == ToolMode::Code {
+                    active_set.code_allowlist().into_iter().collect()
+                } else {
+                    active_set
+                        .specs_for_llm()
+                        .unwrap_or(&[])
+                        .iter()
+                        .filter(|s| !s.static_tool && s.name != crate::tools::ROUTER_TOOL_NAME)
+                        .map(|s| s.name.clone())
+                        .collect()
+                };
                 emit_safe(options.status_emitter.as_ref(), {
                     let mut ev =
                         ProcessEvent::new(ProcessEventKind::ToolRoute, &request_id, route_model);
@@ -1462,6 +1482,20 @@ pub async fn complete_with_tools(
                     ev
                 })
                 .await;
+                if let Some(catalog) = catalog {
+                    messages.push(msg.clone());
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(MessageContent::Text(
+                            serde_json::to_string(&catalog).unwrap_or_else(|_| "{}".into()),
+                        )),
+                        tool_calls: None,
+                        tool_call_id: router_call_id,
+                        name: Some(crate::tools::ROUTER_TOOL_NAME.to_string()),
+                        refusal: None,
+                        provider_blocks: None,
+                    });
+                }
                 continue;
             }
 
@@ -1473,6 +1507,8 @@ pub async fn complete_with_tools(
                 request_id = %request_id,
                 "tool_calls_batch"
             );
+            let code_allowlist = (active_set.mode() == ToolMode::Code && active_set.routed)
+                .then(|| std::sync::Arc::new(active_set.code_allowlist()));
             let results = futures_util::future::join_all(function_tcs.iter().map(|tc| {
                 dispatch_one(
                     tc,
@@ -1485,6 +1521,7 @@ pub async fn complete_with_tools(
                     true,
                     options.tool_result_max_chars,
                     Some(&loop_guard),
+                    code_allowlist.clone(),
                 )
             }))
             .await;
@@ -1999,6 +2036,7 @@ fn push_early_stream_tool<'a>(
     model: &'a str,
     tool_result_max_chars: usize,
     loop_guard: &'a SharedToolLoopGuard,
+    code_allowlist: Option<std::sync::Arc<std::collections::HashSet<String>>>,
 ) {
     if dispatched_ids.contains_key(&tc.id) {
         return;
@@ -2018,6 +2056,7 @@ fn push_early_stream_tool<'a>(
             true,
             tool_result_max_chars,
             Some(&loop_guard),
+            code_allowlist,
         )
         .await?;
         Ok((tool_id, msg))
@@ -2113,6 +2152,7 @@ where
 
     let all_specs = registry.list_specs().await;
     let mut active_set = ActiveToolSet::new(all_specs, options.tool_mode);
+    let mut stream_code_allowlist: Option<std::sync::Arc<std::collections::HashSet<String>>> = None;
     let route_model = options
         .tool_route_model
         .as_deref()
@@ -2334,6 +2374,7 @@ where
                                     &options.model,
                                     options.tool_result_max_chars,
                                     &loop_guard,
+                                    stream_code_allowlist.clone(),
                                 );
                             }
                         }
@@ -2356,6 +2397,7 @@ where
                     &options.model,
                     options.tool_result_max_chars,
                     &loop_guard,
+                    stream_code_allowlist.clone(),
                 );
             }
             while let Some(result) = in_flight.next().await {
@@ -2478,14 +2520,24 @@ where
                     &request_id,
                 )
                 .await;
+                let catalog = (active_set.mode() == ToolMode::Code)
+                    .then(|| active_set.route_catalog(&matched));
+                let router_call_id = router_call_id_from_calls(&round.tool_calls);
                 active_set.apply_route(matched);
-                let matched_names: Vec<String> = active_set
-                    .specs_for_llm()
-                    .unwrap_or(&[])
-                    .iter()
-                    .filter(|s| !s.static_tool && s.name != crate::tools::ROUTER_TOOL_NAME)
-                    .map(|s| s.name.clone())
-                    .collect();
+                if active_set.mode() == ToolMode::Code {
+                    stream_code_allowlist = Some(std::sync::Arc::new(active_set.code_allowlist()));
+                }
+                let matched_names: Vec<String> = if active_set.mode() == ToolMode::Code {
+                    active_set.code_allowlist().into_iter().collect()
+                } else {
+                    active_set
+                        .specs_for_llm()
+                        .unwrap_or(&[])
+                        .iter()
+                        .filter(|s| !s.static_tool && s.name != crate::tools::ROUTER_TOOL_NAME)
+                        .map(|s| s.name.clone())
+                        .collect()
+                };
                 emit_safe(options.status_emitter.as_ref(), {
                     let mut ev =
                         ProcessEvent::new(ProcessEventKind::ToolRoute, &request_id, route_model);
@@ -2496,6 +2548,20 @@ where
                     ev
                 })
                 .await;
+                if let Some(catalog) = catalog {
+                    messages.push(msg.clone());
+                    messages.push(ChatMessage {
+                        role: "tool".to_string(),
+                        content: Some(MessageContent::Text(
+                            serde_json::to_string(&catalog).unwrap_or_else(|_| "{}".into()),
+                        )),
+                        tool_calls: None,
+                        tool_call_id: router_call_id,
+                        name: Some(crate::tools::ROUTER_TOOL_NAME.to_string()),
+                        refusal: None,
+                        provider_blocks: None,
+                    });
+                }
                 continue;
             }
 
@@ -2560,6 +2626,7 @@ where
                         true,
                         options.tool_result_max_chars,
                         Some(&loop_guard),
+                        stream_code_allowlist.clone(),
                     )
                 }))
                 .await;

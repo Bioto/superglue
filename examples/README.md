@@ -52,6 +52,7 @@ Set `OPENAI_BASE_URL` for Ollama or other OpenAI-compatible hosts (`08_custom_ba
 | 32 | context optimization (GlueLLM) | `32_context_optimization` |
 | 33 | context optimization benchmark (wiremock) | `33_context_optimization_benchmark` |
 | 34 | context optimization benchmark (live API) | `34_context_optimization_live_benchmark` |
+| 35 | programmatic tool calling (`tool_mode=Code`) | `35_code_tool_mode` |
 | demo | quick demo | `demo` |
 
 Run with: `cargo run --example <name>` (no `.rs` suffix).

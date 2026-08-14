@@ -53,6 +53,7 @@
 - ✅ Cooperative cancellation (`CancellationToken`) in batch and chat loops.
 - ✅ Throttled downloads (`governor` bandwidth limiter with progress callback).
 - ✅ Context optimization (GlueLLM parity): dynamic tool routing, tool-round condensing, AAAK encoding, history compression — see [Context optimization](11-context-optimization.md).
+- ✅ Programmatic tool calling (`tool_mode = Code`): `request_tools` returns a catalog; the model writes JavaScript for a singular `code` tool.
 - 🔲 Migration guide from Python GlueLLM (partial: context optimization flags documented in [11-context-optimization.md](11-context-optimization.md)).
 
 ## Continuous cross-cutting work

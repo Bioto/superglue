@@ -12,7 +12,7 @@ use superglue::guardrails::GuardrailRegistry;
 use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
 use superglue::openai::ChatMessage;
-use superglue::tools::{ROUTER_TOOL_NAME, Tool, ToolMode, ToolRegistry, ToolSpec};
+use superglue::tools::{CODE_TOOL_NAME, ROUTER_TOOL_NAME, Tool, ToolMode, ToolRegistry, ToolSpec};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -134,6 +134,27 @@ fn weather_tool_call_response() -> serde_json::Value {
     })
 }
 
+fn code_tool_call_response() -> serde_json::Value {
+    json!({
+        "model": "mock",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_code",
+                    "type": "function",
+                    "function": {
+                        "name": CODE_TOOL_NAME,
+                        "arguments": "{\"source\":\"const w = tools.get_weather({city:\\\"Paris\\\"}); return {temp: w.temp};\"}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })
+}
+
 fn final_text_response() -> serde_json::Value {
     json!({
         "model": "mock",
@@ -217,7 +238,114 @@ async fn dynamic_routing_selects_tools_then_executes() {
 }
 
 #[tokio::test]
-async fn condense_tool_messages_collapses_tool_round() {
+async fn code_mode_returns_catalog_then_runs_javascript() {
+    let server = MockServer::start().await;
+    let n = Arc::new(AtomicU32::new(0));
+    let n2 = Arc::clone(&n);
+    let seen_tools = Arc::new(tokio::sync::Mutex::new(Vec::<Vec<String>>::new()));
+    let seen_tools2 = Arc::clone(&seen_tools);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |req: &wiremock::Request| {
+            if let Ok(body) = serde_json::from_slice::<serde_json::Value>(&req.body) {
+                let names = body
+                    .get("tools")
+                    .and_then(|t| t.as_array())
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .filter_map(|t| {
+                                t.pointer("/function/name")
+                                    .or_else(|| t.get("name"))
+                                    .and_then(|n| n.as_str())
+                                    .map(str::to_string)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if let Ok(mut guard) = seen_tools2.try_lock() {
+                    guard.push(names);
+                }
+            }
+            let i = n2.fetch_add(1, Ordering::SeqCst);
+            let body = match i {
+                0 => router_call_response(),
+                1 => route_resolve_response(),
+                2 => code_tool_call_response(),
+                _ => final_text_response(),
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        })
+        .mount(&server)
+        .await;
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    let reg = ToolRegistry::new();
+    reg.register(Arc::new(WeatherTool)).await.unwrap();
+    reg.register(Arc::new(CalcTool)).await.unwrap();
+    reg.register(Arc::new(PinnedTool)).await.unwrap();
+
+    let opts = ChatOptions {
+        base_url: server.uri(),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
+        model: "mock".into(),
+        max_tool_rounds: 8,
+        tool_mode: ToolMode::Code,
+        tool_route_model: Some("mock".into()),
+        ..Default::default()
+    };
+
+    let out = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        vec![ChatMessage::text("user", "What's the weather in Paris?")],
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.content.as_deref(), Some("It is 72F in Paris."));
+
+    let catalog = out
+        .messages
+        .iter()
+        .find(|m| m.role == "tool" && m.name.as_deref() == Some(ROUTER_TOOL_NAME));
+    let catalog_text = catalog
+        .and_then(|m| m.content.as_ref())
+        .and_then(|c| c.as_text())
+        .expect("request_tools catalog");
+    let catalog_json: serde_json::Value = serde_json::from_str(catalog_text).unwrap();
+    assert_eq!(catalog_json["tools"][0]["name"], "get_weather");
+    assert!(catalog_json["tools"][0]["parameters"].is_object());
+    assert_eq!(catalog_json["static_tools"][0]["name"], "get_time");
+
+    let code_result = out
+        .messages
+        .iter()
+        .find(|m| m.role == "tool" && m.name.as_deref() == Some(CODE_TOOL_NAME));
+    let code_text = code_result
+        .and_then(|m| m.content.as_ref())
+        .and_then(|c| c.as_text())
+        .expect("code result");
+    let code_json: serde_json::Value = serde_json::from_str(code_text).unwrap();
+    assert_eq!(code_json["ok"], true);
+    assert_eq!(code_json["result"]["temp"], 72);
+
+    let seen = seen_tools.lock().await;
+    let after_route = seen
+        .iter()
+        .find(|names| names.iter().any(|n| n == CODE_TOOL_NAME))
+        .expect("LLM request that exposed code");
+    assert!(after_route.iter().any(|n| n == CODE_TOOL_NAME));
+    assert!(after_route.iter().any(|n| n == "get_time"));
+    assert!(!after_route.iter().any(|n| n == "get_weather"));
+    assert!(!after_route.iter().any(|n| n == "calculate"));
+}
+
+#[tokio::test]
+async fn condense_tool_messages_keeps_unprofitable_round() {
     let server = MockServer::start().await;
     let n = Arc::new(AtomicU32::new(0));
     let n2 = Arc::clone(&n);
@@ -259,12 +387,14 @@ async fn condense_tool_messages_collapses_tool_round() {
     .await
     .unwrap();
 
+    // A one-call weather round is not cheaper after the [Tool Results] rewrite, so
+    // context_ops keeps the original assistant + tool messages.
     assert!(out.messages.iter().any(|m| {
-        m.role == "user"
+        m.role == "tool"
             && m.content
                 .as_ref()
                 .and_then(|c| c.as_text())
-                .is_some_and(|t| t.contains("[Tool Results]"))
+                .is_some_and(|t| t.contains("72"))
     }));
 }
 

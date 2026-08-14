@@ -332,7 +332,7 @@ class Client:
         api_keys: dict[str, str] | None = None,
         requests_per_second_for: dict[str, int] | None = None,
         max_upload_bytes: int | None = None,
-        tool_mode: str = "standard",
+        tool_mode: str = "standard",  # standard | dynamic | code
         tool_route_model: str | None = None,
         condense_tool_messages: bool = False,
         aaak_tool_condensing: bool = False,

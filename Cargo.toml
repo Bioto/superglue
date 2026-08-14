@@ -47,6 +47,7 @@ tonic-prost-build = "0.14"
 
 [dependencies]
 async-trait = "0.1"
+boa_engine = "0.21"
 prost = "0.14"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }

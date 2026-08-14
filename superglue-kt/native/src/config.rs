@@ -176,10 +176,7 @@ pub fn build_client_state(json: &str) -> Result<ClientState, String> {
     .map_err(|e| e.to_string())?;
 
     let mut options = bootstrap.options;
-    options.tool_mode = match c.tool_mode.as_str() {
-        "dynamic" => superglue::tools::ToolMode::Dynamic,
-        _ => superglue::tools::ToolMode::Standard,
-    };
+    options.tool_mode = superglue::tools::ToolMode::parse(&c.tool_mode);
     options.tool_route_model = c.tool_route_model.clone();
     options.condense_tool_messages = c.condense_tool_messages;
     options.aaak_tool_condensing = c.aaak_tool_condensing;

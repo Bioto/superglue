@@ -277,7 +277,7 @@ impl ClientBuilder {
         self
     }
 
-    /// Dynamic tool routing mode (`standard` or `dynamic`; GlueLLM parity).
+    /// Tool exposure mode (`standard`, `dynamic`, or `code`).
     pub fn tool_mode(mut self, mode: ToolMode) -> Self {
         self.tool_mode = mode;
         self

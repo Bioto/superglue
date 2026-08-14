@@ -812,6 +812,7 @@ async fn responses_tool_loop(
                     true,
                     options.tool_result_max_chars,
                     Some(&loop_guard),
+                    None,
                 )
             }))
             .await;
@@ -2074,6 +2075,7 @@ where
                     true,
                     options.tool_result_max_chars,
                     Some(&loop_guard),
+                    None,
                 )
             }))
             .await;
@@ -2529,7 +2531,11 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_events_stop_the_stream_reader() {
-        for event_type in ["response.completed", "response.incomplete", "response.failed"] {
+        for event_type in [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ] {
             let mut round_state = ResponsesStreamRound::default();
             apply_responses_stream_event(
                 &json!({ "type": event_type, "response": { "id": "resp_test" } }),

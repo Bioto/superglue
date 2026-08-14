@@ -822,10 +822,7 @@ impl PyClient {
         .map_err(|e: ClientBuildError| PyRuntimeError::new_err(e.to_string()))?;
 
         let mut options = bootstrap.options;
-        options.tool_mode = match tool_mode {
-            "dynamic" => superglue::tools::ToolMode::Dynamic,
-            _ => superglue::tools::ToolMode::Standard,
-        };
+        options.tool_mode = superglue::tools::ToolMode::parse(tool_mode);
         options.tool_route_model = tool_route_model;
         options.condense_tool_messages = condense_tool_messages;
         options.aaak_tool_condensing = aaak_tool_condensing;

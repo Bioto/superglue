@@ -32,10 +32,12 @@ impl BenchConfig {
         ) {
             (ToolMode::Standard, false, _) => ConfigKind::Standard,
             (ToolMode::Dynamic, false, _) => ConfigKind::Dynamic,
+            (ToolMode::Code, false, _) => ConfigKind::Dynamic,
             (ToolMode::Standard, true, false) => ConfigKind::CondensePlain,
             (ToolMode::Standard, true, true) => ConfigKind::CondenseAaak,
             (ToolMode::Dynamic, true, true) => ConfigKind::Combined,
             (ToolMode::Dynamic, true, false) => ConfigKind::Dynamic,
+            (ToolMode::Code, true, _) => ConfigKind::Dynamic,
         }
     }
 
@@ -45,6 +47,7 @@ impl BenchConfig {
         match self.tool_mode {
             ToolMode::Standard => 9,
             ToolMode::Dynamic => profile.expected_tools().len() + 1,
+            ToolMode::Code => 2,
         }
     }
 }
