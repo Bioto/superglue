@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
@@ -12,18 +12,22 @@ use boa_engine::{
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::cancel::CancellationToken;
+
 use super::error::ToolInvokeError;
 use super::registry::ToolRegistry;
 use super::router::{CODE_TOOL_NAME, ROUTER_TOOL_NAME};
 
 pub const DEFAULT_CODE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_MAX_NESTED_CALLS: u32 = 32;
+pub const DEFAULT_MAX_LOOP_ITERATIONS: u64 = 1_000_000;
 const MAX_SOURCE_CHARS: usize = 64_000;
 
 #[derive(Debug, Clone)]
 pub struct CodeLimits {
     pub timeout: Duration,
     pub max_nested_calls: u32,
+    pub max_loop_iterations: u64,
 }
 
 impl Default for CodeLimits {
@@ -31,6 +35,7 @@ impl Default for CodeLimits {
         Self {
             timeout: DEFAULT_CODE_TIMEOUT,
             max_nested_calls: DEFAULT_MAX_NESTED_CALLS,
+            max_loop_iterations: DEFAULT_MAX_LOOP_ITERATIONS,
         }
     }
 }
@@ -48,6 +53,17 @@ pub async fn execute_code(
     allowlist: &HashSet<String>,
     registry: &ToolRegistry,
     limits: CodeLimits,
+) -> Result<Value, ToolInvokeError> {
+    execute_code_with_cancel(source, allowlist, registry, limits, None).await
+}
+
+/// Run code while honoring an optional parent cancellation token.
+pub async fn execute_code_with_cancel(
+    source: &str,
+    allowlist: &HashSet<String>,
+    registry: &ToolRegistry,
+    limits: CodeLimits,
+    cancel: Option<&CancellationToken>,
 ) -> Result<Value, ToolInvokeError> {
     let trimmed = source.trim();
     if trimmed.is_empty() {
@@ -67,14 +83,30 @@ pub async fn execute_code(
     let (done_tx, done_rx) = oneshot::channel::<Result<Value, String>>();
     let source = trimmed.to_string();
     let max_calls = limits.max_nested_calls;
+    let max_loop_iterations = limits.max_loop_iterations;
+    let stop_worker = Arc::new(AtomicBool::new(false));
+    let stop_worker_for_thread = Arc::clone(&stop_worker);
 
     tokio::task::spawn_blocking(move || {
-        let result = run_js_blocking(&source, max_calls, req_tx);
+        let result = run_js_blocking(
+            &source,
+            max_calls,
+            max_loop_iterations,
+            req_tx,
+            stop_worker_for_thread,
+        );
         let _ = done_tx.send(result);
     });
 
     let timeout = tokio::time::sleep(limits.timeout);
     tokio::pin!(timeout);
+    let cancellation = async {
+        match cancel {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(cancellation);
     let mut done_rx = done_rx;
     let mut calls: Vec<Value> = Vec::new();
 
@@ -82,25 +114,47 @@ pub async fn execute_code(
         tokio::select! {
             biased;
             Some(req) = req_rx.recv() => {
-                if !tool_allowed(allowlist, &req.name) {
-                    let _ = req.reply.send(Err(format!(
+                let InvokeReq { name, args, reply } = req;
+                if stop_worker.load(Ordering::Acquire) {
+                    let _ = reply.send(Err("code execution cancelled".into()));
+                    continue;
+                }
+                if !tool_allowed(allowlist, &name) {
+                    let _ = reply.send(Err(format!(
                         "tool `{}` is not available to code",
-                        req.name
+                        name
                     )));
                     continue;
                 }
-                match registry.invoke(&req.name, req.args).await {
+                let result = tokio::select! {
+                    result = registry.invoke(&name, args) => result,
+                    () = &mut timeout => {
+                        stop_worker.store(true, Ordering::Release);
+                        return Err(ToolInvokeError::handler(
+                            "code execution timed out",
+                            Some("timeout".into()),
+                        ));
+                    }
+                    () = &mut cancellation => {
+                        stop_worker.store(true, Ordering::Release);
+                        return Err(ToolInvokeError::handler(
+                            "code execution cancelled",
+                            Some("cancelled".into()),
+                        ));
+                    }
+                };
+                match result {
                     Ok(value) => {
-                        calls.push(json!({"tool": req.name, "ok": true}));
-                        let _ = req.reply.send(Ok(value));
+                        calls.push(json!({"tool": name, "ok": true}));
+                        let _ = reply.send(Ok(value));
                     }
                     Err(err) => {
                         calls.push(json!({
-                            "tool": req.name,
+                            "tool": name,
                             "ok": false,
                             "error": err.to_string()
                         }));
-                        let _ = req.reply.send(Err(err.to_string()));
+                        let _ = reply.send(Err(err.to_string()));
                     }
                 }
             }
@@ -108,9 +162,17 @@ pub async fn execute_code(
                 return finish_code(result, calls);
             }
             () = &mut timeout => {
+                stop_worker.store(true, Ordering::Release);
                 return Err(ToolInvokeError::handler(
                     "code execution timed out",
                     Some("timeout".into()),
+                ));
+            }
+            () = &mut cancellation => {
+                stop_worker.store(true, Ordering::Release);
+                return Err(ToolInvokeError::handler(
+                    "code execution cancelled",
+                    Some("cancelled".into()),
                 ));
             }
         }
@@ -149,19 +211,32 @@ fn finish_code(
 fn run_js_blocking(
     source: &str,
     max_calls: u32,
+    max_loop_iterations: u64,
     req_tx: mpsc::UnboundedSender<InvokeReq>,
+    stop_worker: Arc<AtomicBool>,
 ) -> Result<Value, String> {
     let mut context = Context::default();
+    context
+        .runtime_limits_mut()
+        .set_loop_iteration_limit(max_loop_iterations);
     let call_count = Arc::new(AtomicU32::new(0));
     let req_tx = Arc::new(req_tx);
     let call_count_host = Arc::clone(&call_count);
     let req_tx_host = Arc::clone(&req_tx);
+    let stop_worker_host = Arc::clone(&stop_worker);
 
     // Safety: the closure only holds `Arc`s (no JS values). It does not outlive
     // this `Context`.
     let invoke = unsafe {
         NativeFunction::from_closure(move |_this, args, context| -> JsResult<JsValue> {
-            invoke_from_js(args, context, &req_tx_host, &call_count_host, max_calls)
+            invoke_from_js(
+                args,
+                context,
+                &req_tx_host,
+                &call_count_host,
+                max_calls,
+                &stop_worker_host,
+            )
         })
     };
     context
@@ -194,7 +269,13 @@ fn invoke_from_js(
     req_tx: &mpsc::UnboundedSender<InvokeReq>,
     call_count: &AtomicU32,
     max_calls: u32,
+    stop_worker: &AtomicBool,
 ) -> JsResult<JsValue> {
+    if stop_worker.load(Ordering::Acquire) {
+        return Err(JsNativeError::error()
+            .with_message("code execution cancelled")
+            .into());
+    }
     let name = args
         .first()
         .cloned()
@@ -226,12 +307,25 @@ fn invoke_from_js(
             reply: reply_tx,
         })
         .map_err(|_| JsNativeError::error().with_message("code runtime closed"))?;
-    match reply_rx.recv() {
-        Ok(Ok(value)) => json_to_js(&value, context),
-        Ok(Err(message)) => Err(JsNativeError::error().with_message(message).into()),
-        Err(_) => Err(JsNativeError::error()
-            .with_message("tool invoke cancelled")
-            .into()),
+    loop {
+        match reply_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(Ok(value)) => return json_to_js(&value, context),
+            Ok(Err(message)) => {
+                return Err(JsNativeError::error().with_message(message).into());
+            }
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                if stop_worker.load(Ordering::Acquire) {
+                    return Err(JsNativeError::error()
+                        .with_message("code execution cancelled")
+                        .into());
+                }
+            }
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(JsNativeError::error()
+                    .with_message("tool invoke cancelled")
+                    .into());
+            }
+        }
     }
 }
 
@@ -366,5 +460,49 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn tight_loop_returns_without_pinning_worker() {
+        let registry = ToolRegistry::new();
+        let limits = CodeLimits {
+            timeout: Duration::from_millis(10),
+            max_loop_iterations: 1_000_000,
+            ..CodeLimits::default()
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            execute_code("while (true) {}", &allow(&[]), &registry, limits),
+        )
+        .await
+        .expect("tight loop should return promptly");
+
+        match result {
+            Ok(value) => {
+                assert_eq!(value["ok"], false);
+                assert!(value["error"].as_str().unwrap().contains("loop"));
+            }
+            Err(err) => assert!(err.to_string().contains("timed out")),
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_execution_stops_before_running_code() {
+        let registry = ToolRegistry::new();
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let err = execute_code_with_cancel(
+            "while (true) {}",
+            &allow(&[]),
+            &registry,
+            CodeLimits::default(),
+            Some(&token),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("cancelled"));
     }
 }

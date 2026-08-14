@@ -83,8 +83,12 @@ async fn run_live_config(
     let label = format!("{}_{}", profile.name(), cfg.label);
     let emitter = Arc::new(StatusEmitter::new());
     let token_collector = Arc::new(CumulativeTokenCollector::new());
+    let tool_call_collector = Arc::new(bench_metrics::ToolCallCollector::new());
     emitter
         .subscribe(Arc::clone(&token_collector) as Arc<dyn StatusSubscriber>)
+        .await;
+    emitter
+        .subscribe(Arc::clone(&tool_call_collector) as Arc<dyn StatusSubscriber>)
         .await;
 
     let client = match superglue::Client::builder()
@@ -142,7 +146,7 @@ async fn run_live_config(
             let history_bytes = serde_json::to_string(&outcome.messages)
                 .map(|s| s.len())
                 .unwrap_or(0);
-            let tool_calls = bench_metrics::count_tool_calls(&outcome.messages);
+            let tool_calls = tool_call_collector.count();
             let completed =
                 bench_metrics::completed_expected(&outcome.messages, profile.expected_tools());
             let cum_total = token_collector.total();

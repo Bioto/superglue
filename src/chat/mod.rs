@@ -23,7 +23,7 @@ use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::pin::Pin;
 use thiserror::Error;
 use tokio::time::{Duration, sleep};
@@ -46,7 +46,7 @@ use crate::openai::{
 use crate::proto;
 use crate::tools::{
     ActiveToolSet, CODE_TOOL_NAME, CodeLimits, DEFAULT_TOOL_ROUTE_MODEL, OnToolError,
-    ToolInvokeError, ToolMode, ToolRegistry, ToolRetryPolicy, execute_code, is_router_call,
+    ToolInvokeError, ToolMode, ToolRegistry, ToolRetryPolicy, is_router_call,
     router_call_id_from_calls, router_query_from_calls, source_from_arguments,
 };
 
@@ -957,28 +957,48 @@ pub(crate) fn truncate_tool_result(content: String, max_chars: usize) -> String 
     format!("{}…\n[truncated]", truncate_bytes(&content, max_chars))
 }
 
+/// Shared environment for [`dispatch_one`] and early-stream tool dispatch.
+#[derive(Clone)]
+pub(crate) struct DispatchCtx<'a> {
+    pub hooks: &'a HookRegistry,
+    pub registry: &'a ToolRegistry,
+    pub status_emitter: Option<&'a Arc<StatusEmitter>>,
+    pub request_id: &'a str,
+    pub round: u32,
+    pub model: &'a str,
+    pub emit_start: bool,
+    pub tool_result_max_chars: usize,
+    pub loop_guard: Option<&'a SharedToolLoopGuard>,
+    pub cancel: Option<&'a CancellationToken>,
+    pub code_allowlist: Option<Arc<HashSet<String>>>,
+}
+
 /// Dispatch a single `"function"` tool call through the full pre/post hook pipeline.
 ///
 /// Returns the [`ChatMessage`] with `role="tool"` that should be appended to the
 /// conversation history. Called concurrently for all tool calls in a single round
 /// via [`futures_util::future::join_all`].
 #[instrument(
-    skip(tc, hooks, registry, status_emitter),
+    skip(tc, ctx),
     fields(tool.name = %tc.function.name, tool.id = %tc.id)
 )]
 pub(crate) async fn dispatch_one(
     tc: &ToolCall,
-    hooks: &HookRegistry,
-    registry: &ToolRegistry,
-    status_emitter: Option<&Arc<StatusEmitter>>,
-    request_id: &str,
-    round: u32,
-    model: &str,
-    emit_start: bool,
-    tool_result_max_chars: usize,
-    loop_guard: Option<&SharedToolLoopGuard>,
-    code_allowlist: Option<std::sync::Arc<std::collections::HashSet<String>>>,
+    ctx: DispatchCtx<'_>,
 ) -> Result<ChatMessage, ChatError> {
+    let DispatchCtx {
+        hooks,
+        registry,
+        status_emitter,
+        request_id,
+        round,
+        model,
+        emit_start,
+        tool_result_max_chars,
+        loop_guard,
+        cancel,
+        code_allowlist,
+    } = ctx;
     let tool_name = tc.function.name.clone();
     if emit_start && let Some(emitter) = status_emitter {
         let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
@@ -1054,10 +1074,38 @@ pub(crate) async fn dispatch_one(
                     "error": "code is only available after request_tools in tool_mode=code"
                 }))?);
             };
-            let source = source_from_arguments(&args).map_err(ChatError::Tool)?;
-            let value = execute_code(&source, allowlist, registry, CodeLimits::default())
-                .await
-                .map_err(ChatError::Tool)?;
+            let source = match source_from_arguments(&args) {
+                Ok(source) => source,
+                Err(err) => {
+                    if cancel.is_some_and(|token| token.is_cancelled()) {
+                        return Err(ChatError::Cancelled);
+                    }
+                    return Ok(serde_json::to_string(&json!({
+                        "ok": false,
+                        "error": err.to_string(),
+                    }))?);
+                }
+            };
+            let value = match crate::tools::execute_code_with_cancel(
+                &source,
+                allowlist,
+                registry,
+                CodeLimits::default(),
+                cancel,
+            )
+            .await
+            {
+                Ok(value) => value,
+                Err(err) => {
+                    if cancel.is_some_and(|token| token.is_cancelled()) {
+                        return Err(ChatError::Cancelled);
+                    }
+                    return Ok(serde_json::to_string(&json!({
+                        "ok": false,
+                        "error": err.to_string(),
+                    }))?);
+                }
+            };
             return Ok(serde_json::to_string(&value)?);
         }
 
@@ -1508,22 +1556,23 @@ pub async fn complete_with_tools(
                 "tool_calls_batch"
             );
             let code_allowlist = (active_set.mode() == ToolMode::Code && active_set.routed)
-                .then(|| std::sync::Arc::new(active_set.code_allowlist()));
-            let results = futures_util::future::join_all(function_tcs.iter().map(|tc| {
-                dispatch_one(
-                    tc,
-                    hooks,
-                    registry,
-                    options.status_emitter.as_ref(),
-                    &request_id,
-                    api_calls,
-                    &options.model,
-                    true,
-                    options.tool_result_max_chars,
-                    Some(&loop_guard),
-                    code_allowlist.clone(),
-                )
-            }))
+                .then(|| Arc::new(active_set.code_allowlist()));
+            let ctx = DispatchCtx {
+                hooks,
+                registry,
+                status_emitter: options.status_emitter.as_ref(),
+                request_id: &request_id,
+                round: api_calls,
+                model: &options.model,
+                emit_start: true,
+                tool_result_max_chars: options.tool_result_max_chars,
+                loop_guard: Some(&loop_guard),
+                cancel: options.cancel.as_ref(),
+                code_allowlist,
+            };
+            let results = futures_util::future::join_all(
+                function_tcs.iter().map(|tc| dispatch_one(tc, ctx.clone())),
+            )
             .await;
             for r in results {
                 messages.push(r.map_err(|e| fail_partial(e, &messages, had_system_prompt))?);
@@ -2028,37 +2077,15 @@ fn push_early_stream_tool<'a>(
         >,
     >,
     dispatched_ids: &mut BTreeMap<String, ()>,
-    hooks: &'a HookRegistry,
-    registry: &'a ToolRegistry,
-    status_emitter: Option<&'a Arc<StatusEmitter>>,
-    request_id: &'a str,
-    round: u32,
-    model: &'a str,
-    tool_result_max_chars: usize,
-    loop_guard: &'a SharedToolLoopGuard,
-    code_allowlist: Option<std::sync::Arc<std::collections::HashSet<String>>>,
+    ctx: DispatchCtx<'a>,
 ) {
     if dispatched_ids.contains_key(&tc.id) {
         return;
     }
     dispatched_ids.insert(tc.id.clone(), ());
     let tool_id = tc.id.clone();
-    let loop_guard = Arc::clone(loop_guard);
     in_flight.push(Box::pin(async move {
-        let msg = dispatch_one(
-            &tc,
-            hooks,
-            registry,
-            status_emitter,
-            request_id,
-            round,
-            model,
-            true,
-            tool_result_max_chars,
-            Some(&loop_guard),
-            code_allowlist,
-        )
-        .await?;
+        let msg = dispatch_one(&tc, ctx).await?;
         Ok((tool_id, msg))
     }));
 }
@@ -2152,7 +2179,7 @@ where
 
     let all_specs = registry.list_specs().await;
     let mut active_set = ActiveToolSet::new(all_specs, options.tool_mode);
-    let mut stream_code_allowlist: Option<std::sync::Arc<std::collections::HashSet<String>>> = None;
+    let mut stream_code_allowlist: Option<Arc<HashSet<String>>> = None;
     let route_model = options
         .tool_route_model
         .as_deref()
@@ -2244,6 +2271,19 @@ where
                 >,
             >,
         > = FuturesUnordered::new();
+        let mut dispatch_ctx = DispatchCtx {
+            hooks,
+            registry,
+            status_emitter: options.status_emitter.as_ref(),
+            request_id: &request_id,
+            round: api_calls,
+            model: &options.model,
+            emit_start: true,
+            tool_result_max_chars: options.tool_result_max_chars,
+            loop_guard: Some(&loop_guard),
+            cancel: options.cancel.as_ref(),
+            code_allowlist: stream_code_allowlist.clone(),
+        };
         let mut anthropic_acc =
             crate::providers::anthropic_stream::AnthropicStreamAccumulator::new();
         let mut round_finish: Option<String> = None;
@@ -2366,15 +2406,7 @@ where
                                     tc,
                                     &mut in_flight,
                                     &mut dispatched_tool_ids,
-                                    hooks,
-                                    registry,
-                                    options.status_emitter.as_ref(),
-                                    &request_id,
-                                    api_calls,
-                                    &options.model,
-                                    options.tool_result_max_chars,
-                                    &loop_guard,
-                                    stream_code_allowlist.clone(),
+                                    dispatch_ctx.clone(),
                                 );
                             }
                         }
@@ -2389,15 +2421,7 @@ where
                     tc,
                     &mut in_flight,
                     &mut dispatched_tool_ids,
-                    hooks,
-                    registry,
-                    options.status_emitter.as_ref(),
-                    &request_id,
-                    api_calls,
-                    &options.model,
-                    options.tool_result_max_chars,
-                    &loop_guard,
-                    stream_code_allowlist.clone(),
+                    dispatch_ctx.clone(),
                 );
             }
             while let Some(result) = in_flight.next().await {
@@ -2525,7 +2549,8 @@ where
                 let router_call_id = router_call_id_from_calls(&round.tool_calls);
                 active_set.apply_route(matched);
                 if active_set.mode() == ToolMode::Code {
-                    stream_code_allowlist = Some(std::sync::Arc::new(active_set.code_allowlist()));
+                    stream_code_allowlist = Some(Arc::new(active_set.code_allowlist()));
+                    dispatch_ctx.code_allowlist = stream_code_allowlist.clone();
                 }
                 let matched_names: Vec<String> = if active_set.mode() == ToolMode::Code {
                     active_set.code_allowlist().into_iter().collect()
@@ -2614,21 +2639,11 @@ where
                     }
                 }
             } else {
-                let results = futures_util::future::join_all(function_tcs.iter().map(|tc| {
-                    dispatch_one(
-                        tc,
-                        hooks,
-                        registry,
-                        options.status_emitter.as_ref(),
-                        &request_id,
-                        api_calls,
-                        &options.model,
-                        true,
-                        options.tool_result_max_chars,
-                        Some(&loop_guard),
-                        stream_code_allowlist.clone(),
-                    )
-                }))
+                let results = futures_util::future::join_all(
+                    function_tcs
+                        .iter()
+                        .map(|tc| dispatch_one(tc, dispatch_ctx.clone())),
+                )
                 .await;
                 for r in results {
                     messages.push(r.map_err(|e| fail_partial(e, &messages, had_system_prompt))?);
@@ -2702,7 +2717,7 @@ where
 #[cfg(test)]
 mod truncate_tests {
     use super::truncate_tool_result;
-    use crate::openai::{ChatMessage, MessageContent};
+    use crate::openai::ChatMessage;
 
     #[test]
     fn truncate_tool_result_appends_marker() {

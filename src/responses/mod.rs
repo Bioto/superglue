@@ -10,7 +10,7 @@ use thiserror::Error;
 use tracing::instrument;
 
 use crate::chat::{
-    ChatError, ChatOptions, StreamToolOutcome, condense_tool_round,
+    ChatError, ChatOptions, DispatchCtx, StreamToolOutcome, condense_tool_round,
     conversation_messages_for_client, credentials_for, dispatch_one, effective_system_prompt,
     estimate_context_chars, fail_partial, has_system_prompt, maybe_summarize_messages,
     new_tool_loop_guard, notify_llm_payload, observation_hook_ctx, prepend_system_messages,
@@ -800,21 +800,22 @@ async fn responses_tool_loop(
                     },
                 })
                 .collect();
-            let results = futures_util::future::join_all(tool_calls.iter().map(|tc| {
-                dispatch_one(
-                    tc,
-                    hooks,
-                    registry,
-                    options.status_emitter.as_ref(),
-                    &request_id,
-                    api_calls,
-                    &model_used,
-                    true,
-                    options.tool_result_max_chars,
-                    Some(&loop_guard),
-                    None,
-                )
-            }))
+            let ctx = DispatchCtx {
+                hooks,
+                registry,
+                status_emitter: options.status_emitter.as_ref(),
+                request_id: &request_id,
+                round: api_calls,
+                model: &model_used,
+                emit_start: true,
+                tool_result_max_chars: options.tool_result_max_chars,
+                loop_guard: Some(&loop_guard),
+                cancel: options.cancel.as_ref(),
+                code_allowlist: None,
+            };
+            let results = futures_util::future::join_all(
+                tool_calls.iter().map(|tc| dispatch_one(tc, ctx.clone())),
+            )
             .await;
 
             let mut outputs = Vec::new();
@@ -2063,21 +2064,22 @@ where
                 provider_blocks: round_state.provider_blocks.clone(),
             });
 
-            let results = futures_util::future::join_all(tool_calls.iter().map(|tc| {
-                dispatch_one(
-                    tc,
-                    hooks,
-                    registry,
-                    options.status_emitter.as_ref(),
-                    &request_id,
-                    api_calls,
-                    &model_used,
-                    true,
-                    options.tool_result_max_chars,
-                    Some(&loop_guard),
-                    None,
-                )
-            }))
+            let ctx = DispatchCtx {
+                hooks,
+                registry,
+                status_emitter: options.status_emitter.as_ref(),
+                request_id: &request_id,
+                round: api_calls,
+                model: &model_used,
+                emit_start: true,
+                tool_result_max_chars: options.tool_result_max_chars,
+                loop_guard: Some(&loop_guard),
+                cancel: options.cancel.as_ref(),
+                code_allowlist: None,
+            };
+            let results = futures_util::future::join_all(
+                tool_calls.iter().map(|tc| dispatch_one(tc, ctx.clone())),
+            )
             .await;
 
             let mut outputs = Vec::new();

@@ -53,6 +53,7 @@ fn multi_tool_round_messages() -> Vec<ChatMessage> {
             tool_call_id: Some("c1".into()),
             name: Some("fetch_metrics".into()),
             refusal: None,
+            provider_blocks: None,
         },
         ChatMessage {
             role: "tool".into(),
@@ -63,6 +64,7 @@ fn multi_tool_round_messages() -> Vec<ChatMessage> {
             tool_call_id: Some("c2".into()),
             name: Some("fetch_metrics".into()),
             refusal: None,
+            provider_blocks: None,
         },
         ChatMessage {
             role: "tool".into(),
@@ -73,6 +75,7 @@ fn multi_tool_round_messages() -> Vec<ChatMessage> {
             tool_call_id: Some("c3".into()),
             name: Some("get_config".into()),
             refusal: None,
+            provider_blocks: None,
         },
     ]
 }

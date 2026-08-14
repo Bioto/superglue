@@ -146,11 +146,7 @@ pub fn normalize_reasoning_effort_str(model: &str, effort: &str) -> Option<Strin
 }
 
 pub fn clamp_reasoning_effort(effort: ReasoningEffort, max: ReasoningEffort) -> ReasoningEffort {
-    if effort <= max {
-        effort
-    } else {
-        max
-    }
+    if effort <= max { effort } else { max }
 }
 
 /// Clamp a string effort to a maximum allowed level.

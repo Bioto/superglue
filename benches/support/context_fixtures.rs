@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 use superglue::chat::{ChatError, ChatOptions, CompletionOutcome, complete_with_tools};
+use superglue::events::StatusEmitter;
 use superglue::guardrails::GuardrailRegistry;
 use superglue::hooks::HookRegistry;
 use superglue::http::{ClientConfig, HttpClient};
@@ -376,6 +377,12 @@ pub async fn run_scenario_with_raw(
     opts.api_key = secrecy::SecretString::from("sk-test".to_string());
     opts.model = "mock".into();
     opts.max_tool_rounds = 12;
+    let tool_call_collector = Arc::new(bench_metrics::ToolCallCollector::new());
+    let status_emitter = StatusEmitter::new();
+    status_emitter
+        .subscribe(Arc::clone(&tool_call_collector) as Arc<dyn superglue::events::StatusSubscriber>)
+        .await;
+    opts.status_emitter = Some(Arc::new(status_emitter));
     if uses_router {
         opts.tool_route_model = Some("mock".into());
     }
@@ -394,7 +401,7 @@ pub async fn run_scenario_with_raw(
         .map(|s| s.len())
         .unwrap_or(0);
     let collected = collector.lock().unwrap();
-    let tool_calls = bench_metrics::count_tool_calls(&outcome.messages);
+    let tool_calls = tool_call_collector.count();
     let completed = bench_metrics::completed_expected(&outcome.messages, profile.expected_tools());
 
     Ok((

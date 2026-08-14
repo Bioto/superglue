@@ -9,7 +9,7 @@ mod registry;
 pub mod router;
 pub mod types;
 
-pub use code::{CodeLimits, execute_code, source_from_arguments};
+pub use code::{CodeLimits, execute_code, execute_code_with_cancel, source_from_arguments};
 pub use error::ToolInvokeError;
 pub use harness::{PlanStep, RunEvent, run_plan};
 pub use registry::{Tool, ToolRegistry};

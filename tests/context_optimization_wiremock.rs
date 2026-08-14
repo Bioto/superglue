@@ -155,6 +155,27 @@ fn code_tool_call_response() -> serde_json::Value {
     })
 }
 
+fn code_missing_source_response() -> serde_json::Value {
+    json!({
+        "model": "mock",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_code_missing_source",
+                    "type": "function",
+                    "function": {
+                        "name": CODE_TOOL_NAME,
+                        "arguments": "{}"
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }]
+    })
+}
+
 fn final_text_response() -> serde_json::Value {
     json!({
         "model": "mock",
@@ -345,6 +366,68 @@ async fn code_mode_returns_catalog_then_runs_javascript() {
 }
 
 #[tokio::test]
+async fn code_mode_missing_source_returns_soft_tool_error() {
+    let server = MockServer::start().await;
+    let n = Arc::new(AtomicU32::new(0));
+    let n2 = Arc::clone(&n);
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(move |_req: &wiremock::Request| {
+            let body = match n2.fetch_add(1, Ordering::SeqCst) {
+                0 => router_call_response(),
+                1 => route_resolve_response(),
+                2 => code_missing_source_response(),
+                _ => final_text_response(),
+            };
+            ResponseTemplate::new(200).set_body_json(body)
+        })
+        .mount(&server)
+        .await;
+
+    let http = HttpClient::new(ClientConfig::default()).unwrap();
+    let reg = ToolRegistry::new();
+    reg.register(Arc::new(WeatherTool)).await.unwrap();
+    reg.register(Arc::new(PinnedTool)).await.unwrap();
+    let opts = ChatOptions {
+        base_url: server.uri(),
+        api_key: secrecy::SecretString::from("sk-test".to_string()),
+        model: "mock".into(),
+        max_tool_rounds: 4,
+        tool_mode: ToolMode::Code,
+        tool_route_model: Some("mock".into()),
+        ..Default::default()
+    };
+
+    let out = complete_with_tools(
+        &http,
+        &reg,
+        &HookRegistry::new(),
+        &GuardrailRegistry::new(),
+        vec![ChatMessage::text("user", "Use code mode.")],
+        &opts,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(out.content.as_deref(), Some("It is 72F in Paris."));
+    let code_result = out
+        .messages
+        .iter()
+        .find(|m| m.role == "tool" && m.name.as_deref() == Some(CODE_TOOL_NAME))
+        .and_then(|m| m.content.as_ref())
+        .and_then(|content| content.as_text())
+        .expect("soft code error result");
+    let code_json: serde_json::Value = serde_json::from_str(code_result).unwrap();
+    assert_eq!(code_json["ok"], false);
+    assert!(
+        code_json["error"]
+            .as_str()
+            .unwrap()
+            .contains("non-empty `source`")
+    );
+}
+
+#[tokio::test]
 async fn condense_tool_messages_keeps_unprofitable_round() {
     let server = MockServer::start().await;
     let n = Arc::new(AtomicU32::new(0));
@@ -366,6 +449,13 @@ async fn condense_tool_messages_keeps_unprofitable_round() {
     let http = HttpClient::new(ClientConfig::default()).unwrap();
     let reg = ToolRegistry::new();
     reg.register(Arc::new(WeatherTool)).await.unwrap();
+    let events = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let emitter = StatusEmitter::new();
+    emitter
+        .subscribe(Arc::new(EventCollector {
+            events: Arc::clone(&events),
+        }))
+        .await;
 
     let opts = ChatOptions {
         base_url: server.uri(),
@@ -373,6 +463,7 @@ async fn condense_tool_messages_keeps_unprofitable_round() {
         model: "mock".into(),
         max_tool_rounds: 4,
         condense_tool_messages: true,
+        status_emitter: Some(Arc::new(emitter)),
         ..Default::default()
     };
 
@@ -396,6 +487,13 @@ async fn condense_tool_messages_keeps_unprofitable_round() {
                 .and_then(|c| c.as_text())
                 .is_some_and(|t| t.contains("72"))
     }));
+    let tool_starts = events
+        .lock()
+        .await
+        .iter()
+        .filter(|event| event.kind == ProcessEventKind::ToolCallStart)
+        .count();
+    assert_eq!(tool_starts, 1);
 }
 
 #[test]

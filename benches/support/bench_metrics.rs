@@ -1,18 +1,51 @@
 //! Outcome metrics shared by wiremock and live benchmarks.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU32, Ordering};
 
+use async_trait::async_trait;
+use superglue::events::{ProcessEvent, ProcessEventKind, StatusSubscriber};
 use superglue::openai::ChatMessage;
 use superglue::tools::ROUTER_TOOL_NAME;
 
-/// Count non-router tool calls in caller-visible messages.
-#[must_use]
-pub fn count_tool_calls(messages: &[ChatMessage]) -> u32 {
-    messages
-        .iter()
-        .flat_map(|m| m.tool_calls.iter().flatten())
-        .filter(|tc| tc.function.name != ROUTER_TOOL_NAME)
-        .count() as u32
+/// Counts caller-visible tool calls from lifecycle events, including calls
+/// whose assistant messages are removed by tool-result condensing.
+pub struct ToolCallCollector {
+    count: AtomicU32,
+}
+
+impl ToolCallCollector {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            count: AtomicU32::new(0),
+        }
+    }
+
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        self.count.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for ToolCallCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl StatusSubscriber for ToolCallCollector {
+    async fn on_event(&self, event: ProcessEvent) {
+        if event.kind == ProcessEventKind::ToolCallStart
+            && event
+                .metadata
+                .get("tool_name")
+                .is_none_or(|name| name != ROUTER_TOOL_NAME)
+        {
+            self.count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Whether every expected tool name appears in tool calls or condensed message text.
@@ -59,27 +92,25 @@ fn message_text(msg: &ChatMessage) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use superglue::openai::{FunctionCall, ToolCall};
+    use super::{
+        ProcessEvent, ProcessEventKind, ROUTER_TOOL_NAME, StatusSubscriber, ToolCallCollector,
+    };
 
-    #[test]
-    fn counts_non_router_tool_calls() {
-        let messages = vec![ChatMessage {
-            role: "assistant".into(),
-            content: None,
-            tool_calls: Some(vec![ToolCall {
-                id: "1".into(),
-                kind: "function".into(),
-                function: FunctionCall {
-                    name: "get_weather".into(),
-                    arguments: "{}".into(),
-                },
-            }]),
-            tool_call_id: None,
-            name: None,
-            refusal: None,
-            provider_blocks: None,
-        }];
-        assert_eq!(count_tool_calls(&messages), 1);
+    #[tokio::test]
+    async fn event_collector_counts_condensed_tool_calls() {
+        let collector = ToolCallCollector::new();
+        let mut weather = ProcessEvent::new(ProcessEventKind::ToolCallStart, "req", "mock");
+        weather
+            .metadata
+            .insert("tool_name".into(), "get_weather".into());
+        collector.on_event(weather).await;
+
+        let mut router = ProcessEvent::new(ProcessEventKind::ToolCallStart, "req", "mock");
+        router
+            .metadata
+            .insert("tool_name".into(), ROUTER_TOOL_NAME.into());
+        collector.on_event(router).await;
+
+        assert_eq!(collector.count(), 1);
     }
 }
