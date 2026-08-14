@@ -9,7 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use flate2::read::GzDecoder;
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -19,12 +19,7 @@ use superglue::gateway::{router, test_state_with_openai, test_state_with_openai_
 
 const MASTER_KEY: &str = "test-master-key-12345";
 
-fn auth_request(
-    method: &str,
-    uri: &str,
-    key: &str,
-    body: Option<Value>,
-) -> Request<Body> {
+fn auth_request(method: &str, uri: &str, key: &str, body: Option<Value>) -> Request<Body> {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -213,7 +208,10 @@ async fn capture_records_non_streaming_chat_completion() {
     assert_eq!(records[0]["api"], "chat_completions");
     assert_eq!(records[0]["stream"], false);
     assert_eq!(records[0]["user_id"], "user-1");
-    assert_eq!(records[0]["request"]["messages"][0]["content"], "hello capture");
+    assert_eq!(
+        records[0]["request"]["messages"][0]["content"],
+        "hello capture"
+    );
     assert!(records[0]["response"].is_object());
 }
 
@@ -270,7 +268,11 @@ async fn capture_records_streaming_responses_with_raw_sse() {
     assert_eq!(records[0]["request"]["input"], "stream me");
     let sse_events = records[0]["sse"].as_array().expect("sse array");
     assert!(!sse_events.is_empty());
-    assert!(sse_events.iter().any(|v| v.as_str().unwrap().contains("output_text.delta")));
+    assert!(
+        sse_events
+            .iter()
+            .any(|v| v.as_str().unwrap().contains("output_text.delta"))
+    );
 }
 
 #[tokio::test]
@@ -396,10 +398,9 @@ async fn capture_admin_list_and_detail_from_spool() {
         .await
         .unwrap();
     assert_eq!(status_resp.status(), StatusCode::OK);
-    let status: Value = serde_json::from_slice(
-        &status_resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let status: Value =
+        serde_json::from_slice(&status_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
     assert_eq!(status["enabled"], true);
     assert!(status["stats"]["pending_spool_files"].as_u64().unwrap() >= 1);
 
@@ -414,10 +415,8 @@ async fn capture_admin_list_and_detail_from_spool() {
         .await
         .unwrap();
     assert_eq!(list_resp.status(), StatusCode::OK);
-    let list: Value = serde_json::from_slice(
-        &list_resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let list: Value =
+        serde_json::from_slice(&list_resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(list["records"].as_array().unwrap().len(), 1);
     assert_eq!(list["records"][0]["request_id"], "req-admin-1");
 
@@ -432,10 +431,9 @@ async fn capture_admin_list_and_detail_from_spool() {
         .await
         .unwrap();
     assert_eq!(detail_resp.status(), StatusCode::OK);
-    let detail: Value = serde_json::from_slice(
-        &detail_resp.into_body().collect().await.unwrap().to_bytes(),
-    )
-    .unwrap();
+    let detail: Value =
+        serde_json::from_slice(&detail_resp.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
     assert_eq!(detail["record"]["request_id"], "req-admin-1");
     assert_eq!(detail["record"]["request"]["messages"][0]["content"], "hi");
 }

@@ -254,7 +254,11 @@ impl Visit for ScrubJsonVisitor<'_> {
         let name = field.name();
         self.values.insert(
             name.to_string(),
-            scrub_json_value(name, serde_json::Value::String(value.to_string()), self.mode),
+            scrub_json_value(
+                name,
+                serde_json::Value::String(value.to_string()),
+                self.mode,
+            ),
         );
     }
 

@@ -444,7 +444,11 @@ mod tests {
         let Some(MessageContent::Parts(parts)) = &messages[2].content else {
             panic!("expected multipart vision message");
         };
-        assert!(parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. })));
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. }))
+        );
     }
 
     #[test]

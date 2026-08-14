@@ -91,10 +91,7 @@ pub trait LlmProvider: Send + Sync {
 
     /// Whether `previous_response_id` chaining is supported on the Responses path.
     fn supports_previous_response_id(&self) -> bool {
-        matches!(
-            self.provider_id(),
-            ProviderId::OpenAi | ProviderId::Xai
-        )
+        matches!(self.provider_id(), ProviderId::OpenAi | ProviderId::Xai)
     }
 
     /// Whether `prompt_cache_key` is supported on the Responses path.

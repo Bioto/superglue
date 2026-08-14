@@ -295,7 +295,9 @@ impl Database {
                 params![v, budget_id],
             )?;
             if n == 0 {
-                return Err(GatewayError::not_found(format!("budget {budget_id} not found")));
+                return Err(GatewayError::not_found(format!(
+                    "budget {budget_id} not found"
+                )));
             }
         }
         if let Some(v) = duration_sec {
@@ -304,7 +306,9 @@ impl Database {
                 params![v, budget_id],
             )?;
             if n == 0 {
-                return Err(GatewayError::not_found(format!("budget {budget_id} not found")));
+                return Err(GatewayError::not_found(format!(
+                    "budget {budget_id} not found"
+                )));
             }
         }
         if let Some(v) = enforce {
@@ -313,7 +317,9 @@ impl Database {
                 params![i32::from(v), budget_id],
             )?;
             if n == 0 {
-                return Err(GatewayError::not_found(format!("budget {budget_id} not found")));
+                return Err(GatewayError::not_found(format!(
+                    "budget {budget_id} not found"
+                )));
             }
         }
         conn.query_row(
@@ -335,7 +341,9 @@ impl Database {
         )? as u32;
         let deleted = tx.execute("DELETE FROM budgets WHERE id = ?1", params![budget_id])?;
         if deleted == 0 {
-            return Err(GatewayError::not_found(format!("budget {budget_id} not found")));
+            return Err(GatewayError::not_found(format!(
+                "budget {budget_id} not found"
+            )));
         }
         tx.commit()?;
         Ok(users_cleared)
@@ -801,8 +809,8 @@ impl Database {
         );
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(|p| p.as_ref()).collect();
-        let (requests, prompt_tokens, completion_tokens, cost_usd): (i64, i64, i64, f64) =
-            conn.query_row(&totals_sql, params_ref.as_slice(), |row| {
+        let (requests, prompt_tokens, completion_tokens, cost_usd): (i64, i64, i64, f64) = conn
+            .query_row(&totals_sql, params_ref.as_slice(), |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?;
 

@@ -870,10 +870,7 @@ async fn run_budget_remote(db_args: &DbArgs, command: BudgetCommand) -> GatewayR
         BudgetCommand::Delete { id } => {
             let result = client.delete_budget(&id).await?;
             print_value(&result, OutputFormat::Pretty, |r| {
-                let users_cleared = r
-                    .get("users_cleared")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let users_cleared = r.get("users_cleared").and_then(|v| v.as_u64()).unwrap_or(0);
                 println!("Deleted budget {id} (cleared {users_cleared} user assignment(s))");
             });
         }

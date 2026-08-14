@@ -11,13 +11,13 @@ use chrono::{DateTime, Duration, Timelike, Utc};
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 
+use crate::gateway::GatewayState;
 use crate::gateway::auth::Auth;
 use crate::gateway::error::{GatewayError, GatewayResult};
 use crate::gateway::routes::json_ok;
-use crate::gateway::GatewayState;
 
-use super::record::{CaptureApi, CaptureRecord, CaptureUsage};
 use super::CaptureRuntime;
+use super::record::{CaptureApi, CaptureRecord, CaptureUsage};
 
 const DEFAULT_LIST_LIMIT: u32 = 50;
 const MAX_LIST_LIMIT: u32 = 200;
@@ -124,14 +124,8 @@ pub struct CaptureRecordDetailQuery {
 
 #[derive(Debug, Clone)]
 enum CaptureFile {
-    Spool {
-        path: PathBuf,
-        modified: SystemTime,
-    },
-    S3 {
-        key: String,
-        modified: SystemTime,
-    },
+    Spool { path: PathBuf, modified: SystemTime },
+    S3 { key: String, modified: SystemTime },
 }
 
 impl CaptureFile {
@@ -190,12 +184,7 @@ impl CaptureRuntime {
                 rotate_bytes: self.config.rotate_bytes,
                 rotate_secs: self.config.rotate_secs,
                 max_response_bytes: self.config.max_response_bytes,
-                exclude_users: self
-                    .config
-                    .exclude_users
-                    .iter()
-                    .cloned()
-                    .collect(),
+                exclude_users: self.config.exclude_users.iter().cloned().collect(),
                 aws_region: self.config.aws_region.clone(),
                 s3_endpoint: self.config.s3_endpoint.clone(),
             }),
@@ -223,16 +212,9 @@ impl CaptureRuntime {
         };
         let files = collect_capture_files(&self.s3, &self.config, from, to).await;
         let start = parse_cursor(query.cursor.as_deref(), &files)?;
-        scan_records(
-            &self.s3,
-            &self.config,
-            &files,
-            start,
-            &filters,
-            limit,
-        )
-        .await
-        .map_err(GatewayError::Internal)
+        scan_records(&self.s3, &self.config, &files, start, &filters, limit)
+            .await
+            .map_err(GatewayError::Internal)
     }
 }
 
@@ -296,8 +278,8 @@ async fn find_record_detail(
             Err(_) => continue,
         };
         for line in lines {
-            let record: CaptureRecord = serde_json::from_str(&line)
-                .map_err(|e| format!("parse capture record: {e}"))?;
+            let record: CaptureRecord =
+                serde_json::from_str(&line).map_err(|e| format!("parse capture record: {e}"))?;
             if record.request_id != request_id {
                 continue;
             }
@@ -617,7 +599,10 @@ fn record_matches(record: &CaptureRecord, filters: &RecordFilters<'_>) -> bool {
             record.model_requested,
             record.model_resolved.as_deref().unwrap_or("")
         );
-        if !haystack.to_ascii_lowercase().contains(&model.to_ascii_lowercase()) {
+        if !haystack
+            .to_ascii_lowercase()
+            .contains(&model.to_ascii_lowercase())
+        {
             return false;
         }
     }
@@ -637,11 +622,9 @@ async fn read_capture_file_lines(
     file: &CaptureFile,
 ) -> Result<Vec<String>, String> {
     let bytes = match file {
-        CaptureFile::Spool { path, .. } => {
-            tokio::fs::read(path)
-                .await
-                .map_err(|e| format!("read spool file {}: {e}", path.display()))?
-        }
+        CaptureFile::Spool { path, .. } => tokio::fs::read(path)
+            .await
+            .map_err(|e| format!("read spool file {}: {e}", path.display()))?,
         CaptureFile::S3 { key, .. } => {
             let resp = s3
                 .get_object()

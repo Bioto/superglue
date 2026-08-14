@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
+use aws_sdk_s3::primitives::ByteStream;
 use aws_smithy_async::rt::sleep::TokioSleep;
 use chrono::{DateTime, Utc};
 use tracing::{info, warn};
@@ -14,8 +14,8 @@ use super::CaptureConfig;
 const MAX_UPLOAD_ATTEMPTS: u32 = 5;
 
 pub async fn build_s3_client(config: &CaptureConfig) -> Result<S3Client, String> {
-    let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .sleep_impl(TokioSleep::new());
+    let mut loader =
+        aws_config::defaults(aws_config::BehaviorVersion::latest()).sleep_impl(TokioSleep::new());
     if let Some(region) = &config.aws_region {
         loader = loader.region(aws_config::Region::new(region.clone()));
     }
@@ -89,11 +89,7 @@ pub async fn upload_spool_file(
     Err("upload retries exhausted".into())
 }
 
-pub async fn upload_spool_file_background(
-    client: S3Client,
-    config: CaptureConfig,
-    path: PathBuf,
-) {
+pub async fn upload_spool_file_background(client: S3Client, config: CaptureConfig, path: PathBuf) {
     if let Err(err) = upload_spool_file(&client, &config, &path).await {
         warn!(%err, path = %path.display(), "capture spool upload failed; leaving file on disk");
     }

@@ -2,9 +2,9 @@
 
 mod auth;
 mod budget;
-pub mod cli;
 #[cfg(feature = "capture")]
 pub mod capture;
+pub mod cli;
 mod config;
 mod db;
 mod error;
@@ -31,7 +31,7 @@ use crate::http::{ClientConfig, HttpClient};
 use crate::providers::ProviderCredentials;
 
 #[cfg(feature = "capture")]
-use crate::gateway::capture::{spawn_capture_pipeline, CaptureRuntime};
+use crate::gateway::capture::{CaptureRuntime, spawn_capture_pipeline};
 
 /// Shared state for all gateway HTTP handlers.
 pub struct GatewayState {

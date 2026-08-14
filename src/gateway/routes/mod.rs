@@ -59,7 +59,10 @@ pub fn router(state: Arc<GatewayState>) -> Router {
         .route("/v1/providers", get(admin::list_providers));
     #[cfg(feature = "capture")]
     let admin = admin
-        .route("/v1/capture/status", get(crate::gateway::capture::capture_status))
+        .route(
+            "/v1/capture/status",
+            get(crate::gateway::capture::capture_status),
+        )
         .route(
             "/v1/capture/records",
             get(crate::gateway::capture::list_capture_records),

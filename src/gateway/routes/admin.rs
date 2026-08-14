@@ -273,7 +273,10 @@ pub async fn delete_budget(
     Path(id): Path<String>,
 ) -> GatewayResult<impl axum::response::IntoResponse> {
     let deleted_id = id.clone();
-    let users_cleared = state.db.run_blocking(move |db| db.delete_budget(&id)).await?;
+    let users_cleared = state
+        .db
+        .run_blocking(move |db| db.delete_budget(&id))
+        .await?;
     Ok(json_ok(serde_json::json!({
         "deleted": deleted_id,
         "users_cleared": users_cleared,
@@ -379,17 +382,14 @@ pub async fn list_providers(
     for provider in ProviderId::ALL {
         let configured = credentials.has_key(provider);
         let base_url = credentials.base_url_for(provider);
-        let key_suffix = credentials
-            .key_for(provider)
-            .ok()
-            .map(|k| {
-                let secret = k.expose_secret();
-                if secret.len() <= 4 {
-                    secret.to_string()
-                } else {
-                    format!("...{}", &secret[secret.len() - 4..])
-                }
-            });
+        let key_suffix = credentials.key_for(provider).ok().map(|k| {
+            let secret = k.expose_secret();
+            if secret.len() <= 4 {
+                secret.to_string()
+            } else {
+                format!("...{}", &secret[secret.len() - 4..])
+            }
+        });
         let (catalog_ok, model_count, error) = if configured {
             match crate::gateway::model_catalog::fetch_provider_models_for_status(
                 &http,

@@ -6,16 +6,14 @@ mod spool;
 mod tap;
 mod uploader;
 
-pub use admin::{
-    capture_status, get_capture_record, list_capture_records, CaptureStatusResponse,
-};
+pub use admin::{CaptureStatusResponse, capture_status, get_capture_record, list_capture_records};
 pub use record::{CaptureApi, CaptureRecord};
 pub use tap::{CaptureTap, CaptureTapContext};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use aws_sdk_s3::Client as S3Client;
 use tokio::sync::mpsc;
@@ -24,7 +22,7 @@ use uuid::Uuid;
 
 use crate::gateway::error::GatewayError;
 
-use self::spool::{recover_orphan_spool_files, SpoolWriter};
+use self::spool::{SpoolWriter, recover_orphan_spool_files};
 use self::uploader::{build_s3_client, upload_spool_file_background};
 
 pub(crate) const DEFAULT_CHANNEL_CAPACITY: usize = 256;
@@ -79,7 +77,9 @@ impl CaptureConfig {
                 DEFAULT_MAX_RESPONSE_BYTES,
             ),
             exclude_users: parse_exclude_users(
-                std::env::var("SUPERGLUE_CAPTURE_EXCLUDE_USERS").ok().as_deref(),
+                std::env::var("SUPERGLUE_CAPTURE_EXCLUDE_USERS")
+                    .ok()
+                    .as_deref(),
             ),
             aws_region: std::env::var("AWS_REGION")
                 .ok()
@@ -97,13 +97,11 @@ impl CaptureConfig {
         s3_bucket: Option<String>,
         s3_prefix: Option<String>,
     ) -> Option<Self> {
-        let bucket = s3_bucket
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| {
-                std::env::var("SUPERGLUE_CAPTURE_S3_BUCKET")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            })?;
+        let bucket = s3_bucket.filter(|s| !s.trim().is_empty()).or_else(|| {
+            std::env::var("SUPERGLUE_CAPTURE_S3_BUCKET")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })?;
         let mut config = Self::from_env(db_path).unwrap_or_else(|| {
             let spool_dir = db_path
                 .parent()
@@ -234,12 +232,7 @@ pub async fn spawn_capture_pipeline(
         "gateway LLM capture enabled"
     );
 
-    tokio::spawn(capture_writer_loop(
-        rx,
-        config,
-        writer_id,
-        s3_client,
-    ));
+    tokio::spawn(capture_writer_loop(rx, config, writer_id, s3_client));
 
     Ok(runtime)
 }
@@ -299,7 +292,7 @@ async fn capture_writer_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::capture::record::{CaptureApi, CaptureRecord, CAPTURE_SCHEMA};
+    use crate::gateway::capture::record::{CAPTURE_SCHEMA, CaptureApi, CaptureRecord};
 
     #[test]
     fn exclude_users_parsed() {

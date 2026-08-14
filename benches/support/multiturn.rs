@@ -243,7 +243,10 @@ pub fn chat_options_for_multiturn(cfg: &BenchConfig) -> ChatOptions {
         aaak_tool_condensing: cfg.aaak_tool_condensing,
         summarize_context,
         aaak_compression_enabled: aaak_compression_enabled_multiturn(cfg.aaak_tool_condensing),
-        system_prompt: Some(multiturn_system_prompt(cfg.aaak_tool_condensing)),
+        system_prompt: Some(multiturn_system_prompt(
+            cfg.aaak_tool_condensing,
+            cfg.tool_mode,
+        )),
         max_tool_rounds: MULTITURN_MAX_TOOL_ROUNDS,
         ..Default::default()
     }

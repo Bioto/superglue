@@ -19,7 +19,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .base_url(support::base_url())
         .system_prompt(
             "You are a helpful assistant. Call request_tools first, then use the code \
-             tool to invoke matched tools from JavaScript (tools.<name>(args)).",
+             tool to invoke matched tools from JavaScript. Use tools.<name>(args) \
+             synchronously — do not use await, async, or Promise. Example: \
+             const w = tools.get_weather({city:\"Paris\"}); return {temp: w.temp};",
         )
         .tool_mode(ToolMode::Code)
         .build()?;

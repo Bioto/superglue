@@ -14,6 +14,7 @@ pub mod conversation_profiles;
 pub mod multiturn;
 
 pub use bench_configs::{BENCH_CONFIGS, BenchConfig};
+pub use benchmark_tools::FAT_RAW_CHARS;
 pub use conversation_profiles::ConversationProfile;
 pub use multiturn::{MultiTurnMetrics, run_multiturn_wiremock};
 
@@ -344,7 +345,11 @@ pub async fn run_scenario_with_raw(
 ) -> Result<(CompletionOutcome, ScenarioMetrics), ChatError> {
     let mode = opts.tool_mode;
     let uses_router = mode.uses_router();
-    let initial_messages = profile.initial_messages();
+    let initial_messages = if raw_chars > 0 {
+        profile.fat_initial_messages()
+    } else {
+        profile.initial_messages()
+    };
     let server = MockServer::start().await;
     let call_idx = Arc::new(AtomicU32::new(0));
     let call_idx2 = Arc::clone(&call_idx);
@@ -377,6 +382,9 @@ pub async fn run_scenario_with_raw(
     opts.api_key = secrecy::SecretString::from("sk-test".to_string());
     opts.model = "mock".into();
     opts.max_tool_rounds = 12;
+    if raw_chars > 0 {
+        opts.tool_result_max_chars = raw_chars.saturating_add(4_096);
+    }
     let tool_call_collector = Arc::new(bench_metrics::ToolCallCollector::new());
     let status_emitter = StatusEmitter::new();
     status_emitter
@@ -432,6 +440,20 @@ pub fn chat_options_for_run(cfg: &BenchConfig, profile: ConversationProfile) -> 
     let mut opts = chat_options_from_bench(cfg);
     opts.summarize_context = profile.summarize_config();
     opts.aaak_compression_enabled = profile.aaak_compression_enabled(cfg.aaak_tool_condensing);
+    opts.system_prompt = Some(conversation_profiles::benchmark_system_prompt(
+        cfg.aaak_tool_condensing,
+        cfg.tool_mode,
+    ));
+    opts
+}
+
+pub fn chat_options_for_fat_run(cfg: &BenchConfig, profile: ConversationProfile) -> ChatOptions {
+    let mut opts = chat_options_for_run(cfg, profile);
+    opts.system_prompt = Some(conversation_profiles::fat_benchmark_system_prompt(
+        cfg.aaak_tool_condensing,
+        cfg.tool_mode,
+    ));
+    opts.tool_result_max_chars = FAT_RAW_CHARS.saturating_add(4_096);
     opts
 }
 

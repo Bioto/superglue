@@ -42,11 +42,12 @@ fn profile_for_label(row_label: &str) -> Option<ConversationProfile> {
 }
 
 /// Printed once at the start of live benchmarks.
-pub const LIVE_BENCHMARK_NOTE: &str = "Note: Two benchmark sections — (1) single-turn tool chains: headline \
-metric is cumulative total tokens across all LLM rounds (GlueLLM parity); (2) multi-turn conversation: \
-headline metric is final context size after 12 turns with history fed forward. Condense configs enable \
-summarize_context; standard/dynamic do not. Use example 33 (wiremock) for deterministic comparisons. \
-Results vary by model.";
+pub const LIVE_BENCHMARK_NOTE: &str = "Note: Three benchmark sections — (1) single-turn tool chains: headline \
+metric is cumulative total tokens across all LLM rounds (GlueLLM parity); (2) fat payloads: same chains with \
+a bulky `raw` dump per tool (API/file-sized), where code mode should win by returning reduced JSON; \
+(3) multi-turn conversation: headline metric is final context size after 12 turns with history fed forward. \
+Condense configs enable summarize_context; standard/dynamic do not. Use example 33 (wiremock) for \
+deterministic comparisons. Results vary by model.";
 
 const EXCESS_WORK_FOOTNOTE: &str =
     "* excess tool calls vs expected chain; token comparison not like-for-like";

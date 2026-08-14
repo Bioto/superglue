@@ -6,8 +6,8 @@ use std::time::Instant;
 use chrono::Utc;
 use serde_json::Value;
 
-use super::record::{CaptureApi, CaptureRecord, CaptureUsage, CAPTURE_SCHEMA};
 use super::CaptureSink;
+use super::record::{CAPTURE_SCHEMA, CaptureApi, CaptureRecord, CaptureUsage};
 use crate::proto;
 
 /// Inputs for starting a per-request capture tap.

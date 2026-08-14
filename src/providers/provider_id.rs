@@ -64,10 +64,7 @@ impl ProviderId {
     pub fn uses_openai_compat(self) -> bool {
         matches!(
             self,
-            ProviderId::OpenAi
-                | ProviderId::Xai
-                | ProviderId::Groq
-                | ProviderId::OpenRouter
+            ProviderId::OpenAi | ProviderId::Xai | ProviderId::Groq | ProviderId::OpenRouter
         )
     }
 

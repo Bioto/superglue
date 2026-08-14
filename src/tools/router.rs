@@ -202,9 +202,11 @@ pub fn build_code_tool_spec() -> ToolSpec {
         name: CODE_TOOL_NAME.to_string(),
         description: Some(
             "Run JavaScript that calls the routed tools. Use `tools.<name>(args)` \
-             synchronously (or `tools.call(name, args)`). Return the reduced JSON \
-             the user needs — do not dump raw tool payloads unless required. \
-             `code` and `request_tools` cannot be called from the script."
+             synchronously (or `tools.call(name, args)`). The call returns a JSON \
+             value immediately — do not use await, async, or Promise. Example: \
+             const w = tools.get_weather({city:\"Paris\"}); return {temp_f: w.temp_f}; \
+             Return the reduced JSON the user needs — do not dump raw tool payloads \
+             unless required. `code` and `request_tools` cannot be called from the script."
                 .into(),
         ),
         parameters_schema: json!({
@@ -212,7 +214,7 @@ pub fn build_code_tool_spec() -> ToolSpec {
             "properties": {
                 "source": {
                     "type": "string",
-                    "description": "JavaScript source. Call tools.<name>({...}) and `return` a JSON value."
+                    "description": "Synchronous JavaScript. Call tools.<name>({...}) and `return` a JSON value. No await/async/Promise."
                 }
             },
             "required": ["source"]
@@ -234,7 +236,7 @@ pub fn build_route_catalog(matched: &[ToolSpec], static_tools: &[ToolSpec]) -> s
     json!({
         "tools": matched.iter().map(spec_entry).collect::<Vec<_>>(),
         "static_tools": static_tools.iter().map(spec_entry).collect::<Vec<_>>(),
-        "invoke": "Call the `code` tool with JavaScript. Use tools.<name>(args) synchronously and return a JSON value. Do not call request_tools again."
+        "invoke": "Call the `code` tool next with JavaScript. Use tools.<name>(args) synchronously and return a JSON value. Do not use await, async, or Promise. Example: const w = tools.get_weather({city:\"Paris\"}); return {temp_f: w.temp_f}; Do not call request_tools again. Do not call static tools such as get_time unless the user asked for the time."
     })
 }
 
@@ -249,8 +251,9 @@ pub fn build_code_router_tool_spec(dynamic_tools: &[ToolSpec]) -> ToolSpec {
             "Call this first to discover which tools are needed for the user's request. \
              Available tools: {names_str}. Pass the user's query (or a short summary) as the 'query' argument. \
              You will receive each matched tool's name, description, and argument schema, \
-             plus a single `code` tool. Write JavaScript that calls tools.<name>(args) \
-             instead of invoking those tools directly."
+             plus a `code` tool (static tools may still be listed). Write JavaScript that \
+             calls tools.<name>(args) instead of invoking matched tools directly. After \
+             this catalog result, call `code` — do not stop with a plain-text reply."
         )),
         parameters_schema: json!({
             "type": "object",
@@ -471,5 +474,18 @@ mod tests {
         let catalog = set.route_catalog(&[specs[1].clone()]);
         assert_eq!(catalog["tools"][0]["name"], "get_weather");
         assert_eq!(catalog["static_tools"][0]["name"], "pinned");
+        let invoke = catalog["invoke"].as_str().unwrap();
+        assert!(invoke.contains("synchronously"));
+        assert!(invoke.contains("await"));
+        assert!(invoke.contains("Do not call request_tools again"));
+    }
+
+    #[test]
+    fn code_tool_spec_forbids_await() {
+        let spec = build_code_tool_spec();
+        let desc = spec.description.unwrap();
+        assert!(desc.contains("synchronously"));
+        assert!(desc.contains("await"));
+        assert!(desc.contains("temp_f"));
     }
 }

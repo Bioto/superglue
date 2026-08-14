@@ -145,7 +145,7 @@ pub fn recover_orphan_spool_files(spool_dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gateway::capture::record::{CaptureApi, CaptureRecord, CAPTURE_SCHEMA};
+    use crate::gateway::capture::record::{CAPTURE_SCHEMA, CaptureApi, CaptureRecord};
     use serde_json::json;
 
     fn sample_record(id: &str) -> CaptureRecord {

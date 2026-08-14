@@ -117,6 +117,7 @@ pub struct ClientBuilder {
     aaak_compression_enabled: bool,
     aaak_compression_model: Option<String>,
     audit_store: Option<Arc<RunStore>>,
+    tool_result_max_chars: Option<usize>,
 }
 
 impl Default for ClientBuilder {
@@ -151,6 +152,7 @@ impl Default for ClientBuilder {
             aaak_compression_enabled: false,
             aaak_compression_model: None,
             audit_store: None,
+            tool_result_max_chars: None,
         }
     }
 }
@@ -313,6 +315,11 @@ impl ClientBuilder {
         self
     }
 
+    pub fn tool_result_max_chars(mut self, max_chars: usize) -> Self {
+        self.tool_result_max_chars = Some(max_chars);
+        self
+    }
+
     /// Ordered model fallback chain (primary first). Applied after per-request HTTP retries.
     pub fn model_fallback_chain(
         mut self,
@@ -374,6 +381,9 @@ impl ClientBuilder {
         options.summarize_context = self.summarize_context;
         options.aaak_compression_enabled = self.aaak_compression_enabled;
         options.aaak_compression_model = self.aaak_compression_model;
+        if let Some(max_chars) = self.tool_result_max_chars {
+            options.tool_result_max_chars = max_chars;
+        }
 
         let audit = self.audit_store.map(|store| ClientAudit {
             recorder: Arc::new(RunRecorder::new(store)),

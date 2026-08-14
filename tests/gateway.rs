@@ -922,19 +922,13 @@ async fn usage_summary_returns_totals() {
         .await
         .unwrap();
 
-    state.db.run_blocking(|db| {
-        db.record_usage(
-            None,
-            "u-sum",
-            "openai:gpt-4o-mini",
-            10,
-            5,
-            0.01,
-            "req-1",
-        )
-    })
-    .await
-    .unwrap();
+    state
+        .db
+        .run_blocking(|db| {
+            db.record_usage(None, "u-sum", "openai:gpt-4o-mini", 10, 5, 0.01, "req-1")
+        })
+        .await
+        .unwrap();
 
     let resp = app
         .clone()

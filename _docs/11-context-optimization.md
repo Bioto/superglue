@@ -50,6 +50,8 @@ const w = tools.get_weather({ city: "Paris" });
 return { temp: w.temp };
 ```
 
+Do **not** use `await`, `async`, or `Promise` — `tools.<name>(args)` returns a value immediately. After the `request_tools` catalog, call `code` next; static tools such as `get_time` stay listed but matched tools must be invoked from the script.
+
 `tools.call("get_weather", { city: "Paris" })` is also accepted. Nested calls go through the real `ToolRegistry` (hooks, approvals, and policies still run). `code` and `request_tools` cannot be invoked from the script. Default limits: 30s timeout, 32 nested calls.
 
 Use Code mode when the win is **reducing intermediate tool output in context**. Keep Dynamic when the model should call matched tools directly.
