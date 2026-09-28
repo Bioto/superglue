@@ -1,0 +1,27 @@
+[package]
+name = "superglue_kt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+description = "Android JNI bindings for superglue (Kotlin)"
+publish = false
+
+[lib]
+name = "superglue_kt"
+crate-type = ["cdylib"]
+
+[dependencies]
+async-trait = "0.1"
+jni = "0.22"
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+superglue = { path = "../..", features = ["code", "mcp"] }
+thiserror = "2"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }

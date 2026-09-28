@@ -1,0 +1,39 @@
+---
+description: superglue Rust core — errors, cancellation, tool policies, fmt/clippy
+globs: "**/*.rs"
+alwaysApply: false
+---
+
+# superglue Rust conventions
+
+## Tool error policies
+
+Per-tool: `FailFast`, `Skip`, or `Retry` — respect caller configuration in harness and live loops.
+
+## Secrets and cancellation
+
+- API keys via `secrecy` — zeroize on drop.
+- Long work must honor `CancellationToken` (cooperative cancel).
+
+## Chat and tools
+
+- OpenAI-shaped types in `chat/`; tool loop in `complete_with_tools`.
+- Parallel tool dispatch within a round is intentional — preserve ordering guarantees documented in `_docs/`.
+
+## Errors
+
+- `thiserror` for typed errors at crate boundaries.
+- No ad-hoc `reqwest` call sites outside the client module for model APIs.
+
+## Before PR
+
+```bash
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+## Protobuf / gRPC
+
+- Schema: `proto/superglue.proto` — regenerate when changing RPC surface.
+- Feature `grpc` off by default in consumer builds unless needed.

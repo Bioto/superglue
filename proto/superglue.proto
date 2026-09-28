@@ -1,0 +1,257 @@
+syntax = "proto3";
+
+package superglue;
+
+// ---------------------------------------------------------------------------
+// Tool layer
+// ---------------------------------------------------------------------------
+
+/// A registered tool definition passed from bindings to the core.
+message ToolSpec {
+  string name = 1;
+  /// Opaque JSON Schema string (the core does not parse the schema itself).
+  string parameters_schema_json = 2;
+  /// Optional human-readable description shown to the model.
+  optional string description = 3;
+  /// Always available in dynamic tool mode (GlueLLM @static_tool parity).
+  bool static_tool = 4;
+}
+
+/// A tool call emitted by the model (function-call style).
+message FunctionCall {
+  string name = 1;
+  /// JSON object string (per tool-boundary contract).
+  string arguments = 2;
+}
+
+message ToolCall {
+  string id = 1;
+  /// Always "function" for the OpenAI-compatible subset.
+  string kind = 2;
+  FunctionCall function = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Chat messages
+// ---------------------------------------------------------------------------
+
+message ChatMessage {
+  string role = 1;
+  optional string content = 2;
+  repeated ToolCall tool_calls = 3;
+  optional string tool_call_id = 4;
+  optional string name = 5;
+  optional string refusal = 6;
+  /// JSON array of provider-native content blocks (e.g. Anthropic thinking/tool_use).
+  optional string provider_blocks_json = 7;
+}
+
+// ---------------------------------------------------------------------------
+// Request / options
+// ---------------------------------------------------------------------------
+
+/// Provider and run configuration supplied by callers (bindings or direct Rust).
+message ChatOptions {
+  // Connection
+  string base_url = 1;
+  string api_key = 2;
+  string model = 3;
+  uint32 max_tool_rounds = 4;
+  optional string system_prompt = 5;
+
+  // Sampling
+  optional float temperature = 6;
+  optional float top_p = 7;
+
+  // Token limits
+  optional uint32 max_completion_tokens = 8;
+
+  // Penalties
+  optional float presence_penalty = 9;
+  optional float frequency_penalty = 10;
+
+  // Stop sequence (single string; use extra_json for array form)
+  optional string stop = 11;
+
+  // Tool control
+  optional bool parallel_tool_calls = 12;
+
+  // Logprobs
+  optional bool logprobs = 13;
+  optional uint32 top_logprobs = 14;
+
+  // Determinism / storage
+  optional int64 seed = 15;
+  optional bool store = 16;
+
+  // Service
+  optional string service_tier = 17;
+
+  // Reasoning models: "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+  optional string reasoning_effort = 18;
+
+  /// Responses API reasoning summary verbosity: "detailed" | "auto" | "off"
+  optional string reasoning_summary = 29;
+
+  /// JSON-encoded overrides for any field not covered above (merged into the request body).
+  optional string extra_json = 19;
+
+  // --- Context optimization (GlueLLM parity) ---
+  /// "standard" | "dynamic"
+  optional string tool_mode = 20;
+  optional string tool_route_model = 21;
+  optional bool condense_tool_messages = 22;
+  optional bool aaak_tool_condensing = 23;
+  optional bool summarize_context_enabled = 24;
+  optional uint32 summarize_context_threshold = 25;
+  optional uint32 summarize_context_keep_recent = 26;
+  optional bool aaak_compression_enabled = 27;
+  optional string aaak_compression_model = 28;
+}
+
+message CompletionRequest {
+  repeated ChatMessage messages = 1;
+  ChatOptions options = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Outcome
+// ---------------------------------------------------------------------------
+
+message Usage {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 total_tokens = 3;
+  optional uint32 cached_tokens = 4;
+  optional uint32 reasoning_tokens = 5;
+  optional double cost_usd = 6;
+}
+
+message CompletionOutcome {
+  /// Final assistant text, if present.
+  optional string content = 1;
+  /// Number of HTTP completion calls performed.
+  uint32 rounds = 2;
+  optional Usage usage = 3;
+  /// finish_reason from the last choice ("stop" | "length" | "tool_calls" | ...).
+  optional string finish_reason = 4;
+}
+
+message ResponsesRequest {
+  repeated ChatMessage messages = 1;
+  ChatOptions options = 2;
+  optional string previous_response_id = 3;
+  optional string instructions = 4;
+  /// Raw Responses `input` JSON when callers need full item fidelity.
+  optional string input_json = 5;
+}
+
+message ResponsesOutcome {
+  string response_id = 1;
+  optional string content = 2;
+  uint32 rounds = 3;
+  optional Usage usage = 4;
+  string request_id = 5;
+  string model_used = 6;
+  string raw_output_json = 7;
+  /// Caller-visible transcript after this Responses turn (for audit/resume).
+  repeated ChatMessage messages = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Audit / run recording
+// ---------------------------------------------------------------------------
+
+/// A single hook lifecycle event captured during a run, for replay and audit.
+message HookEvent {
+  /// Stage name (e.g. "pre_completion", "post_tool").
+  string stage = 1;
+  /// Stage-specific content payload (potentially redacted in stored records).
+  string content = 2;
+  /// Stage-specific key-value metadata (e.g. tool_name for tool stages).
+  map<string, string> metadata = 3;
+  /// Correlation ID linking this event to its parent run.
+  string request_id = 4;
+  /// Unix millisecond timestamp when the event was recorded.
+  int64 timestamp_ms = 5;
+}
+
+/// Full record of a single complete_with_tools call, suitable for audit and replay.
+message RunRecord {
+  string request_id = 1;
+  /// All messages sent and received during the run (in order).
+  repeated ChatMessage messages = 2;
+  /// Hook events fired during the run (in order).
+  repeated HookEvent hook_events = 3;
+  /// Final outcome.
+  CompletionOutcome outcome = 4;
+  /// Unix millisecond timestamp when the run started.
+  int64 started_at_ms = 5;
+  /// Unix millisecond timestamp when the run finished.
+  int64 finished_at_ms = 6;
+  /// Typed process events (llm_call_*, tool_call_*) emitted during the run.
+  repeated ProcessEvent process_events = 7;
+  /// Serialized [`ChatOptions`] snapshot (no secrets).
+  optional string options_json = 8;
+  /// Model actually used after fallback.
+  optional string model_used = 9;
+  /// Last Responses API id when applicable.
+  optional string previous_response_id = 10;
+}
+
+enum ProcessEventKind {
+  LLM_CALL_START = 0;
+  LLM_CALL_END = 1;
+  LLM_CALL_ERROR = 2;
+  TOOL_CALL_START = 3;
+  TOOL_CALL_END = 4;
+  TOOL_ROUTE = 5;
+  REASONING_DELTA = 6;
+  VOICE_SESSION_START = 7;
+  VOICE_SESSION_END = 8;
+  VOICE_FUNCTION_CALL = 9;
+}
+
+message ProcessEvent {
+  ProcessEventKind kind = 1;
+  string request_id = 2;
+  uint32 round = 3;
+  string model = 4;
+  uint32 tool_call_count = 5;
+  optional Usage usage = 6;
+  optional double estimated_cost_usd = 7;
+  optional string error_type = 8;
+  int64 timestamp_ms = 9;
+  map<string, string> metadata = 10;
+}
+
+// ---------------------------------------------------------------------------
+// gRPC streaming
+// ---------------------------------------------------------------------------
+
+/// A single content delta from a streaming completion.
+message StreamChunk {
+  /// Token delta content (may be empty for the final usage-only chunk).
+  string delta = 1;
+  /// Token usage — present only in the final chunk when include_usage is enabled.
+  optional Usage usage = 2;
+  /// Reason the stream ended — present only in the final chunk.
+  optional string finish_reason = 3;
+  /// Reasoning/thinking delta (Anthropic extended thinking); empty `delta` when set.
+  optional string reasoning_delta = 4;
+}
+
+// ---------------------------------------------------------------------------
+// gRPC service
+// ---------------------------------------------------------------------------
+
+service SuperglueService {
+  /// Non-streaming completion with optional tool loop.
+  rpc Complete (CompletionRequest) returns (CompletionOutcome);
+  /// Server-streaming completion; yields StreamChunk deltas then a final chunk.
+  rpc Stream (CompletionRequest) returns (stream StreamChunk);
+  /// Non-streaming Responses API with optional tool loop.
+  rpc CompleteResponses (ResponsesRequest) returns (ResponsesOutcome);
+  /// Server-streaming Responses API.
+  rpc StreamResponses (ResponsesRequest) returns (stream StreamChunk);
+}

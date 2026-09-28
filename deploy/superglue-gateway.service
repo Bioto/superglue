@@ -1,0 +1,16 @@
+[Unit]
+Description=Superglue LLM gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/superglue
+EnvironmentFile=/home/ubuntu/.superglue/server.env
+ExecStart=/usr/local/bin/superglue gateway --db /home/ubuntu/superglue/superglue-gateway.db serve --addr 127.0.0.1:8080
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

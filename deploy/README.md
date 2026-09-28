@@ -1,0 +1,139 @@
+# Superglue gateway on AWS
+
+Public HTTPS LLM gateway at **https://gateway.myharn.sh**.
+
+## Architecture
+
+- Cloudflare proxies `gateway.myharn.sh` and terminates public HTTPS
+- EC2 (Ubuntu 24.04, `us-west-2`, `t3.large` / 8 GiB) + Elastic IP as the origin
+- `superglue gateway serve` on `127.0.0.1:8080` (systemd)
+- Caddy reverse-proxies with `tls internal` (Cloudflare SSL mode **Full**)
+- SQLite at `~/superglue/superglue-gateway.db`
+
+## DNS
+
+After provision, point Cloudflare at the Elastic IP (scripts print it):
+
+| Name | Type | Content | Proxy |
+|------|------|---------|-------|
+| `gateway` | A | `<Elastic IP>` | Proxied (orange cloud) |
+
+- **Cloudflare** (default for `myharn.sh`): `./deploy/setup-dns.sh` prints the record to create.
+- **Route53** (if you have a hosted zone): `./deploy/setup-dns.sh` upserts an A record (still put Cloudflare in front if you use it for TLS).
+
+Cloudflare SSL/TLS encryption mode must be **Full** (not Flexible). Full (strict) needs a Cloudflare Origin CA cert instead of Caddy `tls internal`.
+
+Ports **80** and **443** must reach the instance from Cloudflare.
+
+## Prerequisites
+
+- AWS CLI credentials for profile `mine` (override with `AWS_PROFILE`)
+- IAM permissions from [`iam-policy.json`](iam-policy.json)
+- SSH public key at `~/.ssh/default.pub` (override with `SUPERGLUE_EC2_PUBLIC_KEY`)
+- At least one provider key locally (`OPENAI_API_KEY`, etc.)
+
+## Deploy
+
+```bash
+cd projects/superglue
+./deploy/deploy.sh
+```
+
+Or step by step:
+
+```bash
+./deploy/provision-ec2.sh   # prints Elastic IP + writes ~/.superglue/ec2-instance.env
+./deploy/setup-dns.sh       # Route53 upsert, or prints manual A-record instructions
+./deploy/setup-server.sh    # build, install binary + Caddy, start services
+```
+
+Redeploy to an existing host:
+
+```bash
+SUPERGLUE_DEPLOY_REMOTE=ubuntu@<ip> ./deploy/deploy.sh
+# or
+./deploy/setup-server.sh ubuntu@<ip>
+```
+
+## Redeploy hygiene
+
+- **Preserve `GATEWAY_MASTER_KEY`** — export it before redeploy and pass the same value into `setup-server.sh` (otherwise a new key is generated and harn admin provisioning breaks until `~/.harn/server.env` is updated).
+- **Backup** `~/superglue/superglue-gateway.db` on the gateway host before wiping the instance or deleting the DB. Virtual keys in harn `auth.db` become invalid when the gateway DB is recreated.
+- **Server-to-server** — browsers still use `https://gateway.myharn.sh`. Harn calls the origin on HTTP port 80 and skips Cloudflare. Caddy allows only `SUPERGLUE_INTERNAL_ALLOW_IP` (the Harn server IP). Other `:80` clients get an HTTPS redirect.
+
+## Verify
+
+```bash
+curl -sf https://gateway.myharn.sh/health
+source ~/.superglue/gateway.env
+
+# Remote admin CLI
+superglue gateway --url "$SUPERGLUE_GATEWAY_URL" user list
+```
+
+## Create a virtual key
+
+```bash
+source ~/.superglue/gateway.env
+
+BUDGET=$(curl -sS -X POST "${SUPERGLUE_GATEWAY_URL}/v1/budgets" \
+  -H "X-Superglue-Key: Bearer ${GATEWAY_MASTER_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_budget": 50.0, "duration_sec": 2592000, "enforce": true}')
+echo "${BUDGET}"
+
+# Use budget_id from the response, then:
+curl -sS -X POST "${SUPERGLUE_GATEWAY_URL}/v1/users" \
+  -H "X-Superglue-Key: Bearer ${GATEWAY_MASTER_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d '{"user_id": "me", "alias": "Me", "budget_id": "<budget-id>"}'
+
+curl -sS -X POST "${SUPERGLUE_GATEWAY_URL}/v1/keys" \
+  -H "X-Superglue-Key: Bearer ${GATEWAY_MASTER_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "default", "user_id": "me", "allowed_models": ["openai:*", "anthropic:*"]}'
+```
+
+Store the returned plaintext key; it is shown once.
+
+## Env overrides
+
+| Variable | Default |
+|----------|---------|
+| `AWS_PROFILE` | `mine` |
+| `AWS_REGION` | `us-west-2` |
+| `SUPERGLUE_GATEWAY_DOMAIN` | `gateway.myharn.sh` |
+| `SUPERGLUE_EC2_INSTANCE_TYPE` | `t3.large` |
+| `SUPERGLUE_ROUTE53_ZONE_ID` | auto-detect `myharn.sh` |
+| `GATEWAY_MASTER_KEY` | generated if unset |
+
+## Optional LLM traffic capture
+
+Build with the `capture` feature (included in `setup-server.sh`). Set on the gateway host:
+
+```bash
+SUPERGLUE_CAPTURE_S3_BUCKET=superglue-gateway-capture
+AWS_REGION=us-west-2
+```
+
+Create the bucket once (example lifecycle: transition to Glacier after 30 days):
+
+```bash
+aws s3api create-bucket --bucket superglue-gateway-capture --region us-west-2 \
+  --create-bucket-configuration LocationConstraint=us-west-2
+aws s3api put-bucket-lifecycle-configuration --bucket superglue-gateway-capture \
+  --lifecycle-configuration '{
+    "Rules": [{
+      "ID": "archive-old-capture",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "gateway-capture/"},
+      "Transitions": [{"Days": 30, "StorageClass": "GLACIER"}]
+    }]
+  }'
+```
+
+Attach the EC2 instance profile with `SuperglueGatewayCaptureUpload` and `SuperglueGatewayCaptureRead*` from [`iam-policy.json`](iam-policy.json).
+
+Captured traffic is gzip NDJSON under `gateway-capture/dt=YYYY-MM-DD/hour=HH/` in the bucket. Browse it at `https://gateway.myharn.sh/admin` (**Capture**) or through the gateway admin API (`GET /v1/capture/status`, `/v1/capture/records`, `/v1/capture/records/{request_id}`). Redeploy with `--features gateway,capture` after upgrading to pick up the admin endpoints.
+
+Use `SUPERGLUE_CAPTURE_EXCLUDE_USERS` to skip specific gateway user ids.

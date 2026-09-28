@@ -1,0 +1,7 @@
+/target/
+*.pdb
+.venv-proto/
+*.db
+*.db-shm
+*.db-wal
+
