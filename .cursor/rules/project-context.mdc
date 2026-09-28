@@ -33,7 +33,7 @@ API or tool-boundary changes require updates in:
 | Feature | Purpose |
 |---------|---------|
 | `grpc` | gRPC server/client |
-| `otlp` | OpenTelemetry export |
+| `otlp` | OpenTelemetry export with OpenInference span attributes |
 | `prometheus` | Metrics endpoint |
 | `realtime` | Provider-agnostic realtime voice sessions (xAI WebSocket first) |
 

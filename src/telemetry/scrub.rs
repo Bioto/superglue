@@ -13,9 +13,9 @@
 //!
 //! Non-sensitive fields always pass through unchanged.
 //!
-//! **Note**: this only scrubs the *fmt* (console / JSON) output layer. For OTLP spans the
-//! sensitive attributes must be removed in a custom `SpanExporter` wrapper or Collector
-//! processor.
+//! OpenInference span attributes use the same [`ScrubMode`]. See
+//! [`crate::telemetry::openinference`]. The mode is copied when [`crate::telemetry::init_tracing`]
+//! runs. Default is [`ScrubMode::Redact`].
 
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;

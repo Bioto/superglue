@@ -7,6 +7,8 @@
 //! - Optionally (when compiled with the `otlp` feature) an OpenTelemetry OTLP
 //!   layer that exports spans to a collector
 //!   (configure via [`TelemetryConfig::otlp_endpoint`]).
+//!   Those spans use [OpenInference](https://github.com/Arize-ai/openinference)
+//!   attribute names. See [`openinference`].
 //!
 //! [`metrics`] initialisation is handled separately via [`metrics::init_metrics`].
 //!
@@ -38,6 +40,7 @@
 //! ```
 
 pub mod metrics;
+pub mod openinference;
 pub mod scrub;
 
 use std::{
@@ -134,6 +137,7 @@ pub fn init_tracing(config: TelemetryConfig) {
 /// The file writer opens the path for each event. This keeps log rotation owned by
 /// the host process and avoids retaining a handle across a rotation.
 pub fn init_tracing_with_file(config: TelemetryConfig, log_path: Option<PathBuf>) {
+    openinference::set_payload_scrub(config.scrub_mode);
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.log_level));
 

@@ -216,6 +216,10 @@ impl GuardrailRegistry {
         stage: GuardrailStage,
         initial: &str,
     ) -> (GuardrailOutcome, String) {
+        if configs.is_empty() {
+            return (GuardrailOutcome::Allow(initial.to_string()), String::new());
+        }
+        let guard = crate::telemetry::openinference::GuardSpan::begin(stage.as_str(), initial);
         let mut current = initial.to_string();
         for cfg in configs {
             match cfg.handler.check(stage.clone(), &current).await {
@@ -223,10 +227,12 @@ impl GuardrailRegistry {
                     current = transformed;
                 }
                 GuardrailOutcome::Block(reason) => {
+                    guard.finish(&reason, true);
                     return (GuardrailOutcome::Block(reason), cfg.name.clone());
                 }
             }
         }
+        guard.finish(&current, false);
         (GuardrailOutcome::Allow(current), String::new())
     }
 }

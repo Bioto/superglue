@@ -268,9 +268,16 @@ impl AgentEngine {
         base_options: &ChatOptions,
     ) -> Result<CompletionOutcome, ChatError> {
         use crate::openai::ChatMessage;
-        let opts = self.effective_options(base_options);
-        let messages = vec![ChatMessage::text("user", user_message.into())];
-        complete_with_tools(
+        let user_message = user_message.into();
+        let mut opts = self.effective_options(base_options);
+        if opts.request_id.is_none() {
+            opts.request_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        let session_id = opts.request_id.clone().unwrap_or_default();
+        crate::telemetry::openinference::tag_agent(&self.spec.name, &session_id);
+        crate::telemetry::openinference::set_input_text(&user_message);
+        let messages = vec![ChatMessage::text("user", user_message)];
+        let outcome = complete_with_tools(
             http,
             registry,
             &self.hooks,
@@ -278,7 +285,9 @@ impl AgentEngine {
             messages,
             &opts,
         )
-        .await
+        .await?;
+        crate::telemetry::openinference::set_output_text(outcome.content.as_deref().unwrap_or(""));
+        Ok(outcome)
     }
 
     /// Run a streaming completion (no tool loop).
@@ -302,9 +311,16 @@ impl AgentEngine {
         F: FnMut(String) + Send,
     {
         use crate::openai::ChatMessage;
-        let opts = self.effective_options(base_options);
-        let messages = vec![ChatMessage::text("user", user_message.into())];
-        stream_complete(
+        let user_message = user_message.into();
+        let mut opts = self.effective_options(base_options);
+        if opts.request_id.is_none() {
+            opts.request_id = Some(uuid::Uuid::new_v4().to_string());
+        }
+        let session_id = opts.request_id.clone().unwrap_or_default();
+        crate::telemetry::openinference::tag_agent(&self.spec.name, &session_id);
+        crate::telemetry::openinference::set_input_text(&user_message);
+        let messages = vec![ChatMessage::text("user", user_message)];
+        let outcome = stream_complete(
             http,
             &self.hooks,
             &self.guardrails,
@@ -312,7 +328,9 @@ impl AgentEngine {
             &opts,
             on_delta,
         )
-        .await
+        .await?;
+        crate::telemetry::openinference::set_output_text(&outcome.content);
+        Ok(outcome)
     }
 }
 

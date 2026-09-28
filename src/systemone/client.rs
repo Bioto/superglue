@@ -106,6 +106,7 @@ pub async fn system_one(
     let questions = request.questions.len();
     tracing::Span::current().record("model", tracing::field::display(&model));
     tracing::Span::current().record("request_id", tracing::field::display(&request_id));
+    crate::telemetry::openinference::tag_llm(&request_id, &model, "typesafe");
     metrics::counter!(crate::telemetry::metrics::SYSTEM_ONE_TOTAL, "model" => model.clone())
         .increment(1);
     tracing::info!(
@@ -130,6 +131,7 @@ pub async fn system_one(
                 elapsed_ms,
                 "system_one finished"
             );
+            crate::telemetry::openinference::set_usage(&response.usage.to_proto());
             Ok(response)
         }
         Err(err) => {
@@ -150,6 +152,7 @@ pub async fn system_one(
                 error = %err,
                 "system_one failed"
             );
+            crate::telemetry::openinference::fail_current(&err.to_string());
             Err(err)
         }
     }

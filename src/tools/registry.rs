@@ -107,16 +107,23 @@ impl ToolRegistry {
     /// Invoke a tool by name.
     #[instrument(skip(self, arguments), fields(tool = name))]
     pub async fn invoke(&self, name: &str, arguments: Value) -> Result<Value, ToolInvokeError> {
+        crate::telemetry::openinference::tag_tool("", name, "", &arguments.to_string());
         let tool = {
             let map = self.tools.read().await;
             map.get(name).map(|(t, _)| Arc::clone(t))
         };
         let Some(tool) = tool else {
+            crate::telemetry::openinference::fail_current("unknown tool");
             return Err(ToolInvokeError::UnknownTool {
                 name: name.to_string(),
             });
         };
-        tool.call(arguments).await
+        let result = tool.call(arguments).await;
+        match &result {
+            Ok(value) => crate::telemetry::openinference::set_output_json(&value.to_string()),
+            Err(err) => crate::telemetry::openinference::fail_current(&err.to_string()),
+        }
+        result
     }
 }
 

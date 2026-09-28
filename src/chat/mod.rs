@@ -812,6 +812,127 @@ pub(crate) async fn post_json_cancellable(
     }
 }
 
+fn last_user_text(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+        .and_then(|message| message.content.as_ref())
+        .map(MessageContent::text_for_summary)
+        .unwrap_or_default()
+}
+
+fn oi_params(options: &ChatOptions) -> crate::telemetry::openinference::InvocationParams<'_> {
+    crate::telemetry::openinference::InvocationParams {
+        temperature: options.temperature,
+        top_p: options.top_p,
+        max_completion_tokens: options.max_completion_tokens,
+        reasoning_effort: options.reasoning_effort.as_deref(),
+        seed: options.seed,
+    }
+}
+
+fn finish_llm_chat(
+    llm: &crate::telemetry::openinference::LlmSpan,
+    provider: &dyn crate::providers::LlmProvider,
+    model_ref: &crate::providers::ModelRef,
+    body: &Value,
+) {
+    #[cfg(feature = "otlp")]
+    {
+        match provider.parse_chat_response(body) {
+            Ok(normalized) => {
+                let output = ChatMessage {
+                    role: "assistant".to_string(),
+                    content: normalized.content.clone().map(MessageContent::Text),
+                    tool_calls: if normalized.tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(normalized.tool_calls.clone())
+                    },
+                    tool_call_id: None,
+                    name: None,
+                    refusal: None,
+                    provider_blocks: None,
+                };
+                llm.finish(&crate::telemetry::openinference::LlmFinish {
+                    model_name: &model_ref.model,
+                    provider: model_ref.provider.as_str(),
+                    finish_reason: normalized.finish_reason.as_deref(),
+                    usage: normalized.usage.as_ref(),
+                    output: &output,
+                });
+            }
+            Err(err) => llm.fail(&err.to_string()),
+        }
+    }
+    #[cfg(not(feature = "otlp"))]
+    {
+        let _ = (llm, provider, model_ref, body);
+    }
+}
+
+fn finish_llm_round(
+    llm: &crate::telemetry::openinference::LlmSpan,
+    model_ref: &crate::providers::ModelRef,
+    content: &str,
+    tool_calls: &[ToolCall],
+    finish_reason: Option<&str>,
+    usage: Option<&proto::Usage>,
+) {
+    #[cfg(feature = "otlp")]
+    {
+        let output = ChatMessage {
+            role: "assistant".to_string(),
+            content: if content.is_empty() {
+                None
+            } else {
+                Some(MessageContent::Text(content.to_string()))
+            },
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls.to_vec())
+            },
+            tool_call_id: None,
+            name: None,
+            refusal: None,
+            provider_blocks: None,
+        };
+        llm.finish(&crate::telemetry::openinference::LlmFinish {
+            model_name: &model_ref.model,
+            provider: model_ref.provider.as_str(),
+            finish_reason,
+            usage,
+            output: &output,
+        });
+    }
+    #[cfg(not(feature = "otlp"))]
+    {
+        let _ = (llm, model_ref, content, tool_calls, finish_reason, usage);
+    }
+}
+
+fn begin_llm<'a>(
+    session_id: &'a str,
+    model_name: &'a str,
+    provider: &'a str,
+    messages: &'a [ChatMessage],
+    tools: Option<&'a [crate::tools::ToolSpec]>,
+    params: &'a crate::telemetry::openinference::InvocationParams<'a>,
+) -> crate::telemetry::openinference::LlmSpan {
+    crate::telemetry::openinference::LlmSpan::begin_chat(
+        &crate::telemetry::openinference::LlmStart {
+            session_id,
+            model_name,
+            provider,
+            messages,
+            tools,
+            params,
+        },
+    )
+}
+
 /// POST via provider adapter with per-model HTTP retries and optional model fallback chain.
 pub(crate) async fn provider_chat_post(
     http: &HttpClient,
@@ -866,6 +987,15 @@ pub(crate) async fn provider_chat_post(
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
+        let params = oi_params(options);
+        let llm = begin_llm(
+            request_id,
+            &model_ref.model,
+            model_ref.provider.as_str(),
+            messages,
+            tool_specs,
+            &params,
+        );
 
         match post_json_cancellable(
             http,
@@ -877,8 +1007,12 @@ pub(crate) async fn provider_chat_post(
         )
         .await
         {
-            Ok(v) => return Ok((v, model_ref)),
+            Ok(v) => {
+                finish_llm_chat(&llm, provider.as_ref(), &model_ref, &v);
+                return Ok((v, model_ref));
+            }
             Err(e) => {
+                llm.fail(&e.to_string());
                 if i + 1 < models.len()
                     && crate::fallback::chat_error_eligible_for_fallback(&e, policy)
                 {
@@ -1199,6 +1333,12 @@ pub(crate) async fn dispatch_one(
         code_allowlist,
     } = ctx;
     let tool_name = tc.function.name.clone();
+    crate::telemetry::openinference::tag_tool(
+        request_id,
+        &tool_name,
+        &tc.id,
+        tc.function.arguments.trim(),
+    );
     if emit_start && let Some(emitter) = status_emitter {
         let mut ev = ProcessEvent::new(ProcessEventKind::ToolCallStart, request_id, model);
         ev.round = round;
@@ -1432,6 +1572,11 @@ pub(crate) async fn dispatch_one(
         emit_safe(Some(emitter), ev).await;
     }
 
+    match &exec_result {
+        Ok(content) => crate::telemetry::openinference::set_output_text(content),
+        Err(err) => crate::telemetry::openinference::fail_current(&err.to_string()),
+    }
+
     let content = truncate_tool_result(exec_result?, tool_result_max_chars);
     Ok(ChatMessage {
         role: "tool".to_string(),
@@ -1476,6 +1621,7 @@ pub async fn complete_with_tools(
         model = %options.model,
         "complete_with_tools started"
     );
+    crate::telemetry::openinference::tag_chain(&request_id);
     metrics::counter!(crate::telemetry::metrics::COMPLETIONS_TOTAL, "model" => options.model.clone()).increment(1);
 
     let credentials = credentials_for(options);
@@ -1484,6 +1630,7 @@ pub async fn complete_with_tools(
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(caller_messages.len() + 1);
     let injected_prefix = prepend_system_messages(options, &mut messages);
     messages.extend(caller_messages);
+    crate::telemetry::openinference::set_input_text(&last_user_text(&messages));
 
     // --- Input guardrails: run on the last user message before first LLM call ---
     if !guardrails.input_is_empty().await {
@@ -2053,6 +2200,7 @@ pub async fn complete_with_tools(
         elapsed_ms,
         "complete_with_tools finished"
     );
+    crate::telemetry::openinference::set_output_text(outcome.content.as_deref().unwrap_or(""));
 
     Ok(outcome)
 }
@@ -2105,10 +2253,12 @@ where
         model = %options.model,
         "stream_complete started"
     );
+    crate::telemetry::openinference::tag_chain(&request_id);
 
     let mut full_messages: Vec<ChatMessage> = Vec::with_capacity(messages.len() + 1);
     let _injected_prefix = prepend_system_messages(options, &mut full_messages);
     full_messages.extend(messages);
+    crate::telemetry::openinference::set_input_text(&last_user_text(&full_messages));
 
     // --- Input guardrails ---
     if !guardrails.input_is_empty().await {
@@ -2185,14 +2335,30 @@ where
 
     tracing::debug!(%provider_req.url, "stream_complete POST (SSE)");
 
-    let mut byte_stream = http
+    let params = oi_params(options);
+    let llm = begin_llm(
+        &request_id,
+        &model_ref.model,
+        model_ref.provider.as_str(),
+        &full_messages,
+        None,
+        &params,
+    );
+    let mut byte_stream = match http
         .post_json_stream_with_headers(
             &provider_req.url,
             &provider_req.body,
             &header_refs,
             Some(provider_req.rate_limit_key),
         )
-        .await?;
+        .await
+    {
+        Ok(stream) => stream,
+        Err(err) => {
+            llm.fail(&err.to_string());
+            return Err(ChatError::Http(err));
+        }
+    };
     tracing::debug!("stream_complete connection established, reading SSE chunks");
 
     let mut parser = SseParser::new();
@@ -2289,6 +2455,15 @@ where
         }
     }
 
+    finish_llm_round(
+        &llm,
+        &model_ref,
+        &outcome.content,
+        &[],
+        outcome.finish_reason.as_deref(),
+        outcome.usage.as_ref(),
+    );
+
     // --- Output guardrails (no retry for streaming) ---
     if !guardrails.output_is_empty().await {
         let (out_outcome, guard_name) = guardrails.run_output(&outcome.content).await;
@@ -2318,6 +2493,7 @@ where
         elapsed_ms,
         "stream_complete finished"
     );
+    crate::telemetry::openinference::set_output_text(&outcome.content);
 
     Ok(outcome)
 }
@@ -2407,12 +2583,14 @@ where
         model = %options.model,
         "stream_complete_with_tools started"
     );
+    crate::telemetry::openinference::tag_chain(&request_id);
 
     let credentials = credentials_for(options);
 
     let mut messages: Vec<ChatMessage> = Vec::with_capacity(caller_messages.len() + 1);
     let injected_prefix = prepend_system_messages(options, &mut messages);
     messages.extend(caller_messages);
+    crate::telemetry::openinference::set_input_text(&last_user_text(&messages));
 
     if !guardrails.input_is_empty().await {
         let last_user = messages
@@ -2524,6 +2702,16 @@ where
         let request_messages = messages_with_volatile_suffix(options, &messages);
         notify_llm_payload(options, api_calls, &request_id, &request_messages);
 
+        let requested = crate::providers::parse_model_ref(&options.model);
+        let params = oi_params(options);
+        let llm = begin_llm(
+            &request_id,
+            &requested.model,
+            requested.provider.as_str(),
+            &request_messages,
+            tool_specs,
+            &params,
+        );
         let (mut byte_stream, model_ref) = match provider_chat_stream(
             http,
             &credentials,
@@ -2538,6 +2726,7 @@ where
         {
             Ok(stream) => stream,
             Err(e) => {
+                llm.fail(&e.to_string());
                 if should_retry_stalled_stream_round(&e, stall_retries, "", false) {
                     stall_retries += 1;
                     api_calls = api_calls.saturating_sub(1);
@@ -2797,6 +2986,14 @@ where
                 provider_blocks: None,
             }
         };
+        finish_llm_round(
+            &llm,
+            &model_ref,
+            &round.content,
+            &round.tool_calls,
+            round.finish_reason.as_deref(),
+            round.usage.as_ref(),
+        );
 
         let tool_call_count = round
             .tool_calls
@@ -3067,6 +3264,7 @@ where
             elapsed_ms,
             "stream_complete_with_tools finished"
         );
+        crate::telemetry::openinference::set_output_text(&outcome.content);
         return Ok(outcome);
     }
 }
