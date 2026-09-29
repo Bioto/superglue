@@ -336,20 +336,27 @@ async fn malformed_tool_args_returns_error_to_model_not_turn_failure() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn unknown_tool_returns_tool_error() {
+async fn unknown_tool_returns_error_to_model() {
+    let hits = Arc::new(AtomicU32::new(0));
+    let hits_for_mock = Arc::clone(&hits);
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(tool_call_response("nonexistent_tool", "{}")),
-        )
+        .respond_with(move |_req: &wiremock::Request| {
+            let n = hits_for_mock.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                ResponseTemplate::new(200).set_body_json(tool_call_response("not_a_tool", "{}"))
+            } else {
+                ResponseTemplate::new(200).set_body_json(text_response("recovered"))
+            }
+        })
         .mount(&server)
         .await;
 
     let http = HttpClient::new(ClientConfig::default()).unwrap();
-    // Registry is empty — no tools registered
     let reg = ToolRegistry::new();
-    let err = complete_with_tools(
+    reg.register(Arc::new(EchoTool)).await.unwrap();
+    let outcome = complete_with_tools(
         &http,
         &reg,
         &HookRegistry::new(),
@@ -358,14 +365,25 @@ async fn unknown_tool_returns_tool_error() {
         &default_opts(server.uri()),
     )
     .await
-    .unwrap_err();
+    .expect("unknown tool must not end the turn");
+
+    assert_eq!(outcome.content.as_deref(), Some("recovered"));
     assert!(
-        matches!(
-            err.root_cause(),
-            ChatError::Tool(ToolInvokeError::UnknownTool { .. })
-        ),
-        "got {err:?}"
+        hits.load(Ordering::SeqCst) >= 2,
+        "the model must get another round"
     );
+    let tool_text = outcome
+        .messages
+        .iter()
+        .find(|message| message.role == "tool")
+        .and_then(|message| message.content.as_ref())
+        .and_then(|content| content.as_text())
+        .unwrap_or("");
+    assert!(
+        tool_text.contains("unknown tool: not_a_tool"),
+        "got {tool_text}"
+    );
+    assert!(tool_text.contains("echo"), "got {tool_text}");
 }
 
 // ---------------------------------------------------------------------------

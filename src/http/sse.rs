@@ -1,6 +1,11 @@
 //! Minimal Server-Sent Events (SSE) framing parser for LLM-style streams.
 
+use std::time::{Duration, Instant};
+
 use crate::http::error::Error;
+
+/// Wait this long for `[DONE]` after a terminal chunk when the socket stays open.
+const STREAM_TAIL_GRACE: Duration = Duration::from_secs(1);
 
 /// One SSE event after a blank line delimiter.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,10 +83,98 @@ impl SseParser {
         }
         Ok(Some(SseEvent { event, id, data }))
     }
+
+    /// True when the unfinished buffer is blank or only SSE comment lines.
+    fn partial_is_heartbeat(&self) -> bool {
+        let buf = self.buf.trim_start_matches(['\r', '\n']);
+        buf.split('\n').all(|line| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            line.is_empty() || line.starts_with(':')
+        })
+    }
+}
+
+impl SseEvent {
+    fn is_empty_heartbeat(&self) -> bool {
+        self.event.is_none() && self.id.is_none() && self.data.trim().is_empty()
+    }
+}
+
+/// What to do with one SSE chunk after heartbeats are separated from model bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatAction {
+    /// The chunk has model data. Parse `events`.
+    Model,
+    /// Provider heartbeat. Keep reading.
+    Ignore,
+    /// A terminal chunk was already seen, and only heartbeats followed.
+    Finish,
+    /// No model bytes arrived within the idle window.
+    Stall,
+}
+
+/// Idle clock that provider comment keepalives must not reset.
+///
+/// OpenRouter sends `: OPENROUTER PROCESSING` while a model is queued or silent.
+/// Those bytes keep the socket idle timer alive. This clock moves only on model data.
+#[derive(Debug)]
+pub struct HeartbeatWatch {
+    idle: Duration,
+    tail: Duration,
+    last_progress: Instant,
+}
+
+impl HeartbeatWatch {
+    /// `idle` is the configured stream idle timeout.
+    #[must_use]
+    pub fn new(idle: Duration) -> Self {
+        Self::with_tail(idle, STREAM_TAIL_GRACE)
+    }
+
+    #[must_use]
+    pub fn with_tail(idle: Duration, tail: Duration) -> Self {
+        Self {
+            idle,
+            tail,
+            last_progress: Instant::now(),
+        }
+    }
+
+    /// Classify `events` from the latest chunk.
+    ///
+    /// `saw_terminal` is true when an earlier chunk already carried a finish signal.
+    pub fn observe(
+        &mut self,
+        parser: &SseParser,
+        events: &[SseEvent],
+        saw_terminal: bool,
+    ) -> HeartbeatAction {
+        if !is_heartbeat_chunk(parser, events) {
+            self.last_progress = Instant::now();
+            return HeartbeatAction::Model;
+        }
+        let limit = if saw_terminal { self.tail } else { self.idle };
+        if self.last_progress.elapsed() >= limit {
+            if saw_terminal {
+                HeartbeatAction::Finish
+            } else {
+                HeartbeatAction::Stall
+            }
+        } else {
+            HeartbeatAction::Ignore
+        }
+    }
+}
+
+/// True when this chunk is only SSE comments, blank events, or an unfinished comment.
+pub fn is_heartbeat_chunk(parser: &SseParser, events: &[SseEvent]) -> bool {
+    events.iter().all(SseEvent::is_empty_heartbeat) && parser.partial_is_heartbeat()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -121,6 +214,67 @@ mod tests {
         let final_event = p.push_str("\n\n").unwrap();
         assert_eq!(final_event.len(), 1);
         assert_eq!(final_event[0].data, "three");
+    }
+
+    #[tokio::test]
+    async fn a_split_comment_does_not_reset_idle() {
+        let mut parser = SseParser::new();
+        let mut watch =
+            HeartbeatWatch::with_tail(Duration::from_millis(50), Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let events = parser.push_str(": OPEN").unwrap();
+        assert_eq!(
+            watch.observe(&parser, &events, false),
+            HeartbeatAction::Ignore
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let events = parser.push_str("ROUTER PROCESSING\n\n").unwrap();
+        assert_eq!(
+            watch.observe(&parser, &events, false),
+            HeartbeatAction::Stall
+        );
+    }
+
+    #[tokio::test]
+    async fn model_bytes_reset_the_idle_window() {
+        let mut parser = SseParser::new();
+        let mut watch =
+            HeartbeatWatch::with_tail(Duration::from_millis(50), Duration::from_secs(5));
+        let partial = parser.push_str("data: {\"a\"").unwrap();
+        assert_eq!(
+            watch.observe(&parser, &partial, false),
+            HeartbeatAction::Model
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let events = parser.push_str("\":1}\n\n").unwrap();
+        assert_eq!(
+            watch.observe(&parser, &events, false),
+            HeartbeatAction::Model
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let events = parser.push_str(": OPENROUTER PROCESSING\n\n").unwrap();
+        assert_eq!(
+            watch.observe(&parser, &events, false),
+            HeartbeatAction::Ignore
+        );
+    }
+
+    #[tokio::test]
+    async fn comments_after_a_terminal_chunk_finish_the_stream() {
+        let mut parser = SseParser::new();
+        let mut watch =
+            HeartbeatWatch::with_tail(Duration::from_secs(5), Duration::from_millis(30));
+        let events = parser.push_str("data: {\"choices\":[]}\n\n").unwrap();
+        assert_eq!(
+            watch.observe(&parser, &events, false),
+            HeartbeatAction::Model
+        );
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let events = parser.push_str(": OPENROUTER PROCESSING\n\n").unwrap();
+        assert_eq!(
+            watch.observe(&parser, &events, true),
+            HeartbeatAction::Finish
+        );
     }
 
     #[test]

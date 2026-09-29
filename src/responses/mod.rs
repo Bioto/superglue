@@ -23,7 +23,10 @@ use crate::costing::apply_resolved_cost_usd;
 use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
 use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookRegistry, HookStage};
-use crate::http::{HttpClient, sse::SseParser};
+use crate::http::{
+    HttpClient,
+    sse::{HeartbeatAction, HeartbeatWatch, SseParser},
+};
 use crate::openai::ChatCompletionChunk;
 use crate::openai::{
     ChatMessage, ContentPart, FunctionCall, ImageDetail, MessageContent, ToolCall, ToolChoice,
@@ -1365,6 +1368,13 @@ fn should_retry_responses_stalled_round(
         )
 }
 
+fn heartbeat_timeout() -> crate::http::Error {
+    tracing::warn!("LLM stream heartbeats carried no model tokens");
+    crate::http::Error::StreamTimeout {
+        phase: crate::http::StreamTimeoutPhase::Idle,
+    }
+}
+
 fn http_stream_fail(
     err: crate::http::Error,
     stall_retries: u32,
@@ -1873,6 +1883,7 @@ where
         if model_ref.provider == crate::providers::ProviderId::Anthropic {
             let mut acc = crate::providers::anthropic_stream::AnthropicStreamAccumulator::new();
             let mut parser = SseParser::new();
+            let mut progress = HeartbeatWatch::new(http.config.stream_idle_timeout);
             futures_util::pin_mut!(stream);
             while let Some(chunk) = stream.next().await {
                 if let Some(token) = &options.cancel
@@ -1889,6 +1900,17 @@ where
                     Ok(events) => events,
                     Err(e) => return http_stream_fail(e, stall_retries, &round_state),
                 };
+                match progress.observe(&parser, &events, round_state.terminal) {
+                    HeartbeatAction::Ignore => continue,
+                    HeartbeatAction::Finish => {
+                        round_state.terminal = true;
+                        break;
+                    }
+                    HeartbeatAction::Stall => {
+                        return http_stream_fail(heartbeat_timeout(), stall_retries, &round_state);
+                    }
+                    HeartbeatAction::Model => {}
+                }
                 for event in events {
                     let data = event.data.trim();
                     if data.is_empty() {
@@ -1936,6 +1958,7 @@ where
         }
 
         let mut parser = SseParser::new();
+        let mut progress = HeartbeatWatch::new(http.config.stream_idle_timeout);
 
         futures_util::pin_mut!(stream);
         while let Some(chunk) = stream.next().await {
@@ -1953,6 +1976,18 @@ where
                 Ok(events) => events,
                 Err(e) => return http_stream_fail(e, stall_retries, &round_state),
             };
+            let saw_terminal = round_state.terminal || round_state.chat_finish_reason.is_some();
+            match progress.observe(&parser, &events, saw_terminal) {
+                HeartbeatAction::Ignore => continue,
+                HeartbeatAction::Finish => {
+                    round_state.terminal = true;
+                    break;
+                }
+                HeartbeatAction::Stall => {
+                    return http_stream_fail(heartbeat_timeout(), stall_retries, &round_state);
+                }
+                HeartbeatAction::Model => {}
+            }
             for event in events {
                 let data = event.data.trim();
                 if data.is_empty() {

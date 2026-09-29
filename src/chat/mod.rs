@@ -41,7 +41,10 @@ use crate::costing::apply_resolved_cost_usd;
 use crate::events::{ProcessEvent, ProcessEventKind, StatusEmitter, emit_safe};
 use crate::guardrails::{GuardrailError, GuardrailOutcome, GuardrailRegistry, GuardrailStage};
 use crate::hooks::{HookContext, HookError, HookRegistry, HookStage};
-use crate::http::{Error as HttpError, HttpClient, sse::SseParser};
+use crate::http::{
+    Error as HttpError, HttpClient,
+    sse::{HeartbeatAction, HeartbeatWatch, SseParser},
+};
 use crate::openai::{
     ChatCompletionChunk, ChatMessage, MessageContent, ResponseFormat, StopSequence, ToolCall,
     ToolChoice,
@@ -1306,6 +1309,22 @@ pub(crate) struct DispatchCtx<'a> {
     pub code_allowlist: Option<Arc<HashSet<String>>>,
 }
 
+/// Names the model may call. The list is sorted and capped so a bad call stays small.
+async fn available_tool_names(registry: &ToolRegistry) -> String {
+    const MAX_NAMES: usize = 32;
+    let specs = registry.list_specs().await;
+    let mut names: Vec<&str> = specs.iter().map(|spec| spec.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return "(none)".to_string();
+    }
+    if names.len() <= MAX_NAMES {
+        return names.join(", ");
+    }
+    format!("{}, …", names[..MAX_NAMES].join(", "))
+}
+
 /// Dispatch a single `"function"` tool call through the full pre/post hook pipeline.
 ///
 /// Returns the [`ChatMessage`] with `role="tool"` that should be appended to the
@@ -1461,10 +1480,21 @@ pub(crate) async fn dispatch_one(
             }
         }
 
-        let (tool, policy) = registry
-            .resolve_invocation(&tc.function.name)
-            .await
-            .map_err(ChatError::Tool)?;
+        let (tool, policy) = match registry.resolve_invocation(&tc.function.name).await {
+            Ok(pair) => pair,
+            Err(ToolInvokeError::UnknownTool { name }) => {
+                let available = available_tool_names(registry).await;
+                tracing::warn!(
+                    tool = %name,
+                    "unknown tool; the model can choose another tool"
+                );
+                return Ok(serde_json::to_string(&json!({
+                    "ok": false,
+                    "error": format!("unknown tool: {name}. Available tools: {available}"),
+                }))?);
+            }
+            Err(err) => return Err(ChatError::Tool(err)),
+        };
 
         if let Some(guard) = loop_guard {
             let mut g = guard.lock().await;
@@ -2362,6 +2392,7 @@ where
     tracing::debug!("stream_complete connection established, reading SSE chunks");
 
     let mut parser = SseParser::new();
+    let mut progress = HeartbeatWatch::new(http.config.stream_idle_timeout);
     let mut outcome = StreamOutcome {
         content: String::new(),
         finish_reason: None,
@@ -2391,6 +2422,12 @@ where
         let events = parser
             .push_str(&text)
             .map_err(|e| ChatError::Http(HttpError::InvalidJson(e.to_string())))?;
+        match progress.observe(&parser, &events, outcome.finish_reason.is_some()) {
+            HeartbeatAction::Ignore => continue,
+            HeartbeatAction::Finish => break,
+            HeartbeatAction::Stall => return Err(heartbeat_stall()),
+            HeartbeatAction::Model => {}
+        }
 
         for event in events {
             event_count += 1;
@@ -2521,6 +2558,13 @@ fn push_early_stream_tool<'a>(
         let msg = dispatch_one(&tc, ctx).await?;
         Ok((tool_id, msg))
     }));
+}
+
+fn heartbeat_stall() -> ChatError {
+    tracing::warn!("LLM stream heartbeats carried no model tokens");
+    ChatError::Http(HttpError::StreamTimeout {
+        phase: crate::http::StreamTimeoutPhase::Idle,
+    })
 }
 
 async fn emit_reasoning_delta(
@@ -2747,6 +2791,7 @@ where
         let is_anthropic = model_ref.provider == crate::providers::ProviderId::Anthropic;
 
         let mut parser = SseParser::new();
+        let mut progress = HeartbeatWatch::new(http.config.stream_idle_timeout);
         let mut round_content = String::new();
         let mut tool_dispatch = stream_tools::StreamingToolDispatch::new();
         let mut completed_tools: BTreeMap<String, ChatMessage> = BTreeMap::new();
@@ -2846,6 +2891,36 @@ where
                                 injected_prefix,
                             )
                         })?;
+                    match progress.observe(&parser, &events, round_finish.is_some()) {
+                        HeartbeatAction::Ignore => continue,
+                        HeartbeatAction::Finish => {
+                            stream_done = true;
+                            continue;
+                        }
+                        HeartbeatAction::Stall => {
+                            let chat_err = heartbeat_stall();
+                            let tools_started = !completed_tools.is_empty()
+                                || !dispatched_tool_ids.is_empty()
+                                || !in_flight.is_empty();
+                            if should_retry_stalled_stream_round(
+                                &chat_err,
+                                stall_retries,
+                                &round_content,
+                                tools_started,
+                            ) {
+                                retry_stalled_round = true;
+                                stream_done = true;
+                            } else {
+                                return Err(fail_partial(
+                                    chat_err,
+                                    &messages,
+                                    injected_prefix,
+                                ));
+                            }
+                            continue;
+                        }
+                        HeartbeatAction::Model => {}
+                    }
 
                     for event in events {
                         if event.event.as_deref() == Some("error") {
