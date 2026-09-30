@@ -17,6 +17,7 @@ pub(crate) use context_ops::{
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -2595,6 +2596,13 @@ pub struct StreamToolOutcome {
     pub messages: Vec<ChatMessage>,
 }
 
+/// Messages supplied after a complete tool round and before the next model call.
+pub type RoundBoundary = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<ChatMessage>, ChatError>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// Stream a chat completion with multi-round tool execution (SSE).
 ///
 /// Text deltas are forwarded to `on_delta`. Reasoning text goes to
@@ -2610,8 +2618,38 @@ pub async fn stream_complete_with_tools<FO, FR>(
     guardrails: &GuardrailRegistry,
     caller_messages: Vec<ChatMessage>,
     options: &ChatOptions,
+    on_delta: FO,
+    on_reasoning_delta: FR,
+) -> Result<StreamToolOutcome, ChatError>
+where
+    FO: FnMut(String) + Send,
+    FR: FnMut(String) + Send,
+{
+    stream_complete_with_tools_at_boundary(
+        http,
+        registry,
+        hooks,
+        guardrails,
+        caller_messages,
+        options,
+        on_delta,
+        on_reasoning_delta,
+        None,
+    )
+    .await
+}
+
+/// Stream a tool loop and allow bounded messages at each safe round boundary.
+pub async fn stream_complete_with_tools_at_boundary<FO, FR>(
+    http: &HttpClient,
+    registry: &ToolRegistry,
+    hooks: &HookRegistry,
+    guardrails: &GuardrailRegistry,
+    caller_messages: Vec<ChatMessage>,
+    options: &ChatOptions,
     mut on_delta: FO,
     mut on_reasoning_delta: FR,
+    round_boundary: Option<RoundBoundary>,
 ) -> Result<StreamToolOutcome, ChatError>
 where
     FO: FnMut(String) + Send,
@@ -3291,6 +3329,10 @@ where
                     options.context_block_provider.as_ref(),
                     options.context_event_logger.as_ref(),
                 );
+            }
+            if let Some(boundary) = &round_boundary {
+                let injected = boundary().await?;
+                messages.extend(injected);
             }
             continue;
         }
